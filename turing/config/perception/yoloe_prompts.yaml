@@ -1,0 +1,13 @@
+adapter_id: yoloe
+prompts:
+  - dirt_path
+  - gravel
+  - grass
+  - sky
+  - person
+  - vehicle
+  - rock
+  - water
+  - fence
+  - tree
+  - vegetation

@@ -28,11 +28,11 @@ The difficulty hierarchy is calibrated so that **Dev 1 (AI & Vision) is higher i
 
 | Dev | Functional Domain | Architecture Package Ownership | Workload | Difficulty | Core Product Deliverables |
 |---|---|---|:---:|:---:|---|
-| **Dev 1** | **Perception, AI & Vision** | `ugv_perception/`<br>`config/perception/`<br>`config/ontologies/` | **29h** | **High (4.0/5)**<br>*Hardware-agnostic inference abstraction, multi-model pipelines, latency bounds, confidence math* | Vision sensor ingestion, YOLOE outdoor adapter, Tutorial ONNX adapter, Depth Anything depth model, 3-class canonical port (`0, 1, 2`), confidence normalizer, staleness fail-safe (`/ugv/perception_degraded`). |
+| **Dev 1** | **Perception, AI & Vision** | `ugv_perception/`<br>`config/perception/`<br>`config/ontologies/` | **29h** | **High (4.0/5)**<br>*Hardware-agnostic inference abstraction, multi-model pipelines, latency bounds, confidence math* | Consume camera **data** (`Image` + `CameraInfo`; does **not** own the driver), YOLOE outdoor adapter, Tutorial ONNX adapter, Depth Anything depth model, 3-class canonical port (`0, 1, 2`), confidence normalizer, staleness fail-safe (`/ugv/perception_degraded`). |
 | **Dev 2** | **SLAM & Spatial Localization** | `ugv_localization/`<br>`config/cameras/` | **29h** | **High (4.5/5)** | RTAB-Map visual SLAM (stereo/RGB-D/mono), `mapping` vs `localize` database modes, continuous TF tree (`map->odom->base_link`), pose validity monitor node (`/ugv/pose_valid`). |
 | **Dev 3** | **Costmaps & Spatial Geometry** | `ugv_navigation/` (Costmap Subsystem), `config/robots/` | **29h** | **High (4.0/5)** | Semantic Costmap Layer (mask projection via CameraInfo & TF), VoxelLayer geometry integration, Geometry Lethal Precedence Engine (geometry lethal overrides traversable). |
 | **Dev 4** | **Planning & Trajectory Control** | `ugv_navigation/` (Autonomy & Motion Core) | **29h** | **Med-High (3.5/5)** | Nav2 Smac2D global path planner, Regulated Pure Pursuit (RPP) trajectory tracker, dynamic hazard reactivity, recovery behaviors, `/navigate_to_pose`, candidate twist `/cmd_vel_nav2`. |
-| **Dev 5** | **Safety Authority & Platform** | `ugv_safety/`<br>`ugv_robot_description/`<br>`ugv_bringup/`<br>`ugv_eval/` | **28h** | **Medium (3.0/5)** | 4-tier Command Priority Arbiter (sole base `/cmd_vel` authority), multi-topic timeout watchdog table, deceleration ramp, diff-drive URDF/xacro, dual footprint YAMLs, Gazebo sim world, launch profiles. |
+| **Dev 5** | **Safety Authority & Platform** | `ugv_safety/`<br>`ugv_robot_description/`<br>`ugv_bringup/`<br>`ugv_eval/` | **28h** | **Medium (3.0/5)** | 4-tier Command Priority Arbiter (sole base `/cmd_vel` authority), multi-topic timeout watchdog table, deceleration ramp, diff-drive URDF/xacro, **camera driver launch** (`Image` + `CameraInfo` for Dev 1 and Dev 2), dual footprint YAMLs, Gazebo sim world, launch profiles. |
 
 ---
 
@@ -42,21 +42,26 @@ The system is decoupled into 5 clear functional domains with zero circular depen
 
 ```
  ┌────────────────────────────────────────────────────────┐
- │           DEV 1: PERCEPTION & VISION SUBSYSTEM         │
- │  Vision Ingestion -> YOLOE + Depth Anything -> Remap   │
+ │     DEV 5 BRINGUP: camera driver (shared sensor)       │
+ │           Image + CameraInfo  (dual fan-out)           │
+ └───────────────┬────────────────────────────────────────┴───────────────┐
+                 │ consume frames                                         │ consume frames
+                 ▼                                                        ▼
+ ┌────────────────────────────────────────────────────────┐  ┌────────────────────────────────────────────────────────┐
+ │           DEV 1: PERCEPTION & VISION SUBSYSTEM         │  │         DEV 2: SLAM & LOCALIZATION SUBSYSTEM           │
+ │  Consume Image+CameraInfo -> YOLOE -> Remap            │  │   RTAB-Map Visual SLAM + TF Tree + Pose Validity       │
+ │  (does not own / launch the camera)                    │  │   (does not own the camera driver)                     │
+ └───────────────────────────┬────────────────────────────┘  └───────────────────────────┬────────────────────────────┘
+                             │ /segmentation/mask {0, 1, 2}                              │ TF (map->odom->base)
+                             │ /ugv/perception_degraded                                  │ /ugv/pose_valid
+                             ▼                                                           │
+ ┌────────────────────────────────────────────────────────┐                              │
+ │       DEV 3: COSTMAPS & GEOMETRY SUBSYSTEM             │◄─────────────────────────────┘
+ │   Camera Projection to Grid + Geometry Conflict Engine │
  └───────────────────────────┬────────────────────────────┘
-                             │ /segmentation/mask {0, 1, 2}
-                             │ /ugv/perception_degraded
+                             │ /global_costmap/costmap
+                             │ /local_costmap/costmap
                              ▼
- ┌────────────────────────────────────────────────────────┐     ┌────────────────────────────────────────────────────────┐
- │       DEV 3: COSTMAPS & GEOMETRY SUBSYSTEM             │     │         DEV 2: SLAM & LOCALIZATION SUBSYSTEM           │
- │   Camera Projection to Grid + Geometry Conflict Engine │     │   RTAB-Map Visual SLAM + TF Tree + Pose Validity       │
- └───────────────────────────┬────────────────────────────┘     └───────────────────────────┬────────────────────────────┘
-                             │ /global_costmap/costmap                                      │ TF (map->odom->base)
-                             │ /local_costmap/costmap                                       │ /ugv/pose_valid
-                             └──────────────────────────────┬───────────────────────────────┘
-                                                            │
-                                                            ▼
                                ┌────────────────────────────────────────────────────────┐
                                │       DEV 4: NAVIGATION PLANNING & CONTROL LOGIC       │
                                │     Smac2D Planner + Regulated Pure Pursuit (RPP)      │
@@ -77,6 +82,7 @@ All 5 developers integrate against the topic contracts defined in `architecture.
 
 | Topic / Service | Message Type | Publisher | Subscriber(s) | Contract Rules (§3.1, §8, §9, §10, §12) |
 |---|---|---|---|---|
+| Camera `Image` + `CameraInfo` | `sensor_msgs/msg/Image`<br>`sensor_msgs/msg/CameraInfo` | **Dev 5** (bringup / driver) | **Dev 1**, **Dev 2** | Shared vision sensor (architecture §5). Stamp = image time; `frame_id` matches `CameraInfo`. Dev 1 does **not** open V4L2. Intrinsics YAML: Dev 2 `config/cameras/`. |
 | `/segmentation/mask` | `sensor_msgs/msg/Image` | **Dev 1** | **Dev 3**, Dev 5 | Encoding `mono8`, pixels strictly in `{0: unknown, 1: traversable, 2: hazard}`. Header timestamp matches source frame. |
 | `/ugv/perception_degraded` | `std_msgs/msg/Bool` | **Dev 1** | **Dev 5** | Emits `true` if latency > `perception_max_age` or confidence gates trip. |
 | `TF (map->odom->base)` | `tf2_msgs/msg/TFMessage` | **Dev 2** | **Dev 3**, Dev 4, Dev 5 | Continuous tree, jitter $< 50\text{ ms}$, publish rate $\ge 15\text{ Hz}$. |
@@ -98,7 +104,7 @@ All 5 developers integrate against the topic contracts defined in `architecture.
 * **Workload:** 29 Hours | **Difficulty:** **High (4.0/5)** — *Hardware-agnostic inference abstraction across target compute backends, multi-model vision pipelines, strict real-time latency bounds, and confidence calibration.*
 
 #### Production Tasks:
-1. **Vision Sensor Ingestion & Port Contract (§8.1, §8.4) (4h):** Build camera stream capture node streaming outdoor frames with synchronized timestamps and optical `frame_id`.
+1. **Consume Camera Data (§5, §8.4, §8.5) (4h):** Subscribe to Dev 5’s `Image` + `CameraInfo` (do **not** own the camera driver or V4L2). Convert to perception frames with the **image** timestamp and optical `frame_id` matching `CameraInfo`. Reject missing/fake `K`. Fail closed — no black frame.
 2. **YOLOE Outdoor Adapter Pipeline (§6, §8) (7h):** Implement the primary outdoor perception adapter using YOLOE to generate path and hazard segmentation masks; integrate Tutorial ONNX scaffold baseline.
 3. **Depth Anything Monocular Geometry Pipeline (§6, §9) (5h):** Build inference pipeline for Depth Anything to provide depth geometry for obstacle verification.
 4. **Canonical Ontology Remapping Engine (§8.2) (4h):** Build YAML-driven translation parser mapping raw model labels strictly to canonical classes:
@@ -109,13 +115,13 @@ All 5 developers integrate against the topic contracts defined in `architecture.
 6. **Freshness & Stale-Mask Fail-Safe (§8.4, §8.6) (4h):** Track image latency ($now - stamp$). If age > `perception_max_age` or confidence fails, publish `/ugv/perception_degraded = true`.
 
 #### Modularity & Flexibility:
-- **Independent Testing:** Can test the perception pipeline directly on recorded outdoor video files, live camera streams, or benchmark datasets (e.g. RUGD). Does not require SLAM, planners, or robot hardware.
+- **Independent Testing:** Can test decode + adapters on recorded outdoor **bags of Image+CameraInfo**, live topics (when Dev 5 is publishing), or RUGD (eval). Does not require SLAM, planners, or owning the camera driver.
 - **Modification Freedom:** Can change model weights, upgrade inference engines, or tune confidence profiles without touching downstream navigation or safety code.
 
 #### CLI & Verification Commands:
 ```bash
-# Run perception node directly on outdoor video or camera stream
-ros2 run ugv_perception adapter_node --ros-args -p source:=outdoor_path.mp4 -p model:=yoloe
+# Perception consumes camera topics (Dev 5 must be publishing Image + CameraInfo)
+ros2 run ugv_perception adapter_node --ros-args -p model:=yoloe
 
 # Run unit tests validating 3-class contract (fails if any pixel != 0, 1, 2)
 colcon test --packages-select ugv_perception
@@ -142,7 +148,7 @@ ros2 topic echo /ugv/perception_degraded
 6. **Standalone Bag Evaluation Harness (3h):** Configure offline rosbag playback launch and transform latency verification scripts.
 
 #### Modularity & Flexibility:
-- **Independent Testing:** Operates strictly on stereo/mono camera feeds or recorded sensor rosbags. Does not consume semantic masks or depend on Nav2.
+- **Independent Testing:** Operates strictly on stereo/mono **topics** (Dev 5 camera driver) or recorded sensor rosbags. Does not consume semantic masks, own the camera, or depend on Nav2.
 - **Modification Freedom:** Can adjust visual feature detectors, loop-closure parameters, or bundle adjustment internally without breaking other modules.
 
 #### CLI & Verification Commands:
@@ -239,7 +245,7 @@ ros2 topic echo /cmd_vel_nav2
 2. **System Health Watchdog Table (§12) (5h):** Build asynchronous timeout monitor tracking arrival timestamps against `safety_timeouts.yaml` for perception mask ($0.5\text{s}$), localization/TF ($0.5\text{s}$), and Nav2 heartbeat ($0.5\text{s}$).
 3. **Deceleration Profiler & Motor Driver Interface (§3.1) (5h):** Implement smooth rate-limited deceleration ramp on safety stop; write differential-drive hardware motor driver node commanding wheel actuators.
 4. **URDF/xacro Model & Dual Footprints (§7, §13 item 9) (4h):** Build differential-drive robot description with kinematics, camera extrinsics, and primary + secondary footprint YAMLs.
-5. **Outdoor Gazebo Simulation World & Launch Profiles (§4) (5h):** Build outdoor Gazebo world with terrain, dirt tracks, and obstacles; create master launch files for runtime profiles: `profile:=live_cam|sim|bag`.
+5. **Outdoor Gazebo Simulation World & Launch Profiles (§4) (5h):** Build outdoor Gazebo world with terrain, dirt tracks, and obstacles; create master launch files for runtime profiles: `profile:=live_cam|sim|bag`. **`live_cam` launches the camera driver** and publishes `Image` + `CameraInfo` for Dev 1 and Dev 2 (architecture §5 dual fan-out). Dev 1/2 do not start the camera.
 6. **E-Stop CLI Utility & Safety Test Suite (3h):** Build CLI tool to toggle E-stop, publish `/ugv/safety_status`, and verify immediate zero-twist clamp.
 
 #### Modularity & Flexibility:
