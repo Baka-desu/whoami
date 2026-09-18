@@ -1,0 +1,3 @@
+adapter_id: yoloe
+backend: openvino_gpu
+weights: weights/yoloe-v8s-seg.xml

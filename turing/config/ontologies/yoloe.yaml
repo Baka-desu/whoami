@@ -1,0 +1,14 @@
+adapter_id: yoloe
+map:
+  dirt_path: 1
+  gravel: 1
+  grass: 1
+  sky: 0
+  person: 2
+  vehicle: 2
+  rock: 2
+  water: 2
+  fence: 2
+  tree: 2
+  vegetation: 0
+default: 0
