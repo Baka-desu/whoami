@@ -130,6 +130,31 @@ def test_n5_adapter_error_no_mask(kernels) -> None:
     assert out.decision.degraded is True
 
 
+def test_infer_none_is_adapter_error_no_crash(kernels) -> None:
+    class NoneAdapter:
+        def infer(self, frame):
+            return None
+
+    out = _tick(kernels, frame=_frame(), adapter=NoneAdapter())
+    assert out.mask is None
+    assert out.decision.degraded is True
+    assert out.decision.publish_mask is False
+
+
+def test_infer_missing_stamp_is_adapter_error(kernels) -> None:
+    class BadRaw:
+        adapter_id = ADAPTER_ID
+        frame_id = "camera_optical"
+
+    class BadAdapter:
+        def infer(self, frame):
+            return BadRaw()
+
+    out = _tick(kernels, frame=_frame(), adapter=BadAdapter())
+    assert out.mask is None
+    assert out.decision.degraded is True
+
+
 def test_n5_generic_exception_no_mask(kernels) -> None:
     spy = SpyAdapter(error=RuntimeError("gpu"))
     out = _tick(kernels, frame=_frame(), adapter=spy)

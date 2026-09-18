@@ -2,6 +2,13 @@
 
 from __future__ import annotations
 
+import pytest
+
+pytest.importorskip("rclpy")
+pytest.importorskip("sensor_msgs")
+pytest.importorskip("std_msgs")
+pytest.importorskip("builtin_interfaces")
+
 from builtin_interfaces.msg import Time
 from sensor_msgs.msg import CameraInfo, Image
 from std_msgs.msg import Bool, Header

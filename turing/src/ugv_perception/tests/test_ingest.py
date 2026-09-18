@@ -192,6 +192,9 @@ def test_s10_no_dummy_or_v4l2() -> None:
 
 
 def test_s14_subscribe_is_ros_bridge_not_v4l2() -> None:
+    pytest.importorskip("sensor_msgs")
+    pytest.importorskip("std_msgs")
+    pytest.importorskip("builtin_interfaces")
     from ugv_perception.ingest.ros_bridge import image_msg_to_view
     from sensor_msgs.msg import Image
     from std_msgs.msg import Header

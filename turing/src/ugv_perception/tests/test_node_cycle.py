@@ -5,6 +5,11 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import pytest
+
+pytest.importorskip("sensor_msgs")
+pytest.importorskip("std_msgs")
+
 from sensor_msgs.msg import Image
 from std_msgs.msg import Bool
 
