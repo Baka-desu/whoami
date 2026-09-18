@@ -5,6 +5,12 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
+
+pytest.importorskip("sensor_msgs")
+pytest.importorskip("std_msgs")
+pytest.importorskip("builtin_interfaces")
+
 from sensor_msgs.msg import CameraInfo, Image
 from std_msgs.msg import Header
 from builtin_interfaces.msg import Time
@@ -61,8 +67,9 @@ def test_image_msg_copied_and_decoded() -> None:
     civ = camera_info_msg_to_view(info)
     frame = decode_frame(view, civ)
     assert tuple(frame.rgb[0, 0]) == (10, 20, 30)
+    assert type(frame.stamp_ns) is int
     assert frame.stamp_ns == 1_000_000_000
-    assert type(frame) is type(frame)
+    assert isinstance(frame.rgb, np.ndarray)
 
 
 def test_camera_info_k_tuple() -> None:

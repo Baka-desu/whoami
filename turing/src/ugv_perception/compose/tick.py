@@ -56,10 +56,14 @@ def compose_tick(
         adapter_error = True
         raw = None
 
-    if raw is not None:
-        if raw.stamp_ns != frame.stamp_ns or raw.frame_id != frame.frame_id:
-            adapter_error = True
-            raw = None
+    if raw is None:
+        adapter_error = True
+    elif (
+        getattr(raw, "stamp_ns", None) != frame.stamp_ns
+        or getattr(raw, "frame_id", None) != frame.frame_id
+    ):
+        adapter_error = True
+        raw = None
 
     if raw is not None:
         classes, scores = remap_apply(

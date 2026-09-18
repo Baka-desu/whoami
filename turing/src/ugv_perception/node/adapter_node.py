@@ -73,8 +73,8 @@ class PerceptionAdapterNode(Node):
 
     def _tick(self) -> None:
         now_ns = self._now_ns_fn()
-        if type(now_ns) is not int:
-            now_ns = int(now_ns)
+        if type(now_ns) is not int or now_ns <= 0:
+            raise TypeError("now_ns must be a Python int > 0")
         out = perception_cycle(
             image=self._last_image,
             camera_info=self._last_info,
