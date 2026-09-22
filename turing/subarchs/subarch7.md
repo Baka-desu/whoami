@@ -3,7 +3,7 @@
 **Task:** [T07](../tasks/T07-port-node.md)  
 **Depends on (code/import):** T01 `make_mask`; T03 `load_remap`/`apply`; T04 `load_gates`/`apply`; T05 `evaluate`/`decide_publish`; T06 `Adapter.infer` / `AdapterError`. T07 does **not** import OpenVINO, Ultralytics, or CUDA.  
 **Does not need at build for `compose_tick`:** a camera device, GPU, or ROS.  
-**Status (2026-09-18):** `compose_tick`, `perception_cycle`, `wire_compose_out`, and `PerceptionAdapterNode` **shipped**. ROS 2 **Lyrical** + `rclpy` + `rmw-dds-common` on this RHEL 10 box. Node tests use a **shared executor** and fixture `Image`+`CameraInfo`. GPU YOLOE `infer` still needs IR in `weights/`. Outdoor live stream still Dev 5.  
+**Status (2026-09-18):** `compose_tick`, `perception_cycle`, `wire_compose_out`, and `PerceptionAdapterNode` **shipped**. ROS 2 **Lyrical** + `rclpy` + `rmw-dds-common` on this RHEL 10 box. Node tests use a **shared executor** and fixture `Image`+`CameraInfo`. YOLOE-26s IR is on disk; outdoor live stream still Dev 5.  
 **Authority:** [`architecture.md`](../../architecture.md) §2–§3, §8 (all), §12, §16  
 **Not authority:** `dev.md` (mask+degraded only — architecture also requires confidence + meta); the obsolete T07 task loop that recomputes collapse and ignores T05 `decide_publish`; `HARDWARE.md` (T07 never picks a device)
 
@@ -295,7 +295,7 @@ No camera. Fixture `infer` + fixture frames (T10-style). **Every N1–N16.**
 | N2/N14 | `compose/` sources have no `openvino` / `rclpy` |
 | N1 | missing remap path → load/start error |
 
-ROS node spin: fixture msgs + SpyAdapter + **one** `SingleThreadedExecutor`. Outdoor camera still Dev 5. YOLOE GPU `infer` still needs weights.
+ROS node spin: fixture msgs + SpyAdapter + **one** `SingleThreadedExecutor`. Outdoor camera still Dev 5. YOLOE-26s IR is on disk.
 
 ---
 

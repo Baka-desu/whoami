@@ -238,8 +238,11 @@ def test_adapter_config_loads() -> None:
     cfg = load_adapter_config(_ADAPTER)
     assert cfg["backend"] == "openvino_gpu"
     assert cfg["weights"].endswith(".xml")
+    xml = _ROOT / cfg["weights"]
+    assert xml.is_file(), f"pinned IR missing: {xml}"
+    assert xml.with_suffix(".bin").is_file()
 
 
-@pytest.mark.skip(reason="T02 skipped and weights not on disk; no dummy outdoor RGB")
+@pytest.mark.skip(reason="IR on disk; outdoor Image+CameraInfo still Dev 5 — no dummy outdoor RGB")
 def test_infer_on_real_frame_blocked() -> None:
     raise AssertionError("must stay skipped")

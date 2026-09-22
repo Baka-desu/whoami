@@ -15,7 +15,7 @@ There is also **no dummy data**. That means we cannot invent a camera. Something
 
 **Now:** no camera **device**. T02 **decode + ROS subscribe** shipped (fixture msgs). Outdoor live still Dev 5. Do not invent a camera.
 
-T11 and outdoor product proof need a real stream. T06 GPU `infer` needs IR (below).
+T11 and outdoor product proof need a real stream. YOLOE-26s IR is on disk at `turing/weights/yoloe-26s-seg.xml`.
 
 ### 2. YOLOE pretrained segmentation weights — **download, no training**
 
@@ -67,7 +67,7 @@ Until that failure is observed, **do not collect a training set**.
 ## Action list for you
 
 1. Camera / outdoor recording — Dev 5 stream; T02 consume path shipped.
-2. Download **YOLOE-26s-seg** and export OpenVINO 2026.4.0 GPU IR to `turing/weights/` (not in git).
+2. **Done:** YOLOE-26s-seg OpenVINO 2026.4.0 GPU IR is in `turing/weights/` (not in git).
 3. Say whether T08 (Depth Anything) is in the first ship.
 4. Optional: if you already have RUGD locally, tell me the path — eval only, not now.
 

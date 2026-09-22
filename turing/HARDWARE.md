@@ -68,5 +68,5 @@ B580 is the development card, not the floor. Assume the NVIDIA has **less** VRAM
 - Work is on a **desktop**. Outdoor live training/testing is **later**.
 - **No camera device.** Dev 1 **consumes** `Image` + `CameraInfo` (T02 `decode_frame` + `ros_bridge`; T07 node subscribes). Dev 5 owns the driver.
 - T02/T07 ROS path is **tested** with fixture messages (shared executor). That is not a dummy camera driver.
-- **No training.** Default weights pin: **YOLOE-26s-seg** IR — **not on disk yet**.
-- T06 GPU `infer` / T12 live `run` wait on `weights/yoloe-26s-seg.xml`. T11 waits on a real stream.
+- **No training.** Default weights pin: **YOLOE-26s-seg** IR — **on disk** at `weights/yoloe-26s-seg.xml`.
+- T12 live `run` uses that IR on `device=GPU`. T06 outdoor product `infer` and T11 still wait on a Dev 5 stream.

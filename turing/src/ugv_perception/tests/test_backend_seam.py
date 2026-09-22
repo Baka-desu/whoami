@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from ugv_perception.adapter.output import AdapterError
 from ugv_perception.backend import build_backend, instances_from_engine
 from ugv_perception.backend.cuda_pytorch import CudaPytorchBackend
 from ugv_perception.backend.openvino_gpu import OpenVinoGpuBackend
@@ -186,6 +187,103 @@ def test_b14_seam_does_not_need_openvino() -> None:
     assert out == ()
 
 
-@pytest.mark.skip(reason="IR and GPU not required for B1–B14 seam tests")
-def test_openvino_gpu_run_skipped_without_ir() -> None:
-    raise AssertionError("must stay skipped")
+def test_yolo_seg_decode_empty() -> None:
+    from ugv_perception.backend.openvino_gpu import decode_yolo_seg
+
+    nc, nm, n = 11, 32, 8
+    pred = np.zeros((1, 4 + nc + nm, n), dtype=np.float32)
+    proto = np.zeros((1, nm, 160, 160), dtype=np.float32)
+    cls_i, scores, masks = decode_yolo_seg(pred, proto, nc, (640, 640))
+    assert cls_i == []
+    assert scores == []
+    assert masks == []
+
+
+def test_yolo_seg_decode_one_detection() -> None:
+    from ugv_perception.backend.openvino_gpu import decode_yolo_seg
+
+    nc, nm = 11, 32
+    pred = np.zeros((1, 4 + nc + nm, 4), dtype=np.float32)
+    pred[0, 0, 0] = 320.0
+    pred[0, 1, 0] = 320.0
+    pred[0, 2, 0] = 160.0
+    pred[0, 3, 0] = 160.0
+    pred[0, 4 + 4, 0] = 0.9  # class 4
+    pred[0, 4 + nc, 0] = 1.0  # first proto coeff
+    proto = np.zeros((1, nm, 160, 160), dtype=np.float32)
+    proto[0, 0, 40:120, 40:120] = 8.0
+    cls_i, scores, masks = decode_yolo_seg(pred, proto, nc, (640, 640))
+    assert cls_i == [4]
+    assert len(scores) == 1
+    assert type(scores[0]) is float
+    assert abs(scores[0] - 0.9) < 1e-6
+    assert masks[0].shape == (160, 160)
+    assert masks[0].dtype == np.float32
+    assert bool(masks[0][80, 80] >= 0.5)
+    assert bool(masks[0][0, 0] < 0.5)
+
+
+def test_yolo_seg_decode_nms_keeps_higher_score() -> None:
+    from ugv_perception.backend.openvino_gpu import decode_yolo_seg
+
+    nc, nm = 11, 32
+    pred = np.zeros((1, 4 + nc + nm, 2), dtype=np.float32)
+    for i, score in ((0, 0.9), (1, 0.4)):
+        pred[0, 0, i] = 320.0
+        pred[0, 1, i] = 320.0
+        pred[0, 2, i] = 80.0
+        pred[0, 3, i] = 80.0
+        pred[0, 4, i] = score
+        pred[0, 4 + nc, i] = 1.0
+    proto = np.zeros((1, nm, 40, 40), dtype=np.float32)
+    proto[0, 0] = 4.0
+    cls_i, scores, masks = decode_yolo_seg(pred, proto, nc, (640, 640))
+    assert cls_i == [0]
+    assert len(scores) == 1
+    assert abs(scores[0] - 0.9) < 1e-6
+    assert len(masks) == 1
+
+
+def test_yolo_seg_decode_score_out_of_range_raises() -> None:
+    from ugv_perception.backend.openvino_gpu import decode_yolo_seg
+
+    nc, nm = 2, 4
+    pred = np.zeros((1, 4 + nc + nm, 1), dtype=np.float32)
+    pred[0, 0, 0] = 16.0
+    pred[0, 1, 0] = 16.0
+    pred[0, 2, 0] = 8.0
+    pred[0, 3, 0] = 8.0
+    pred[0, 4, 0] = 1.2
+    proto = np.zeros((1, nm, 8, 8), dtype=np.float32)
+    with pytest.raises(AdapterError):
+        decode_yolo_seg(pred, proto, nc, (32, 32))
+
+
+def test_openvino_gpu_run_on_ir() -> None:
+    """Engine smoke: compile YOLOE-26s IR on GPU. Not outdoor product proof."""
+    from ugv_perception.adapter.prompts import load_prompts
+    from ugv_perception.adapter.output import Instance
+
+    root = Path(__file__).resolve().parents[3]
+    ir = root / "weights" / "yoloe-26s-seg.xml"
+    if not ir.is_file():
+        pytest.skip("YOLOE-26s IR missing")
+    prompts = load_prompts(
+        root / "config" / "perception" / "yoloe_prompts.yaml",
+        root / "config" / "ontologies" / "yoloe.yaml",
+    )
+    try:
+        backend = build_backend("openvino_gpu", str(ir), prompts)
+    except Exception as exc:
+        pytest.skip(f"OpenVINO GPU compile unavailable: {exc}")
+    rgb = np.zeros((480, 640, 3), dtype=np.uint8)
+    out = backend.run(rgb)
+    assert type(out) is tuple
+    for inst in out:
+        assert type(inst) is Instance
+        assert type(inst.prompt_id) is int
+        assert 1 <= inst.prompt_id <= len(prompts)
+        assert type(inst.score) is float
+        assert 0.0 <= inst.score <= 1.0
+        assert inst.mask.dtype == np.bool_
+        assert inst.mask.shape == (480, 640)

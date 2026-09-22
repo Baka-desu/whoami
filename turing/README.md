@@ -27,7 +27,7 @@ T03 remap engine           YAML, no model
 T04 confidence gates       YAML, no model
 T05 freshness / degraded   time + flags, no model
 T12 backend seam           OpenVINO GPU on Arc B580; CUDA PyTorch later (low VRAM)
-T06 YOLOE adapter          first real masks  ← needs weights; uses T12
+T06 YOLOE adapter          first real masks  ← IR on disk; uses T12
 T07 port node              compose + publish canonical mask + degraded
 T10 contract tests         T01–T07 wired: encoding, {0,1,2}, stamp, frame, degraded
 T11 performance / latency  capture→mask, FPS, bounded queue  ← prefer real camera
@@ -36,7 +36,7 @@ T09 tutorial ONNX          eval scaffold only, not product
 ```
 
 **Implemented (2026-09-18):** T01–T05 kernels, T02 decode+ros_bridge, T06 pack, T07 `compose_tick` + Lyrical `adapter_node`, T12 seam.  
-**Not on disk:** YOLOE-26s OpenVINO IR. **No DummySource.** GPU `infer` tests skip until weights exist.  
+**On disk:** YOLOE-26s OpenVINO IR (`weights/yoloe-26s-seg.xml`). **No DummySource.** Outdoor product `infer` still needs a Dev 5 Image+CameraInfo stream.  
 T10 uses header/label fixtures. Outdoor camera is Dev 5.
 
 Runtime: Intel Arc B580 **now** (OpenVINO 2026.4.0, `device=GPU`). ROS 2 **Lyrical** on this RHEL 10 box. Later NVIDIA, less VRAM (CUDA + PyTorch). See [HARDWARE.md](HARDWARE.md).

@@ -82,7 +82,7 @@ Do **not** implement PyTorch XPU.
 
 1. Freeze this file. Match **T06’s Protocol**, not the old T12 checklist.  
 2. Implement `instances.py` + factory + seam tests **first** (no GPU).  
-3. `OpenVinoGpuBackend` next; GPU/IR tests **skip** if weights/GPU missing (same honesty as T06 `infer`).  
+3. `OpenVinoGpuBackend` next; GPU/IR tests **skip** only if weights/GPU are actually missing.  
 4. `pip` extra: `openvino==2026.4.0` — optional extra, not a hard dep of `compose` tests.  
 5. `load(..., device="GPU")`. **Never** fall back to CPU to “make it run.”  
 6. Factory: `if backend_id == "openvino_gpu": from .openvino_gpu import ...` inside the function.  
@@ -177,6 +177,7 @@ Port `scale` stays **1.0** because T06 `pack` then sees HW = rgb HW. Interpolati
 ## 4. OpenVINO GPU (this desktop)
 
 - Pin **2026.4.0**. Compile/load IR from local `weights/yoloe-26s-seg.xml` (and `.bin`). No runtime download. No Ultralytics in `run()`.  
+- YOLOE-26s-seg IR outputs YOLO-seg `pred` `[1, 4+nc+nm, N]` + proto `[1, nm, mh, mw]`. T12 decodes (conf 0.25, IoU 0.70, max 300) then `instances_from_engine`. Those numbers are engine NMS, not T04 τ.  
 - `device="GPU"`. If GPU compile/load fails, **raise** — do not retry CPU.  
 - One compiled model in memory. One frame in `run()` (T11 latest-only is T07/T11, not a batch here).  
 - If IR masks are not rgb HW, pass them through **`instances_from_engine`** (nearest bool / bilinear-then-0.5 float). Do not `cv2.resize` ad hoc in `OpenVinoGpuBackend.run`. Port `scale` stays 1.0.  
@@ -209,7 +210,7 @@ Class exists so the factory string is real. On **this Arc box**, `build_backend(
 | B13 | `build_backend("cuda_pytorch", ...)` raises on this Intel box |
 | B14 | Seam tests pass **without** OpenVINO installed |
 
-GPU `run()` on real IR: skip until weights exist (not a dummy RGB outdoor claim).
+GPU `run()` on real IR: **YOLOE-26s** `weights/yoloe-26s-seg.xml` is on disk. Engine smoke on a uint8 tensor is allowed; that is not outdoor product proof.
 
 ---
 
@@ -230,7 +231,7 @@ GPU `run()` on real IR: skip until weights exist (not a dummy RGB outdoor claim)
 
 B1–B14 are **seam/contract tests** (factory, `instances_from_engine`, import graph). They must pass **without** OpenVINO installed, without a GPU, and without IR. They are not proof that Arc inference works.
 
-**Separate** (skip unless local IR + GPU): `OpenVinoGpuBackend.run` on a real compiled model. That skip is not a dummy camera.
+**Separate** (not B1–B14): `OpenVinoGpuBackend.run` on the compiled YOLOE-26s IR. Engine smoke on a uint8 tensor is not a dummy camera.
 
 | ID | Test |
 |---|---|
@@ -243,7 +244,7 @@ B1–B14 are **seam/contract tests** (factory, `instances_from_engine`, import g
 | B13 | cuda_pytorch factory raises here |
 | B14 | pytest without `openvino` package still collects/passes this file |
 
-Skip (not part of B1–B14): compiled GPU/IR `run()`.
+Not part of B1–B14: compiled GPU/IR `run()` + YOLO-seg decode tests.
 
 ---
 
@@ -251,7 +252,7 @@ Skip (not part of B1–B14): compiled GPU/IR `run()`.
 
 - **Seam:** factory + `instances_from_engine` + **B1–B14** pass with no OpenVINO, no GPU, no IR.  
 - **Engine class:** `OpenVinoGpuBackend` exists and requests `device="GPU"` (no CPU fallback).  
-- **Live OpenVINO `run()`:** skipped until `weights/yoloe-26s-seg.xml` exists — that skip does **not** fail B1–B14. Pin is **YOLOE-26s**, not v8s.  
+- **Live OpenVINO `run()`:** `weights/yoloe-26s-seg.xml` is on disk. GPU engine smoke does **not** fail B1–B14. Pin is **YOLOE-26s**, not v8s. YOLO-seg decode is T12 (`pred` `[1,4+nc+nm,N]` + proto); NMS conf/iou are engine defaults, not T04 τ.  
 - `YoloeAdapter.infer` + `compose_tick` unchanged and still green.
 
 ## 10. Non-goals
