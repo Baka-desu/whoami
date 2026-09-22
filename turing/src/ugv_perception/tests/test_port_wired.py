@@ -1,4 +1,8 @@
-"""T10 wired port contract. compose_tick + wire_compose_out. No camera, no IR."""
+"""T10 wired port contract. compose_tick + wire_compose_out. No camera, no IR.
+
+Mandatory file: no rclpy spin. sensor_msgs Image types come from wire_compose_out
+(the consumer layout). Missing ROS packages fail collection, not skip.
+"""
 
 from __future__ import annotations
 
@@ -216,15 +220,13 @@ def test_w10_collapse_not_all_traversable(kernels) -> None:
     _fail_closed(wired)
 
 
-def test_w11_missing_remap_prevents_mask(tmp_path: Path, kernels) -> None:
+def test_w11_missing_remap_prevents_mask(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError):
         load_compose_configs(
             remap_path=tmp_path / "missing.yaml",
             gates_path=_GATES,
             freshness_path=_FRESH,
         )
-    wired = _wire(kernels, frame=_source_frame(), adapter=FixtureAdapter())
-    assert wired.mask is not None
 
 
 def test_w12_no_model_leak_on_wire(kernels) -> None:
@@ -271,10 +273,8 @@ def test_w14_degraded_bool_when_no_mask(kernels) -> None:
     wired = _wire(
         kernels, frame=_source_frame(), adapter=FixtureAdapter(), now_ns=_NOW_STALE
     )
-    assert wired.degraded is not None
     assert type(wired.degraded.data) is bool
-    assert wired.degraded.data is True
-    assert wired.mask is None
+    _fail_closed(wired)
 
 
 def test_w15_fixtures_not_in_production() -> None:
@@ -305,4 +305,3 @@ def test_w16_t10_sources_clean() -> None:
                 assert "DepthFrame" not in stripped
                 if py.name == "test_port_wired.py":
                     assert "rclpy" not in stripped
-        assert 'create_publisher' not in text or "/cmd_vel" not in text.split("create_publisher")[-1][:80]

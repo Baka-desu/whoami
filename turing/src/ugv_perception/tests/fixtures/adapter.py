@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import numpy as np
 
 from ugv_perception.adapter.frame import ImageFrame
-from ugv_perception.adapter.output import ADAPTER_ID, UNLABELED_NAME, AdapterError, RawSemOutput
+from ugv_perception.adapter.output import ADAPTER_ID, UNLABELED_NAME, RawSemOutput
 
 COPY = object()
 OMIT = object()

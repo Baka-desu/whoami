@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
 pytest.importorskip("rclpy")
@@ -18,7 +19,7 @@ from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
 
 from ugv_perception.node.adapter_node import PerceptionAdapterNode
-from ugv_perception.port.ids import CONF_ENCODING, MASK_ENCODING
+from ugv_perception.port.ids import CANONICAL, CONF_ENCODING, MASK_ENCODING
 from ugv_perception.tests.fixtures import FixtureAdapter
 
 _NS = 1_000_000_000
@@ -79,9 +80,15 @@ def test_wr1_wr2_wr4_wr5_happy_topics() -> None:
         assert masks[0].encoding == MASK_ENCODING
         assert masks[0].header.frame_id == "camera_optical"
         assert int(masks[0].header.stamp.sec) * _NS + int(masks[0].header.stamp.nanosec) == _STAMP
+        pix = np.frombuffer(bytes(masks[0].data), dtype=np.uint8)
+        assert set(int(x) for x in np.unique(pix).tolist()) <= CANONICAL
         assert confs, "confidence present iff mask"
         assert confs[0].encoding == CONF_ENCODING
         assert confs[0].header.frame_id == masks[0].header.frame_id
+        conf = np.frombuffer(bytes(confs[0].data), dtype=np.float32)
+        assert bool(np.isfinite(conf).all())
+        assert float(conf.min()) >= 0.0
+        assert float(conf.max()) <= 1.0
         assert cinfos, "expected /segmentation/camera_info"
         assert cinfos[0].header.frame_id == masks[0].header.frame_id
         assert False in flags
