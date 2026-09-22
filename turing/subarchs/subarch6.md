@@ -41,7 +41,7 @@ This file is the architecture of T06. The task file is the build checklist. If t
 
 | File | Role |
 |---|---|
-| `turing/src/ugv_perception/adapter/frame.py` | `ImageFrame` DTO (rgb, stamp_ns, frame_id). T02 will fill this later. Not a camera driver |
+| `turing/src/ugv_perception/adapter/frame.py` | `ImageFrame` DTO (rgb, stamp_ns, frame_id). T02 fills this. Not a camera driver |
 | `turing/src/ugv_perception/adapter/output.py` | `RawSemOutput` |
 | `turing/src/ugv_perception/adapter/prompts.py` | `load_prompts` |
 | `turing/src/ugv_perception/adapter/pack.py` | instances → dense `label_ids` / `raw_scores` |
@@ -66,7 +66,7 @@ Do **not** add `DummySource` or a constant-mask backend.
 6. Convert `id_to_name` keys with `int(k)` **here**. Do not ask T03 to coerce.  
 7. On backend failure: **raise**. Do not return all-traversable / all-unknown as a “safe” mask.  
 8. No training. No download at field runtime. No PyTorch XPU as the product path.  
-9. Prefer a **small** YOLOE-seg (s/m) per `HARDWARE.md`. Pin the exact filename at implement time in `config/adapters/yoloe.yaml`, not in Python.  
+9. Pin **YOLOE-26s-seg** IR in `config/adapters/yoloe.yaml`, not in Python. 26m only if 26s is weak.  
 10. Tests: packing uses **scripted instances** (contract fixtures). That is not a dummy camera. GPU/`infer` tests stay skipped until a real frame + weights exist.
 
 ---
@@ -188,7 +188,7 @@ Every prompt is a non-empty Python `str`. **Subset** of `config/ontologies/yoloe
 ```yaml
 adapter_id: yoloe
 backend: openvino_gpu
-weights: weights/<pinned-yoloe-seg-sm>.xml   # pin at implement time; local file
+weights: weights/yoloe-26s-seg.xml
 ```
 
 Ultralytics may be used **offline** to export IR. It is not `live_cam`.
@@ -254,7 +254,7 @@ return pack(frame, raw_instances, prompts)
 
 If `backend.run` raises, `infer` raises (same exception or a wrapping `AdapterError`). T07 sets `adapter_error=True`. T06 does not call T05.
 
-`infer` product test: **skipped until IR exists** (`pytest.mark.skip` only for that GPU test). Do not unblock with a synthetic RGB scene claimed as outdoor.
+`infer` product test: **skipped until IR exists**. Do not unblock with a synthetic RGB scene claimed as outdoor.
 
 ---
 
