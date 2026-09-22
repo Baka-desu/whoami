@@ -162,12 +162,14 @@ def test_n5_generic_exception_no_mask(kernels) -> None:
     assert out.decision.degraded is True
 
 
-def test_n6_n7_collapse_from_gates_no_mask(kernels) -> None:
+def test_n6_n7_low_score_publishes_unknown_not_traversable(kernels) -> None:
     spy = SpyAdapter(raw=_raw(score=0.1))
     out = _tick(kernels, frame=_frame(), adapter=spy)
     assert spy.calls == 1
-    assert out.mask is None
-    assert out.decision.degraded is True
+    assert out.decision.degraded is False
+    assert out.decision.publish_mask is True
+    assert out.mask is not None
+    assert set(int(x) for x in out.mask.classes.reshape(-1).tolist()) == {0}
     assert "min_known_fraction" not in Path(__file__).resolve().parents[1].joinpath(
         "compose", "tick.py"
     ).read_text()

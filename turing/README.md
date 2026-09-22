@@ -22,12 +22,12 @@ Downstream (Dev 3 costmaps, Dev 5 safety) bind only to port outputs. They never 
 
 ```
 T01 types + validators     pure contract, no camera
-T02 consume Image+CameraInfo  subscriber/converter (no V4L2); live skip until Dev 5 topics
+T02 consume Image+CameraInfo  decode + ros_bridge **shipped**; outdoor stream still Dev 5
 T03 remap engine           YAML, no model
 T04 confidence gates       YAML, no model
 T05 freshness / degraded   time + flags, no model
 T12 backend seam           OpenVINO GPU on Arc B580; CUDA PyTorch later (low VRAM)
-T06 YOLOE adapter          first real masks  ← needs weights; uses T12
+T06 YOLOE adapter          first real masks  ← IR on disk; uses T12
 T07 port node              compose + publish canonical mask + degraded
 T10 contract tests         T01–T07 wired: encoding, {0,1,2}, stamp, frame, degraded
 T11 performance / latency  capture→mask, FPS, bounded queue  ← prefer real camera
@@ -35,12 +35,11 @@ T08 Depth Anything         optional geometry, parallel to port  ← needs weight
 T09 tutorial ONNX          eval scaffold only, not product
 ```
 
-T01, T03–T05, and T12 can be built **without** a camera or weights.  
-**T02 is skipped** until a real camera or outdoor recording exists. No DummySource.  
-T06 is the first task that produces a real mask. There is no FakeAdapter.  
-T10 uses test-only header/label fixtures; they are not a product source.
+**Implemented (2026-09-18):** T01–T05 kernels, T02 decode+ros_bridge, T06 pack, T07 `compose_tick` + Lyrical `adapter_node`, T12 seam.  
+**On disk:** YOLOE-26s OpenVINO IR (`weights/yoloe-26s-seg.xml`). **No DummySource.** Outdoor product `infer` still needs a Dev 5 Image+CameraInfo stream.  
+T10 uses header/label fixtures. T11 policy (latest-only queue + starve watchdog) **shipped**; live p95 waits on Dev 5. Outdoor camera is Dev 5.
 
-Runtime: Intel Arc B580 **now** (OpenVINO 2026.4.0, `device=GPU`). Later NVIDIA, less VRAM (CUDA + PyTorch). See [HARDWARE.md](HARDWARE.md) (execution only; `architecture.md` still owns the port).
+Runtime: Intel Arc B580 **now** (OpenVINO 2026.4.0, `device=GPU`). ROS 2 **Lyrical** on this RHEL 10 box. Later NVIDIA, less VRAM (CUDA + PyTorch). See [HARDWARE.md](HARDWARE.md).
 
 ### T07 port node (explicit)
 
@@ -114,7 +113,7 @@ If a task cannot be tested without a fake camera, the task is not done — get a
 | [00-role-and-laws.md](00-role-and-laws.md) | Dev 1’s place in the product |
 | [interfaces.md](interfaces.md) | Internal APIs between modules |
 | [DATASETS.md](DATASETS.md) | Weights / datasets — **read this, action required** |
-| [HARDWARE.md](HARDWARE.md) | Arc B580 OpenVINO GPU now; NVIDIA CUDA later; T02 skipped |
+| [HARDWARE.md](HARDWARE.md) | Arc B580 OpenVINO GPU; ROS Lyrical; YOLOE-26s; no camera device |
 | [CONFLICTS.md](CONFLICTS.md) | Where `dev.md` is ignored |
 | [tasks/](tasks/) | T01–T12 build checklists |
 | [subarchs/subarch1.md](subarchs/subarch1.md) | T01 port-kernel architecture (wins over the T01 checklist) |
@@ -124,6 +123,8 @@ If a task cannot be tested without a fake camera, the task is not done — get a
 | [subarchs/subarch5.md](subarchs/subarch5.md) | T05 freshness/degraded-policy architecture (wins over the T05 checklist) |
 | [subarchs/subarch6.md](subarchs/subarch6.md) | T06 YOLOE adapter architecture (wins over the T06 checklist) |
 | [subarchs/subarch7.md](subarchs/subarch7.md) | T07 port-composition architecture (wins over the T07 checklist) |
+| [subarchs/subarch10.md](subarchs/subarch10.md) | T10 wired port-contract tests (wins over the T10 checklist; T08 still deferred) |
+| [subarchs/subarch11.md](subarchs/subarch11.md) | T11 latency / latest-only queue (wins over the T11 checklist; T08 still deferred) |
 | [subarchs/subarch12.md](subarchs/subarch12.md) | T12 OpenVINO GPU seam (matches shipped T06 Protocol; wins over old T12 checklist) |
 
 Code for each task lands under `turing/src/` when we implement. Do not start T06/T08 until weights are on disk (see DATASETS.md).

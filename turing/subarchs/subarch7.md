@@ -2,8 +2,8 @@
 
 **Task:** [T07](../tasks/T07-port-node.md)  
 **Depends on (code/import):** T01 `make_mask`; T03 `load_remap`/`apply`; T04 `load_gates`/`apply`; T05 `evaluate`/`decide_publish`; T06 `Adapter.infer` / `AdapterError`. T07 does **not** import OpenVINO, Ultralytics, or CUDA.  
-**Does not need at build for `compose_tick`:** T02 camera, GPU, ROS.  
-**Blocked for live ROS proof:** T02 (skipped) + T12 weights.  
+**Does not need at build for `compose_tick`:** a camera device, GPU, or ROS.  
+**Status (2026-09-18):** `compose_tick`, `perception_cycle`, `wire_compose_out`, and `PerceptionAdapterNode` **shipped**. ROS 2 **Lyrical** + `rclpy` + `rmw-dds-common` on this RHEL 10 box. Node tests use a **shared executor** and fixture `Image`+`CameraInfo`. YOLOE-26s IR is on disk; outdoor live stream still Dev 5.  
 **Authority:** [`architecture.md`](../../architecture.md) §2–§3, §8 (all), §12, §16  
 **Not authority:** `dev.md` (mask+degraded only — architecture also requires confidence + meta); the obsolete T07 task loop that recomputes collapse and ignores T05 `decide_publish`; `HARDWARE.md` (T07 never picks a device)
 
@@ -30,7 +30,7 @@ This file is the architecture of T07. The task file is the build checklist. If t
 | File | Binding |
 |---|---|
 | `turing/src/ugv_perception/port/mask.py` | `make_mask(..., producer_ok=decision.valid)` only if `publish_mask` |
-| `turing/src/ugv_perception/port/port_meta.msg` | compiled/published by the ROS wrapper; fields already specified |
+| `turing/src/ugv_perception/port/port_meta.msg` | **contract** fields: header, valid, age, scale. **Not compiled** (no colcon/rosidl on this box). Node currently publishes those three numbers as `std_msgs/Float64MultiArray` on `/segmentation/port_meta` until the `.msg` is built |
 | `turing/src/ugv_perception/remap/apply.py` | unpack `RawSemOutput` into `apply(...)` |
 | `turing/src/ugv_perception/confidence/apply.py` | 4-tuple; `runner_up=None` in v1 |
 | `turing/src/ugv_perception/freshness/evaluate.py` | `evaluate` then `decide_publish` |
@@ -39,14 +39,16 @@ This file is the architecture of T07. The task file is the build checklist. If t
 | `turing/config/perception/yoloe.yaml` | T04 gates |
 | `turing/config/perception/port.yaml` | T05 max age |
 
-### Code later (T07 — only after this subarch is complete)
+### Shipped files
 
 | File | Role |
 |---|---|
 | `turing/src/ugv_perception/compose/tick.py` | `compose_tick` — pure wiring, no `rclpy` |
-| `turing/src/ugv_perception/compose/__init__.py` | exports |
-| `turing/src/ugv_perception/tests/test_compose.py` | N1–N16, fixtures, no camera |
-| `turing/src/ugv_perception/node/adapter_node.py` | ROS 2 wrapper — **after** T02; publishes topics from `compose_tick` |
+| `turing/src/ugv_perception/node/cycle.py` | decode (optional) → `compose_tick` |
+| `turing/src/ugv_perception/node/wire.py` | `CanonicalMask` → `sensor_msgs` Image + meta array |
+| `turing/src/ugv_perception/node/adapter_node.py` | ROS 2 Lyrical node: subscribe Image+CameraInfo, publish port |
+| `turing/src/ugv_perception/tests/test_compose.py` | N1–N17 + infer-`None` fail-closed |
+| `turing/src/ugv_perception/tests/test_adapter_node.py` | shared `SingleThreadedExecutor` spin; `importorskip("rclpy")` |
 
 Do **not** reimplement remap, τ, or freshness in T07.  
 Do **not** put `backend:` or prompts in this module.  
@@ -65,8 +67,10 @@ Do **not** invent a dummy camera to “finish” the ROS node.
 6b. **`evaluate` before `infer`.** If `time_degraded`, do not call `adapter.infer` (or remap/gates). After a successful infer, `evaluate` again with `now_ns_after` (defaults to `now_ns` in tests).  
 7. `make_mask` only when `decision.publish_mask`. Never restamp. Never pass `age_s < 0` into `make_mask`.  
 8. Tick must not contain `if adapter_id == "yoloe"` or import `openvino` / `ultralytics` / `torch`.  
-9. ROS node waits on T02 for live proof. `adapter:=onnx` is illegal until T09.  
-10. Tests: fixture adapter/source (same rule as T10). Not a product camera.
+9. `adapter:=onnx` is illegal until T09.  
+10. Tests: fixture adapter + fixture ROS msgs. Not a product camera. Node tests: **one executor**, both nodes.  
+11. `infer()` returning `None` or missing `stamp_ns`/`frame_id` is `adapter_error` (no `make_mask(None)`).  
+12. Node clock: `now_ns` must be Python `int > 0` — no `int()` coerce.
 
 ---
 
@@ -75,7 +79,7 @@ Do **not** invent a dummy camera to “finish” the ROS node.
 T07 is the **only Dev 1 process** Dev 3 and Dev 5 should care about. It wires kernels and publishes the port. It is not a model.
 
 ```
-Source.read() → ImageFrame                    # T02 later
+T02 decode_frame / ROS Image+CameraInfo → ImageFrame
         │
         ▼
 evaluate(stamp, now_ns)                       # T05 FIRST — stamp only, no GPU
@@ -112,7 +116,7 @@ Downstream of `infer()` there is no YOLOE, no prompts, no OpenVINO.
 | Catch `AdapterError` → `adapter_error` bool | T05 contract |
 | Stamp/frame identity check frame vs `RawSemOutput` | §8.5 no silent reuse |
 | Inject `now_ns` / `now_ns_after` | pre-infer stale skip; post-infer age |
-| ROS wrapper (later) | sole publisher of port topics + `/ugv/perception_degraded` |
+| ROS wrapper (`adapter_node`) | sole publisher of port topics + `/ugv/perception_degraded` |
 | Startup: load remap/gates/freshness YAML or refuse | §8.2 no remap → no publish |
 
 ### T07 does not own
@@ -120,7 +124,7 @@ Downstream of `infer()` there is no YOLOE, no prompts, no OpenVINO.
 | Piece | Owner |
 |---|---|
 | Canonical types / `make_mask` internals | T01 |
-| Camera `Source` | T02 (skipped) |
+| Camera driver | Dev 5. T02 consumes Image+CameraInfo |
 | LUT / ontology | T03 |
 | τ / collapse math | T04 |
 | max-age math / OR policy | T05 |
@@ -217,17 +221,17 @@ When `raw is None` after a **fresh** pre-check (adapter raised), still `evaluate
 
 ---
 
-## 4. ROS wrapper (after T02)
+## 4. ROS wrapper (shipped)
 
-Node `adapter_node` calls `compose_tick` every frame.
+`PerceptionAdapterNode` (ROS 2 **Lyrical**) subscribes to Dev 5 `Image` + `CameraInfo`, runs `perception_cycle`, publishes:
 
 | Topic | When | Invariant |
 |---|---|---|
 | `/ugv/perception_degraded` `std_msgs/Bool` | **every** tick | `data == decision.degraded` |
 | `/segmentation/mask` `mono8` | iff `publish_mask` | pixels `{0,1,2}`; `header.stamp` = sensor; `frame_id` = optical |
 | `/segmentation/confidence` `32FC1` | iff `publish_mask` | `[0,1]`; same header as mask |
-| `/segmentation/port_meta` | iff `publish_mask` | `valid`, informational `age`, `scale=1.0`; **no** `adapter_id` |
-| `CameraInfo` | if T02 provides it | real calibration; no identity-K |
+| `/segmentation/port_meta` | iff `publish_mask` | **Contract:** `PortMeta.msg` (valid, age, scale). **This box:** `Float64MultiArray` `[valid, age, scale]` until colcon compiles the `.msg` |
+| `/segmentation/camera_info` | iff mask published | passthrough of last `CameraInfo` |
 
 Do **not** publish mask or meta with a new stamp when `publish_mask` is false. Bool still goes out.
 
@@ -243,7 +247,7 @@ Does not advertise `/cmd_vel`. Default `adapter:=yoloe`. `adapter:=onnx` illegal
 | N2 | Tick has zero `if adapter_id == ...` / no `openvino` / `ultralytics` / `torch` imports in `compose/` |
 | N3 | Stamp/frame on `CanonicalMask` equal `frame` (sensor), not `now_ns` |
 | N4 | `raw` stamp/frame mismatch → `adapter_error`, no mask |
-| N5 | `AdapterError` or other infer exception → `adapter_error=True`, no mask, `degraded=True` |
+| N5 | `AdapterError`, other infer exception, **`infer()` returns `None`**, or missing `stamp_ns`/`frame_id` → `adapter_error=True`, no mask, `degraded=True`. Never `make_mask(classes=None)` |
 | N6 | `collapse_candidate` comes from T04 return; T07 does not recompute τ |
 | N7 | `decision` comes from T05 `decide_publish` only |
 | N8 | `make_mask` only if `publish_mask`; `age_s >= 0` |
@@ -252,7 +256,7 @@ Does not advertise `/cmd_vel`. Default `adapter:=yoloe`. `adapter:=onnx` illegal
 | N11 | not `publish_mask` ⇒ `mask is None` (no restamp) |
 | N12 | `scale == 1.0`; `source_hw` = rgb HW |
 | N13 | `runner_up` is `None` (T06 v1) |
-| N14 | `compose/` does not import `rclpy` (node wrapper may, later) |
+| N14 | `compose/` does not import `rclpy`. `node/adapter_node.py` may |
 | N15 | No `/cmd_vel` in compose or node |
 | N16 | `PortMeta` fields stay header/valid/age/scale — no `adapter_id`, no `degraded` |
 | N17 | If pre-check `time_degraded`, `adapter.infer` is **not** called (no remap/gates either) |
@@ -284,23 +288,24 @@ No camera. Fixture `infer` + fixture frames (T10-style). **Every N1–N16.**
 | N3 | mask stamp == frame stamp; ≠ injected `now_ns` |
 | N4 | mismatched raw stamp → no mask, degraded |
 | N5 | `AdapterError` → degraded, `mask is None` |
-| N6–N7 | collapse True from T04 path → no mask |
+| N6–N7 | low score → published all-`0` mask, not all-`1`; collapse does not drop it |
 | N8–N11 | happy path `publish_mask` + `make_mask`; stale stamp → `mask is None` |
 | N9 | `frame=None` → degraded, no mask |
 | N17 | stale/future stamp: fixture adapter `infer` must not run |
 | N2/N14 | `compose/` sources have no `openvino` / `rclpy` |
 | N1 | missing remap path → load/start error |
 
-Live ROS + real camera: skipped until T02 (same as T06 `infer`).
+ROS node spin: fixture msgs + SpyAdapter + **one** `SingleThreadedExecutor`. Outdoor camera still Dev 5. YOLOE-26s IR is on disk.
 
 ---
 
 ## 8. Done when
 
-- `compose_tick` + N1–N16 pass without a camera.  
-- ROS node is specified; not required to run live until T02.  
-- Dev 3 can subscribe to topics without importing `adapter/` or T12.
+- `compose_tick` + N1–N17 pass without a camera.  
+- `PerceptionAdapterNode` spin test passes on this Lyrical install (fixture topics).  
+- Compiling `PortMeta.msg` is **still open** (rosidl).  
+- Dev 3 can subscribe without importing `adapter/` or T12.
 
 ## 9. Non-goals
 
-T02 driver, T12 OpenVINO class, T11 latency, costmaps, E-stop, RTAB-Map, ONNX, Depth Anything.
+Camera driver, T12 live IR, T11 latency, costmaps, E-stop, RTAB-Map, ONNX, Depth Anything, rosidl `PortMeta`.

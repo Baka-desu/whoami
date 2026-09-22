@@ -110,7 +110,7 @@ stamp_ns, now_ns, collapse_candidate, adapter_error
 | ROS topics | T07 |
 | Front ROI lethal | Dev 3 |
 | `/cmd_vel` hold | Dev 5 |
-| Camera | T02 (skipped) |
+| Camera | T02 (consume data; not this module) |
 
 ---
 
@@ -177,9 +177,9 @@ Every ID has a test. `type(x) is T`.
 | ID | Rule |
 |---|---|
 | F8 | `collapse_candidate` and `adapter_error`: `type is bool` (no truthy `1`). T05 does not produce `adapter_error`; T07 passes it |
-| F9 | `degraded = time_degraded or collapse_candidate or adapter_error` |
-| F10 | `valid = is_fresh and not collapse_candidate and not adapter_error` |
-| F11 | `publish_mask is valid`. **v1 does not** publish an all-unknown mask on collapse. No new mask unless valid |
+| F9 | `degraded = time_degraded or adapter_error`. `collapse_candidate` is type-checked and **does not** set degraded |
+| F10 | `valid = is_fresh and not adapter_error`. Mostly-unknown (collapse) stays valid |
+| F11 | `publish_mask is valid`. A fresh legal frame publishes `{0,1,2}`, including all-0. No new mask on stale or adapter fail |
 | F12 | Never restamp: this kernel does not take a previous mask or write `stamp_ns` |
 | F13 | `decide_publish` does not call `make_mask` and has no `degraded` field on `PortMeta` |
 | F14 | T05 modules do not import `rclpy`, `confidence`, `remap`, or T06 |

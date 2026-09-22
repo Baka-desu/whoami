@@ -63,7 +63,7 @@ Per-frame minmax is not a normalizer for this product. A constant `0.42` map bec
 | `degraded`, `/ugv/perception_degraded`, `producer_ok` | T05 / T07 |
 | Topics, stamps, `frame_id` | T07 |
 | YOLOE / OpenVINO GPU / CUDA | T06 / T12 |
-| Camera | T02 (skipped) |
+| Camera | T02 (consume data; not this module) |
 | Learned τ | deferred §14 |
 
 Do not return `CanonicalMask`. Do not set `degraded = collapse_candidate`.

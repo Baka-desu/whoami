@@ -112,13 +112,13 @@ def test_f8_truthy_collapse_typeerror() -> None:
         combine_degraded(False, 1, False)  # type: ignore[arg-type]
 
 
-def test_f9_f11_collapse_fresh_clocks_no_mask(tmp_path: Path) -> None:
+def test_f9_f11_collapse_fresh_clocks_still_publishes(tmp_path: Path) -> None:
     profile = _profile(tmp_path)
     result = evaluate(profile, _NOW - _NS // 10, _NOW)
     decision = decide_publish(result, True, False)
-    assert decision.degraded is True
-    assert decision.valid is False
-    assert decision.publish_mask is False
+    assert decision.degraded is False
+    assert decision.valid is True
+    assert decision.publish_mask is True
     assert decision.publish_mask is decision.valid
 
 

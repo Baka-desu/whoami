@@ -3,7 +3,7 @@
 **Task:** [T06](../tasks/T06-yoloe-adapter.md)  
 **Depends on (code/import):** T01 (`stamp_ns` Python `int > 0`); T03 contract (prompt names ⊂ ontology keys; `id_to_name` keys Python `int`); T12 `InferenceBackend` for `infer()`. T06 does **not** import remap apply, gates, freshness, or T07.  
 **Does not import / need at build for `pack()`:** T02, T04, T05, T07, camera.  
-**Blocked for product `infer()` proof:** T02 (skipped — no camera, night) and local weights.  
+**Blocked for product `infer()` proof:** a real Image+CameraInfo stream (Dev 5). **YOLOE-26s** OpenVINO IR is on disk (`weights/yoloe-26s-seg.xml`). T02 decode/subscribe **shipped**; no dummy RGB as outdoor.  
 **Runtime contract (not a T06→T07 import):** T06 **raises** on failure. T07 catches and sets `adapter_error=True` for T05. T06 does not set `degraded`.  
 **Authority:** [`architecture.md`](../../architecture.md) §3, §6 (YOLOE is the outdoor **source**, not the brain), §8.2, §16 (YOLOE-as-brain; adapter publish without remap)  
 **Not authority:** `dev.md` hours; Ultralytics as `live_cam` runtime; PyTorch XPU; `interfaces.md` “raw scores not [0,1] yet” — v1 YOLOE + T04 `identity` requires numeric domain `[0,1]` at this boundary  
@@ -41,7 +41,7 @@ This file is the architecture of T06. The task file is the build checklist. If t
 
 | File | Role |
 |---|---|
-| `turing/src/ugv_perception/adapter/frame.py` | `ImageFrame` DTO (rgb, stamp_ns, frame_id). T02 will fill this later. Not a camera driver |
+| `turing/src/ugv_perception/adapter/frame.py` | `ImageFrame` DTO (rgb, stamp_ns, frame_id). T02 fills this. Not a camera driver |
 | `turing/src/ugv_perception/adapter/output.py` | `RawSemOutput` |
 | `turing/src/ugv_perception/adapter/prompts.py` | `load_prompts` |
 | `turing/src/ugv_perception/adapter/pack.py` | instances → dense `label_ids` / `raw_scores` |
@@ -61,13 +61,13 @@ Do **not** add `DummySource` or a constant-mask backend.
 1. Freeze this file first (same rule as T01/T03–T05).  
 2. Create **only** the files in “Code later”.  
 3. Do **not** edit `port/`, `remap/`, `confidence/`, `freshness/`, T07, or `architecture.md`.  
-4. **Order:** `pack()` + prompt load first (no GPU). `infer()` needs T12 `InferenceBackend` + weights on disk. Product proof of `infer()` needs T02 (still skipped).  
+4. **Order:** `pack()` + prompt load first (no GPU). `infer()` uses T12 + **yoloe-26s-seg** IR (on disk). Product proof needs Dev 5 frames.  
 5. Inject the backend: `YoloeAdapter(backend: InferenceBackend, ...)`. T06 `pack` does not import `openvino`.  
 6. Convert `id_to_name` keys with `int(k)` **here**. Do not ask T03 to coerce.  
 7. On backend failure: **raise**. Do not return all-traversable / all-unknown as a “safe” mask.  
 8. No training. No download at field runtime. No PyTorch XPU as the product path.  
-9. Prefer a **small** YOLOE-seg (s/m) per `HARDWARE.md`. Pin the exact filename at implement time in `config/adapters/yoloe.yaml`, not in Python.  
-10. Tests: packing uses **scripted instances** (contract fixtures). That is not a dummy camera. GPU/`infer` tests stay skipped until a real frame + weights exist.
+9. Pin **YOLOE-26s-seg** IR in `config/adapters/yoloe.yaml`, not in Python. 26m only if 26s is weak.  
+10. Tests: packing uses **scripted instances** (contract fixtures). That is not a dummy camera. GPU engine `run` is allowed on the IR. Product `infer` on outdoor RGB stays skipped until Dev 5 frames exist.
 
 ---
 
@@ -76,7 +76,7 @@ Do **not** add `DummySource` or a constant-mask backend.
 YOLOE is the default **outdoor adapter**. It speaks model language (prompt ids, instance masks, scores). The brain never sees that. T03 remaps; T04 gates; T07 publishes.
 
 ```
-ImageFrame (T02 later; DTO now)
+ImageFrame (T02 decode / ROS subscribe)
         │
         ▼
 ┌────────────── T06 ──────────────┐
@@ -115,7 +115,7 @@ T06 must not import Nav2, `/cmd_vel`, or port publishers. If a change needs to k
 
 | Piece | Owner |
 |---|---|
-| Live camera / bag `Source` | T02 (skipped) |
+| Camera driver | Dev 5. T02 fills `ImageFrame` from Image+CameraInfo |
 | OpenVINO GPU / CUDA `InferenceBackend` | T12 |
 | Remap YAML / LUT | T03 |
 | τ / identity / collapse | T04 |
@@ -188,7 +188,7 @@ Every prompt is a non-empty Python `str`. **Subset** of `config/ontologies/yoloe
 ```yaml
 adapter_id: yoloe
 backend: openvino_gpu
-weights: weights/<pinned-yoloe-seg-sm>.xml   # pin at implement time; local file
+weights: weights/yoloe-26s-seg.xml
 ```
 
 Ultralytics may be used **offline** to export IR. It is not `live_cam`.
@@ -254,7 +254,7 @@ return pack(frame, raw_instances, prompts)
 
 If `backend.run` raises, `infer` raises (same exception or a wrapping `AdapterError`). T07 sets `adapter_error=True`. T06 does not call T05.
 
-`infer` product test: **skipped** until T02 + weights. Do not unblock with a synthetic RGB scene claimed as outdoor.
+`infer` product test: **skipped until a Dev 5 Image+CameraInfo stream exists**. IR is on disk. Do not unblock with a synthetic RGB scene claimed as outdoor.
 
 ---
 
@@ -275,7 +275,7 @@ If `backend.run` raises, `infer` raises (same exception or a wrapping `AdapterEr
 
 **Y1–Y14** in `test_yoloe_pack.py` with scripted `Instance`s (no camera, no OpenVINO required).
 
-GPU `infer` tests: mark skipped until weights + real frame exist. A `FixtureBackend` that returns scripted instances is allowed **only in tests**, never as `live_cam`.
+GPU engine `run` is tested on the IR. Product `infer` on outdoor RGB stays skipped until Dev 5 frames exist. A `FixtureBackend` that returns scripted instances is allowed **only in tests**, never as `live_cam`.
 
 **Implementation note (not a new architecture ID):** before packing, validate each `Instance.mask` as **exactly** `dtype=bool` (`np.bool_`), 2-D, non-empty, and `shape == rgb.shape[:2]`. Implied by the type/`pack` mechanics; test it anyway. Do not treat uint8 0/1 as a mask.
 
@@ -286,7 +286,7 @@ GPU `infer` tests: mark skipped until weights + real frame exist. A `FixtureBack
 - `pack` + prompt load pass Y1–Y14.  
 - `YoloeAdapter` is backend-injected.  
 - Weights path is config, local, not a runtime download.  
-- Product `infer()` on a real frame is **not** required to freeze this subarch; it **is** required to mark T06 the *task* done (T02 still skipped).
+- Product `infer()` on IR + real frames is required to mark T06 *task* done. Pack/Y1–Y14 are shipped.
 
 ## 10. Non-goals
 
