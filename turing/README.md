@@ -37,7 +37,7 @@ T09 tutorial ONNX          eval scaffold only, not product
 
 **Implemented (2026-09-18):** T01–T05 kernels, T02 decode+ros_bridge, T06 pack, T07 `compose_tick` + Lyrical `adapter_node`, T12 seam.  
 **On disk:** YOLOE-26s OpenVINO IR (`weights/yoloe-26s-seg.xml`). **No DummySource.** Outdoor product `infer` still needs a Dev 5 Image+CameraInfo stream.  
-T10 uses header/label fixtures. Outdoor camera is Dev 5.
+T10 uses header/label fixtures. T11 policy (latest-only queue + starve watchdog) **shipped**; live p95 waits on Dev 5. Outdoor camera is Dev 5.
 
 Runtime: Intel Arc B580 **now** (OpenVINO 2026.4.0, `device=GPU`). ROS 2 **Lyrical** on this RHEL 10 box. Later NVIDIA, less VRAM (CUDA + PyTorch). See [HARDWARE.md](HARDWARE.md).
 
@@ -124,6 +124,7 @@ If a task cannot be tested without a fake camera, the task is not done — get a
 | [subarchs/subarch6.md](subarchs/subarch6.md) | T06 YOLOE adapter architecture (wins over the T06 checklist) |
 | [subarchs/subarch7.md](subarchs/subarch7.md) | T07 port-composition architecture (wins over the T07 checklist) |
 | [subarchs/subarch10.md](subarchs/subarch10.md) | T10 wired port-contract tests (wins over the T10 checklist; T08 still deferred) |
+| [subarchs/subarch11.md](subarchs/subarch11.md) | T11 latency / latest-only queue (wins over the T11 checklist; T08 still deferred) |
 | [subarchs/subarch12.md](subarchs/subarch12.md) | T12 OpenVINO GPU seam (matches shipped T06 Protocol; wins over old T12 checklist) |
 
 Code for each task lands under `turing/src/` when we implement. Do not start T06/T08 until weights are on disk (see DATASETS.md).
