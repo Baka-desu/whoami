@@ -31,7 +31,7 @@ Architecture §8 is stricter than `dev.md`. We implement the architecture.
 | `/segmentation/mask` | `sensor_msgs/Image` `mono8` | Dev 3, Dev 5 watchdog | pixels **strictly** `{0,1,2}` |
 | `/segmentation/confidence` | `sensor_msgs/Image` `32FC1` | Dev 3 (optional), eval | port-normalized `[0,1]`, same H×W and header as mask |
 | `/segmentation/port_meta` | `PortMeta.msg` (contract). This box: `Float64MultiArray` `[valid, age, scale]` until rosidl | Dev 3, Dev 5 | same stamp/frame as mask; no `adapter_id` |
-| `/ugv/perception_degraded` | `std_msgs/Bool` | **Dev 5** (level-3 hold) | `true` on stale or adapter fail. Mostly-unknown is a legal mask; inflate `0` |
+| `/ugv/perception_degraded` | `std_msgs/Bool` | **Dev 5** (level-3 hold) | `true` on stale, invalid, gate storm, adapter fail |
 | depth / cloud (T08) | `Image` and/or `PointCloud2` | Dev 3 VoxelLayer | **not** remapped to {0,1,2} |
 
 `/cmd_vel` and `/cmd_vel_nav2` are **out of bounds**. We never publish them.

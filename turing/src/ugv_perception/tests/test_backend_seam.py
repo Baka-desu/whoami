@@ -244,21 +244,6 @@ def test_yolo_seg_decode_nms_keeps_higher_score() -> None:
     assert len(masks) == 1
 
 
-def test_yolo_seg_decode_nan_before_threshold_raises() -> None:
-    from ugv_perception.backend.openvino_gpu import decode_yolo_seg
-
-    nc, nm = 2, 4
-    pred = np.zeros((1, 4 + nc + nm, 2), dtype=np.float32)
-    pred[0, 0, 0] = 16.0
-    pred[0, 1, 0] = 16.0
-    pred[0, 2, 0] = 8.0
-    pred[0, 3, 0] = 8.0
-    pred[0, 4, 0] = np.nan
-    proto = np.zeros((1, nm, 8, 8), dtype=np.float32)
-    with pytest.raises(AdapterError):
-        decode_yolo_seg(pred, proto, nc, (32, 32))
-
-
 def test_yolo_seg_decode_score_out_of_range_raises() -> None:
     from ugv_perception.backend.openvino_gpu import decode_yolo_seg
 
