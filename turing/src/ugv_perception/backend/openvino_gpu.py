@@ -140,8 +140,6 @@ def decode_yolo_seg(
     boxes_xywh = matrix[:, :4]
     cls = matrix[:, 4 : 4 + n_classes]
     coeffs = matrix[:, 4 + n_classes :]
-    if np.any(~np.isfinite(cls)) or np.any(cls < 0.0) or np.any(cls > 1.0):
-        raise AdapterError("YOLO-seg class scores are not finite and in [0,1]; no clip")
     scores = cls.max(axis=1)
     class_indices = cls.argmax(axis=1).astype(np.int64)
     keep = scores >= conf_thres

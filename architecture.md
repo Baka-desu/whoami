@@ -137,7 +137,7 @@ Every port message includes at least:
 - `header.stamp` (image time)  
 - `header.frame_id` (optical / camera frame of the mask)  
 - **age** = now − stamp (or equivalent); consumer rejects if age > `perception_max_age`  
-- **valid** flag (false if the adapter failed or the sample is stale). Per-pixel gates map unsure pixels to class `0`; a mostly- or all-unknown mask is still a legal **current** sample.
+- **valid** flag (false if adapter failed / gates already tripped upstream)
 
 **Stale mask must not be treated as current.** Exceeding max age → perception-degraded → safety hold (§3.1).
 
@@ -151,7 +151,7 @@ Costmap consumers require:
 Detailed projection math / multi-camera sync refinements = **deferred** (§14) if TF + CameraInfo + stamp/age already hold.
 
 ### 8.6 Port fail-safe
-Stale or adapter failure → `/ugv/perception_degraded` + front ROI lethal/max-inflate + safety hold. Per-pixel gate miss is class `0` on that pixel, not a dropped mask. **Unknown ≠ free** (inflate `0`; never treat it as class `1`).
+Gate fail or stale/invalid → `/ugv/perception_degraded` + front ROI lethal/max-inflate + safety hold. **Unknown ≠ free.**
 
 ## 9. Semantic vs geometry precedence
 Optional Depth Anything → VoxelLayer is a **geometry side-channel**, not a second perception port.
