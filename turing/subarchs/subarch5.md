@@ -110,7 +110,7 @@ stamp_ns, now_ns, collapse_candidate, adapter_error
 | ROS topics | T07 |
 | Front ROI lethal | Dev 3 |
 | `/cmd_vel` hold | Dev 5 |
-| Camera | T02 (skipped) |
+| Camera | T02 (consume data; not this module) |
 
 ---
 

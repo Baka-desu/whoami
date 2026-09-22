@@ -34,7 +34,7 @@ T03
 | T12 → `adapter.pack` / `YoloeAdapter` | **no** | T06 owns pack/infer |
 | T12 → `compose/`, `remap/`, `confidence/`, `freshness/`, `port/mask` | **no** | would leak engine into the port |
 | `compose/` → `backend/` or `openvino` | **no** | N2 already tested |
-| T07 ROS node (later) → `backend.factory` | **yes, lazy** | factory must not import OpenVINO at module import time |
+| T07 `adapter_node.main` → `backend.factory` | **yes, lazy** | factory must not import OpenVINO at module import time |
 | Factory → `OpenVinoGpuBackend` | **lazy import inside the branch** | `import openvino` only when `backend: openvino_gpu` |
 
 `YoloeAdapter` **does not call `backend.load()`**. The factory returns a backend that is **already `load()`’d**. No T06 change.
@@ -176,7 +176,7 @@ Port `scale` stays **1.0** because T06 `pack` then sees HW = rgb HW. Interpolati
 
 ## 4. OpenVINO GPU (this desktop)
 
-- Pin **2026.4.0**. Compile/load IR from local `weights/yoloe-v8s-seg.xml` (and `.bin` as OpenVINO expects). No runtime download. No Ultralytics in `run()`.  
+- Pin **2026.4.0**. Compile/load IR from local `weights/yoloe-26s-seg.xml` (and `.bin`). No runtime download. No Ultralytics in `run()`.  
 - `device="GPU"`. If GPU compile/load fails, **raise** — do not retry CPU.  
 - One compiled model in memory. One frame in `run()` (T11 latest-only is T07/T11, not a batch here).  
 - If IR masks are not rgb HW, pass them through **`instances_from_engine`** (nearest bool / bilinear-then-0.5 float). Do not `cv2.resize` ad hoc in `OpenVinoGpuBackend.run`. Port `scale` stays 1.0.  
@@ -251,7 +251,7 @@ Skip (not part of B1–B14): compiled GPU/IR `run()`.
 
 - **Seam:** factory + `instances_from_engine` + **B1–B14** pass with no OpenVINO, no GPU, no IR.  
 - **Engine class:** `OpenVinoGpuBackend` exists and requests `device="GPU"` (no CPU fallback).  
-- **Live OpenVINO `run()`:** separately skipped until IR + GPU exist — that skip does **not** fail B1–B14.  
+- **Live OpenVINO `run()`:** skipped until `weights/yoloe-26s-seg.xml` exists — that skip does **not** fail B1–B14. Pin is **YOLOE-26s**, not v8s.  
 - `YoloeAdapter.infer` + `compose_tick` unchanged and still green.
 
 ## 10. Non-goals

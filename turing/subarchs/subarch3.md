@@ -2,7 +2,7 @@
 
 **Task:** [T03](../tasks/T03-remap.md)  
 **Depends on (code/import):** T01 port kernel ([subarch1](subarch1.md)) for `{0,1,2}` and `assert_canonical`  
-**Does not import / need at build:** T02 (skipped), T06, GPU, camera. T03 tests do not load YOLOE.  
+**Does not import / need at build:** T02, T06, GPU, camera. T03 tests do not load YOLOE.  
 **Runtime contract (not an import):** any adapter that calls `apply` (T06, T09) must present T03’s input types — including Python `int` keys on `id_to_name`. That is an adapter obligation, not a T03→T06 dependency.  
 **Authority:** [`architecture.md`](../../architecture.md) §3, §8.1, §8.2, §8.6, §16 (no remap → no publish; unknown ≠ free; no `cautious`)  
 **Not authority:** `dev.md` hours; YOLOE prompt lists (T06); τ (T04)  
@@ -55,7 +55,7 @@ T01 still owns “is this a legal port sample.” T03 owns “did this adapter�
 | Piece | Owner |
 |---|---|
 | Canonical IDs, `assert_canonical`, `make_mask` | T01 — T03 **calls** them; it does not redefine them |
-| `ImageFrame`, camera, calibration | T02 (skipped) |
+| `ImageFrame`, camera, calibration | T02 (consume data; not this module) |
 | YOLOE prompts, backends, OpenVINO/CUDA | T06 / T12 |
 | `RawSemOutput` as a whole (stamp, frame_id) | T06. T03 takes a **minimal input** (below) |
 | τ / normalize | T04 |

@@ -22,7 +22,7 @@ Downstream (Dev 3 costmaps, Dev 5 safety) bind only to port outputs. They never 
 
 ```
 T01 types + validators     pure contract, no camera
-T02 consume Image+CameraInfo  subscriber/converter (no V4L2); live skip until Dev 5 topics
+T02 consume Image+CameraInfo  decode + ros_bridge **shipped**; outdoor stream still Dev 5
 T03 remap engine           YAML, no model
 T04 confidence gates       YAML, no model
 T05 freshness / degraded   time + flags, no model
@@ -35,12 +35,11 @@ T08 Depth Anything         optional geometry, parallel to port  ← needs weight
 T09 tutorial ONNX          eval scaffold only, not product
 ```
 
-T01, T03–T05, and T12 can be built **without** a camera or weights.  
-**T02 is skipped** until a real camera or outdoor recording exists. No DummySource.  
-T06 is the first task that produces a real mask. There is no FakeAdapter.  
-T10 uses test-only header/label fixtures; they are not a product source.
+**Implemented (2026-09-18):** T01–T05 kernels, T02 decode+ros_bridge, T06 pack, T07 `compose_tick` + Lyrical `adapter_node`, T12 seam.  
+**Not on disk:** YOLOE-26s OpenVINO IR. **No DummySource.** GPU `infer` tests skip until weights exist.  
+T10 uses header/label fixtures. Outdoor camera is Dev 5.
 
-Runtime: Intel Arc B580 **now** (OpenVINO 2026.4.0, `device=GPU`). Later NVIDIA, less VRAM (CUDA + PyTorch). See [HARDWARE.md](HARDWARE.md) (execution only; `architecture.md` still owns the port).
+Runtime: Intel Arc B580 **now** (OpenVINO 2026.4.0, `device=GPU`). ROS 2 **Lyrical** on this RHEL 10 box. Later NVIDIA, less VRAM (CUDA + PyTorch). See [HARDWARE.md](HARDWARE.md).
 
 ### T07 port node (explicit)
 
@@ -114,7 +113,7 @@ If a task cannot be tested without a fake camera, the task is not done — get a
 | [00-role-and-laws.md](00-role-and-laws.md) | Dev 1’s place in the product |
 | [interfaces.md](interfaces.md) | Internal APIs between modules |
 | [DATASETS.md](DATASETS.md) | Weights / datasets — **read this, action required** |
-| [HARDWARE.md](HARDWARE.md) | Arc B580 OpenVINO GPU now; NVIDIA CUDA later; T02 skipped |
+| [HARDWARE.md](HARDWARE.md) | Arc B580 OpenVINO GPU; ROS Lyrical; YOLOE-26s; no camera device |
 | [CONFLICTS.md](CONFLICTS.md) | Where `dev.md` is ignored |
 | [tasks/](tasks/) | T01–T12 build checklists |
 | [subarchs/subarch1.md](subarchs/subarch1.md) | T01 port-kernel architecture (wins over the T01 checklist) |

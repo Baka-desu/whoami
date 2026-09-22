@@ -52,15 +52,21 @@ B580 is the development card, not the floor. Assume the NVIDIA has **less** VRAM
 
 - One frame in flight (latest-only queue; T11).
 - YOLOE and Depth Anything **sequential on the same frame** if both run.
-- Prefer a **small** YOLOE-seg (s/m, not l) unless outdoor quality forces otherwise.
+- Default adapter weights: **YOLOE-26s-seg** OpenVINO IR (`yoloe-26s-seg.xml`). 26m only if 26s is weak and VRAM allows.
 - No extra GPU copies; no keeping RGB + mask + depth + two models resident if it blows the small card.
 - INT8 / extra compression is later, not a dummy-mask shortcut.
 
+## ROS on this desktop (2026-09-18)
+
+- Distro: **ROS 2 Lyrical** (RHEL 10 Tier-2 pairing). `architecture.md` still lists Jazzy/Humble as the product stack target — this box runs **Lyrical**.
+- Installed: `rclpy`, `sensor_msgs`, `std_msgs`, `rmw-dds-common-runtime`.
+- Node tests: `source /opt/ros/lyrical/setup.bash`, keep `LD_LIBRARY_PATH` / `AMENT_PREFIX_PATH`; do **not** export ROS `PYTHONPATH` into pytest (breaks collection via `launch_testing`). `conftest.py` adds ROS site-packages only if `/opt/ros/lyrical` exists.
+- `pytest.importorskip` on ROS test modules so pure kernels run without ROS.
+
 ## Outdoor / camera (now)
 
-- Work is on a **desktop**. It is **night**. Outdoor live training and outdoor live testing are **later, not now**.
-- **No camera on this machine.** T02 cannot be product-tested.
-- **No training** (already v1 policy). Night + no camera does not change that.
-- **No dummy camera** to unblock T02.
-
-**T02 decode kernel** (Image+CameraInfo → `ImageFrame`) can be built **without** a device — Dev 1 consumes data, Dev 5 owns the driver. Live subscribe still waits on Dev 5 topics. T06 GPU `infer` / T07 ROS / T11 stay blocked on a real stream; T10 still uses header/label fixtures.
+- Work is on a **desktop**. Outdoor live training/testing is **later**.
+- **No camera device.** Dev 1 **consumes** `Image` + `CameraInfo` (T02 `decode_frame` + `ros_bridge`; T07 node subscribes). Dev 5 owns the driver.
+- T02/T07 ROS path is **tested** with fixture messages (shared executor). That is not a dummy camera driver.
+- **No training.** Default weights pin: **YOLOE-26s-seg** IR — **not on disk yet**.
+- T06 GPU `infer` / T12 live `run` wait on `weights/yoloe-26s-seg.xml`. T11 waits on a real stream.

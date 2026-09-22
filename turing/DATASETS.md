@@ -13,15 +13,15 @@ There is also **no dummy data**. That means we cannot invent a camera. Something
 - For `live_cam`: working device (V4L2 / ROS camera driver).
 - For eval: outdoor recordings from **that** camera (rosbag or video + sidecar calibration). Do not substitute random internet clips.
 
-**Now:** no camera on this desktop; it is night; outdoor live train/test is later. **T02 is skipped** until a real source exists ([HARDWARE.md](HARDWARE.md)). Do not invent a camera.
+**Now:** no camera **device**. T02 **decode + ROS subscribe** shipped (fixture msgs). Outdoor live still Dev 5. Do not invent a camera.
 
-Without this, T02 cannot be finished. T03–T05 and T12 can proceed. T06/T07 can be coded against the seam; T10 can still pass on header/label fixtures. T11 and product verification of T07 need this source.
+T11 and outdoor product proof need a real stream. T06 GPU `infer` needs IR (below).
 
 ### 2. YOLOE pretrained segmentation weights — **download, no training**
 
 T06 uses Ultralytics YOLOE as a **promptable segmenter**, outdoor default adapter.
 
-- We need official pretrained YOLOE-seg weights on disk (example names, pinned at implement time: `yoloe-v8l-seg.pt` or the current YOLOE-seg equivalent).
+- Pin: **`yoloe-26s-seg`** → OpenVINO IR `weights/yoloe-26s-seg.xml` (see `config/adapters/yoloe.yaml`). 26m only if 26s is weak.
 - We do **not** train YOLOE on this project unless outdoor quality is later judged insufficient.
 - You must allow a one-time download (or drop the `.pt` file into `turing/weights/`).
 
@@ -66,8 +66,8 @@ Until that failure is observed, **do not collect a training set**.
 
 ## Action list for you
 
-1. Camera / outdoor recording — **later** (night, no camera now). T02 stays skipped.
-2. Confirm we may download YOLOE-seg weights and convert for **OpenVINO 2026.4.0 GPU** on Arc B580 when T06 starts (no training).
+1. Camera / outdoor recording — Dev 5 stream; T02 consume path shipped.
+2. Download **YOLOE-26s-seg** and export OpenVINO 2026.4.0 GPU IR to `turing/weights/` (not in git).
 3. Say whether T08 (Depth Anything) is in the first ship.
 4. Optional: if you already have RUGD locally, tell me the path — eval only, not now.
 

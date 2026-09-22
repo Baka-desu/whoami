@@ -4,7 +4,8 @@
 **Depends on (code/import):** T01 `stamp_ns` Python `int > 0`; shipped T06 `ImageFrame` (`adapter/frame.py`). **Do not fork a second frame type.**  
 **Does not own:** the camera device, V4L2, launch, URDF extrinsics (Dev 5), `config/cameras/` authorship (Dev 2).  
 **Does not import:** remap, gates, freshness, `pack`, OpenVINO, `compose_tick`.  
-**Blocked for live proof:** Dev 5 must publish `Image` + `CameraInfo`. No device on this desktop → live subscribe tests **skip**. Kernel tests use **message fixtures**, not a dummy camera.  
+**Status (2026-09-18):** `decode_frame` and `ros_bridge` (sensor_msgs → views) **shipped**. `PerceptionAdapterNode` subscribes. No V4L2. No camera device on this desktop — tests use **message fixtures** and a ROS spin with fixture `Image`+`CameraInfo` (not a dummy camera driver). Outdoor `live_cam` still needs Dev 5 publishing a real stream.  
+**ROS on this box:** Lyrical (RHEL 10). `pytest.importorskip` if `sensor_msgs` is missing.  
 **Authority:** [`architecture.md`](../../architecture.md) §5 dual fan-out, §8.4, §8.5. Architecture wins over `dev.md` “Dev 1 capture node.”  
 **Not authority:** `dev.md` task 1 V4L2/capture; old T02 `LiveCameraSource` opening the device; `HARDWARE.md` “T02 skipped until a camera exists” as a ban on **coding the converter**.
 
@@ -33,15 +34,17 @@ This file is the architecture of T02. The task file is the build checklist. If t
 | `turing/src/ugv_perception/compose/tick.py` | consumes `ImageFrame`; T02 does not call it |
 | `turing/src/ugv_perception/port/validate.py` | `assert_camera_info_pair` is frame_id only; T02 still checks K exists |
 
-### Code later (only after this subarch is complete)
+### Shipped files
 
 | File | Role |
 |---|---|
-| `turing/src/ugv_perception/ingest/msgs.py` | ROS-agnostic `ImageView` + `CameraInfoView` (fixtures + ROS wrapper map into these) |
+| `turing/src/ugv_perception/ingest/msgs.py` | ROS-agnostic `ImageView` + `CameraInfoView` |
 | `turing/src/ugv_perception/ingest/decode.py` | `decode_frame(image, camera_info) -> ImageFrame` |
-| `turing/src/ugv_perception/ingest/__init__.py` | exports |
-| `turing/src/ugv_perception/tests/test_ingest.py` | S1–S15; **no rclpy required** |
-| `turing/src/ugv_perception/ingest/ros_source.py` | **later** ROS subscriber → `decode_frame` → `ImageFrame`; after Dev 5 topics exist |
+| `turing/src/ugv_perception/ingest/ros_bridge.py` | `sensor_msgs` Image/CameraInfo → views (copies `data`) |
+| `turing/src/ugv_perception/tests/test_ingest.py` | S1–S15; no rclpy required |
+| `turing/src/ugv_perception/tests/test_ros_bridge.py` | ROS msg conversion; `importorskip` without ROS |
+
+Subscribe lives on **T07** `PerceptionAdapterNode` (not a separate `ros_source.py`).
 
 Do **not** add `LiveCameraSource` / V4L2.  
 Do **not** add `DummySource`.  
@@ -60,8 +63,8 @@ Do **not** put `CameraInfo` K on `ImageFrame` (T06/T07 don’t need K; T07 ROS c
 6. Missing `CameraInfo` → raise. Identity/`zeros` `K` → raise. Do not invent `K`.  
 7. Do not undistort, rectify, or run stereo (Dev 2).  
 8. Tests: fixture buffers with **known pixel patterns** (encoding/BGR tests). That is not a dummy camera and not outdoor RGB.  
-9. Live subscribe / bag replay: **skip** until a real `Image`+`CameraInfo` stream exists.  
-10. ROS wrapper belongs with T07 node later: subscribe → `decode_frame` → `compose_tick`. T02 kernel stays ROS-free.
+9. Outdoor bag / Dev 5 live camera: still needed for **product** proof, not for kernel tests.  
+10. T07 node: subscribe → `ros_bridge` → `decode_frame` → `compose_tick`. T02 **decode** stays ROS-free; `ros_bridge` may import `sensor_msgs`.
 
 ---
 
@@ -94,7 +97,7 @@ If T02 lies about stamp or `frame_id`, T05 age is wrong and Dev 3 projects into 
 | Encoding → uint8 HWC RGB | T06 pack |
 | Stamp/frame identity + CameraInfo pair | §8.4, §8.5 |
 | Reject missing/fake `K` | T01 left K to T02 |
-| ROS subscriber wrapper (later) | consume Dev 5 topics |
+| ROS subscribe (on T07 node) | consume Dev 5 topics via `ros_bridge` |
 
 ### T02 does not own
 
@@ -160,7 +163,7 @@ No `camera_info=None` overload.
 | S11 | Decode failure → **raise** (T07 ROS may then pass `frame=None` / degraded). Do not emit a black frame |
 | S12 | `bgr8` fixture `[B,G,R]` becomes RGB `[R,G,B]` (tested) |
 | S13 | Kernel tests do not require a device or bag |
-| S14 | Live subscribe test **skipped** until Dev 5 topics exist |
+| S14 | Subscribe path is `ros_bridge`, not V4L2. Fixture `sensor_msgs` tests; no dummy driver |
 | S15 | `ImageFrame.rgb` is a **new** uint8 array. It must **not** alias `ImageView.data` (or the ROS `Image.data` buffer). `decode_frame` copies pixel bytes out of each row. Later mutation of the message must not change the frame |
 
 Pairing with T01 I9: after decode, `ImageFrame.frame_id == CameraInfo.frame_id`. T07 `make_mask` may pass CameraInfo later; T02 has already refused a fake K.
@@ -204,7 +207,7 @@ Message fixtures only. **Every S1–S15.**
 | S12 | bgr8 swap |
 | S15 | mutate source `data` after decode → `ImageFrame.rgb` unchanged |
 | S9 | `ingest/` no `rclpy` / `cv2` / `openvino` |
-| S14 | live subscribe skipped |
+| S14 | `image_msg_to_view` on a fixture `sensor_msgs/Image` |
 
 A fixture may use a small **non-zero** RGB pattern (e.g. one red pixel) to test encoding. That is a contract buffer, not `DummySource`.
 
@@ -213,8 +216,8 @@ A fixture may use a small **non-zero** RGB pattern (e.g. one red pixel) to test 
 ## 8. Done when
 
 - `decode_frame` + S1–S15 pass with **no camera**.  
-- Live ROS subscribe remains skipped until Dev 5 publishes.  
-- `ImageFrame` type unchanged; T06/T07 tests still green.
+- `ros_bridge` converts real `sensor_msgs`; T07 node subscribes.  
+- Outdoor live stream still Dev 5. `ImageFrame` type unchanged.
 
 ## 9. Non-goals
 
