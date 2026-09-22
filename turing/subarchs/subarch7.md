@@ -288,7 +288,7 @@ No camera. Fixture `infer` + fixture frames (T10-style). **Every N1–N16.**
 | N3 | mask stamp == frame stamp; ≠ injected `now_ns` |
 | N4 | mismatched raw stamp → no mask, degraded |
 | N5 | `AdapterError` → degraded, `mask is None` |
-| N6–N7 | collapse True from T04 path → no mask |
+| N6–N7 | low score → published all-`0` mask, not all-`1`; collapse does not drop it |
 | N8–N11 | happy path `publish_mask` + `make_mask`; stale stamp → `mask is None` |
 | N9 | `frame=None` → degraded, no mask |
 | N17 | stale/future stamp: fixture adapter `infer` must not run |

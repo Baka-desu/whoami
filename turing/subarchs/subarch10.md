@@ -205,7 +205,7 @@ These are allowed numeric tables (DATASETS: contract tests, not perception data)
 | W7 | Set `now_ns - source stamp_ns = 0.6 s` against product `perception_max_age=0.50`. Do **not** pass `age_s` in. Freshness is `now − sensor stamp` (T05). Fail-closed `WireOut`: `degraded=True`, `mask is None`, `confidence is None`, `port_meta is None` |
 | W8 | After a **good** publish, a later stale tick does **not** re-emit that mask with a new header (no restamp) |
 | W9 | Adapter fail on the wire (`AdapterError`, `infer() is None`, missing stamp/frame, or ≠ source) → **one** consumer invariant: `degraded=True`, `mask is None`, `confidence is None`, `port_meta is None`. Same shipped T07 N4/N5 path. T10 does not re-fix T07. Name the pytest cases per input (when-coding 5b). |
-| W10 | All scores below product `tau_min` → collapse → same fail-closed `WireOut` as W9, **not** a valid all-traversable mask |
+| W10 | All scores below product `tau_min` → published mask is all `0` (not all `1`), `degraded=false` if the frame is fresh. Collapse does not drop the mask |
 | W11 | Missing **product remap configuration** must prevent the wired pipeline from producing a mask. T10 does not define T03 internals (illegal map keys, unmapped name → `0` are T03). |
 | W12 | Wire bytes / `Float64MultiArray` labels do not contain YOLOE prompt strings, `"openvino_gpu"`, or `"adapter_id"` |
 | W13 | `make_mask(..., classes` with a `3`) still raises; T10 never sees a published pixel `3` |

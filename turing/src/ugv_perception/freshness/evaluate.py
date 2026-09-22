@@ -48,9 +48,11 @@ def combine_degraded(
     adapter_error: bool,
 ) -> bool:
     time_degraded = _require_bool(time_degraded, name="time_degraded")
-    collapse_candidate = _require_bool(collapse_candidate, name="collapse_candidate")
+    # §8.1: 0 is a legal class. §8.3 still maps weak pixels to 0.
+    # §8.4/§8.6: degraded is stale or adapter failure, not "mostly unknown".
+    _require_bool(collapse_candidate, name="collapse_candidate")
     adapter_error = _require_bool(adapter_error, name="adapter_error")
-    return bool(time_degraded or collapse_candidate or adapter_error)
+    return bool(time_degraded or adapter_error)
 
 
 def decide_publish(
@@ -65,5 +67,5 @@ def decide_publish(
     degraded = combine_degraded(
         result.time_degraded, collapse_candidate, adapter_error
     )
-    valid = bool(result.is_fresh and not collapse_candidate and not adapter_error)
+    valid = bool(result.is_fresh and not adapter_error)
     return PublishDecision(valid=valid, degraded=degraded, publish_mask=valid)

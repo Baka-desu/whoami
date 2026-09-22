@@ -210,14 +210,19 @@ def test_wire_adapter_frame_mismatch_degrades(kernels) -> None:
     _fail_closed(wired)
 
 
-def test_w10_collapse_not_all_traversable(kernels) -> None:
+def test_w10_low_score_publishes_unknown_not_traversable(kernels) -> None:
     scores = np.full((2, 2), 0.1, dtype=np.float32)
     wired = _wire(
         kernels,
         frame=_source_frame(),
         adapter=FixtureAdapter(raw_scores=scores),
     )
-    _fail_closed(wired)
+    assert wired.degraded.data is False
+    assert wired.mask is not None
+    assert wired.confidence is not None
+    assert wired.port_meta is not None
+    pix = _mask_pixels(wired.mask)
+    assert set(int(x) for x in np.unique(pix).tolist()) == {0}
 
 
 def test_w11_missing_remap_prevents_mask(tmp_path: Path) -> None:
