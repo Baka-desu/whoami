@@ -3,3 +3,7 @@ turing/yoloe-26s-seg_openvino_model
 turing/mobileclip2_b.ts
 sih/turing/yoloe-26s-seg.pt
 turing/yoloe-26s-seg.pt
+turing/thetestimage1.jpg
+turing/testimage2.webp
+turing/testimage3.jpg
+turing/eval_pictured_rocks_trail.jpg
