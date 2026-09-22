@@ -123,7 +123,7 @@ def test_v1_intended_path_at_once() -> None:
     from rclpy.executors import SingleThreadedExecutor
     from rclpy.node import Node
 
-    from ugv_perception.node.adapter_node import PerceptionAdapterNode
+    from ugv_perception.node.adapter_node import PerceptionAdapterNode, camera_info_qos
 
     t = Time()
     t.sec = _STAMP // _NS
@@ -145,7 +145,7 @@ def test_v1_intended_path_at_once() -> None:
     node = PerceptionAdapterNode(adapter=adapter, now_ns_fn=lambda: _NOW)
     helper = Node("v1_once_pub")
     pub_i = helper.create_publisher(Image, "/camera/image_raw", 10)
-    pub_c = helper.create_publisher(CameraInfo, "/camera/camera_info", 10)
+    pub_c = helper.create_publisher(CameraInfo, "/camera/camera_info", camera_info_qos())
     masks: list[Image] = []
     confs: list[Image] = []
     flags: list[bool] = []

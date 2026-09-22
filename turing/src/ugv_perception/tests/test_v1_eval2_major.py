@@ -27,7 +27,7 @@ from rclpy.node import Node
 from ugv_perception.adapter.prompts import load_prompts
 from ugv_perception.adapter.yoloe import YoloeAdapter, load_adapter_config
 from ugv_perception.backend.factory import build_backend
-from ugv_perception.node.adapter_node import PerceptionAdapterNode
+from ugv_perception.node.adapter_node import PerceptionAdapterNode, camera_info_qos
 from ugv_perception.port.ids import CANONICAL, CONF_ENCODING, MASK_ENCODING
 
 _ROOT = Path(__file__).resolve().parents[3]
@@ -115,7 +115,7 @@ def _run(adapter, img, info, now_ns: int = _NOW, loops: int = 80):
     node = PerceptionAdapterNode(adapter=adapter, now_ns_fn=lambda: now_ns)
     helper = Node("eval2_pub")
     pub_i = helper.create_publisher(Image, "/camera/image_raw", 10)
-    pub_c = helper.create_publisher(CameraInfo, "/camera/camera_info", 10)
+    pub_c = helper.create_publisher(CameraInfo, "/camera/camera_info", camera_info_qos())
     masks: list[Image] = []
     confs: list[Image] = []
     cinfos: list[CameraInfo] = []

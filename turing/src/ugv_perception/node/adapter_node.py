@@ -23,13 +23,23 @@ _ROOT = Path(__file__).resolve().parents[3]
 _NS = 1_000_000_000
 
 
-def _latest_only() -> QoSProfile:
-    """KEEP_LAST depth 1. Reliability/durability unchanged from prior defaults."""
+def _image_qos() -> QoSProfile:
+    """KEEP_LAST depth 1. Image streams are live, not latched."""
     return QoSProfile(
         history=HistoryPolicy.KEEP_LAST,
         depth=1,
         reliability=ReliabilityPolicy.RELIABLE,
         durability=DurabilityPolicy.VOLATILE,
+    )
+
+
+def camera_info_qos() -> QoSProfile:
+    """KEEP_LAST depth 1. TRANSIENT_LOCAL receives a latched calibration."""
+    return QoSProfile(
+        history=HistoryPolicy.KEEP_LAST,
+        depth=1,
+        reliability=ReliabilityPolicy.RELIABLE,
+        durability=DurabilityPolicy.TRANSIENT_LOCAL,
     )
 
 
@@ -90,15 +100,15 @@ class PerceptionAdapterNode(Node):
         self._last_camera_info_msg: CameraInfo | None = None
         self._stamp_lock = threading.Lock()
         self._last_image_stamp: int | None = None
+        self._inferred_stamp: int | None = None
         self._stop = threading.Event()
-        qos = _latest_only()
         image_topic = self.get_parameter("image_topic").get_parameter_value().string_value
         info_topic = self.get_parameter("camera_info_topic").get_parameter_value().string_value
         self._sub_image = self.create_subscription(
-            Image, image_topic, self._on_image, qos
+            Image, image_topic, self._on_image, _image_qos()
         )
         self._sub_info = self.create_subscription(
-            CameraInfo, info_topic, self._on_info, qos
+            CameraInfo, info_topic, self._on_info, camera_info_qos()
         )
         self._pub_degraded = self.create_publisher(Bool, "/ugv/perception_degraded", 10)
         self._pub_mask = self.create_publisher(Image, "/segmentation/mask", 10)
@@ -132,12 +142,16 @@ class PerceptionAdapterNode(Node):
     def _on_info(self, msg: CameraInfo) -> None:
         self._last_info = camera_info_msg_to_view(msg)
         self._last_camera_info_msg = msg
-        self._tick()
+        with self._stamp_lock:
+            stamp = self._last_image_stamp
+        if stamp is not None and stamp != self._inferred_stamp:
+            self._tick()
 
     def _tick(self) -> None:
         now_ns = self._now_ns_fn()
         if type(now_ns) is not int or now_ns <= 0:
             raise TypeError("now_ns must be a Python int > 0")
+        had_pair = self._last_image is not None and self._last_info is not None
         out = perception_cycle(
             image=self._last_image,
             camera_info=self._last_info,
@@ -165,6 +179,8 @@ class PerceptionAdapterNode(Node):
             self._pub_meta.publish(wired.port_meta)
             if self._last_camera_info_msg is not None:
                 self._pub_cinfo.publish(self._last_camera_info_msg)
+        if had_pair and self._last_image is not None:
+            self._inferred_stamp = self._last_image.stamp_ns
 
     def _watchdog_loop(self, period_s: float) -> None:
         max_age = float(self._fresh.perception_max_age)

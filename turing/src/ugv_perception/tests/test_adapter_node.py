@@ -17,7 +17,7 @@ import rclpy
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
 
-from ugv_perception.node.adapter_node import PerceptionAdapterNode
+from ugv_perception.node.adapter_node import PerceptionAdapterNode, camera_info_qos
 from ugv_perception.tests.test_node_cycle import SpyAdapter
 
 _STAMP = 2_000_000_000
@@ -52,7 +52,7 @@ def test_adapter_node_spin_fixture_topics() -> None:
     )
     helper = Node("test_cam_pub")
     pub_i = helper.create_publisher(Image, "/camera/image_raw", 10)
-    pub_c = helper.create_publisher(CameraInfo, "/camera/camera_info", 10)
+    pub_c = helper.create_publisher(CameraInfo, "/camera/camera_info", camera_info_qos())
     masks: list[Image] = []
     flags: list[bool] = []
     helper.create_subscription(Image, "/segmentation/mask", masks.append, 10)
