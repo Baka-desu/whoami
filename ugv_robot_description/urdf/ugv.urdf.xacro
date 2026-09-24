@@ -1,0 +1,212 @@
+<?xml version="1.0"?>
+<!--
+  Dev 5 - differential-drive UGV description (dev.md Dev 5 task 4, architecture.md §7/§13 item 9).
+
+  Dimensions here must stay consistent with:
+    - ugv_safety motor_driver_node defaults (wheel_radius_m=0.08, track_width_m=0.40)
+    - config/robots/footprint_primary.yaml / footprint_secondary.yaml (chassis 0.50 x 0.35)
+
+  camera_optical_frame is what Dev 5's camera driver launch stamps into
+  CameraInfo.header.frame_id / Image.header.frame_id - Dev 1 and Dev 2 both
+  bind to this name (architecture.md §8.5).
+-->
+<robot name="ugv" xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <xacro:property name="chassis_length" value="0.50"/>
+  <xacro:property name="chassis_width" value="0.35"/>
+  <xacro:property name="chassis_height" value="0.15"/>
+  <xacro:property name="chassis_mass" value="12.0"/>
+
+  <xacro:property name="wheel_radius" value="0.08"/>
+  <xacro:property name="wheel_width" value="0.04"/>
+  <xacro:property name="wheel_mass" value="1.2"/>
+  <xacro:property name="track_width" value="0.40"/>
+  <xacro:property name="wheel_x_offset" value="0.0"/>
+
+  <xacro:property name="ground_clearance" value="0.05"/>
+  <xacro:property name="base_z" value="${wheel_radius + ground_clearance}"/>
+
+  <xacro:property name="camera_x" value="0.22"/>
+  <xacro:property name="camera_z" value="0.20"/>
+
+  <material name="chassis_grey">
+    <color rgba="0.35 0.35 0.38 1.0"/>
+  </material>
+  <material name="wheel_black">
+    <color rgba="0.08 0.08 0.08 1.0"/>
+  </material>
+  <material name="camera_dark">
+    <color rgba="0.05 0.05 0.05 1.0"/>
+  </material>
+
+  <link name="base_footprint"/>
+
+  <joint name="base_footprint_to_base_link" type="fixed">
+    <parent link="base_footprint"/>
+    <child link="base_link"/>
+    <origin xyz="0 0 ${base_z}" rpy="0 0 0"/>
+  </joint>
+
+  <link name="base_link">
+    <visual>
+      <geometry>
+        <box size="${chassis_length} ${chassis_width} ${chassis_height}"/>
+      </geometry>
+      <material name="chassis_grey"/>
+    </visual>
+    <collision>
+      <geometry>
+        <box size="${chassis_length} ${chassis_width} ${chassis_height}"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="${chassis_mass}"/>
+      <inertia ixx="0.25" ixy="0.0" ixz="0.0" iyy="0.35" iyz="0.0" izz="0.45"/>
+    </inertial>
+  </link>
+
+  <xacro:macro name="wheel" params="prefix y_reflect">
+    <link name="${prefix}_wheel_link">
+      <visual>
+        <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+        <geometry>
+          <cylinder radius="${wheel_radius}" length="${wheel_width}"/>
+        </geometry>
+        <material name="wheel_black"/>
+      </visual>
+      <collision>
+        <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+        <geometry>
+          <cylinder radius="${wheel_radius}" length="${wheel_width}"/>
+        </geometry>
+      </collision>
+      <inertial>
+        <mass value="${wheel_mass}"/>
+        <inertia ixx="0.01" ixy="0.0" ixz="0.0" iyy="0.01" iyz="0.0" izz="0.01"/>
+      </inertial>
+    </link>
+
+    <joint name="${prefix}_wheel_joint" type="continuous">
+      <parent link="base_link"/>
+      <child link="${prefix}_wheel_link"/>
+      <origin xyz="${wheel_x_offset} ${y_reflect * track_width / 2.0} ${-ground_clearance}" rpy="0 0 0"/>
+      <axis xyz="0 1 0"/>
+    </joint>
+  </xacro:macro>
+
+  <xacro:wheel prefix="left" y_reflect="1"/>
+  <xacro:wheel prefix="right" y_reflect="-1"/>
+
+  <!-- Rear caster: passive support, not a driven wheel. -->
+  <link name="caster_wheel_link">
+    <visual>
+      <geometry>
+        <sphere radius="${wheel_radius / 2.0}"/>
+      </geometry>
+      <material name="wheel_black"/>
+    </visual>
+    <collision>
+      <geometry>
+        <sphere radius="${wheel_radius / 2.0}"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="0.3"/>
+      <inertia ixx="0.001" ixy="0.0" ixz="0.0" iyy="0.001" iyz="0.0" izz="0.001"/>
+    </inertial>
+  </link>
+
+  <joint name="caster_wheel_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="caster_wheel_link"/>
+    <origin xyz="${-chassis_length / 2.0 + 0.03} 0 ${-ground_clearance - wheel_radius / 2.0}" rpy="0 0 0"/>
+  </joint>
+
+  <!-- Camera mount: physical link + optical frame per REP103. -->
+  <link name="camera_link">
+    <visual>
+      <geometry>
+        <box size="0.03 0.09 0.03"/>
+      </geometry>
+      <material name="camera_dark"/>
+    </visual>
+    <collision>
+      <geometry>
+        <box size="0.03 0.09 0.03"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="0.15"/>
+      <inertia ixx="0.0001" ixy="0.0" ixz="0.0" iyy="0.0001" iyz="0.0" izz="0.0001"/>
+    </inertial>
+  </link>
+
+  <joint name="camera_mount_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="camera_link"/>
+    <origin xyz="${camera_x} 0 ${camera_z - base_z}" rpy="0 0 0"/>
+  </joint>
+
+  <link name="camera_optical_frame"/>
+
+  <joint name="camera_optical_joint" type="fixed">
+    <parent link="camera_link"/>
+    <child link="camera_optical_frame"/>
+    <!-- REP103: optical z-forward/x-right/y-down from link's x-forward/z-up. -->
+    <origin xyz="0 0 0" rpy="${-pi/2} 0 ${-pi/2}"/>
+  </joint>
+
+  <!-- Sim-only: Gazebo diff_drive plugin is the "Base Wheels / Sim" consumer of
+       /cmd_vel (dev.md §3 interface table) - it does not go through
+       ugv_safety's motor_driver_node, which targets real hardware instead. -->
+  <gazebo>
+    <plugin name="ugv_diff_drive" filename="libgazebo_ros_diff_drive.so">
+      <ros>
+        <namespace></namespace>
+      </ros>
+      <left_joint>left_wheel_joint</left_joint>
+      <right_joint>right_wheel_joint</right_joint>
+      <wheel_separation>${track_width}</wheel_separation>
+      <wheel_diameter>${wheel_radius * 2.0}</wheel_diameter>
+      <max_wheel_torque>20</max_wheel_torque>
+      <max_wheel_acceleration>3.0</max_wheel_acceleration>
+      <command_topic>cmd_vel</command_topic>
+      <odometry_topic>odom</odometry_topic>
+      <odometry_frame>odom</odometry_frame>
+      <robot_base_frame>base_footprint</robot_base_frame>
+      <publish_odom>true</publish_odom>
+      <publish_odom_tf>true</publish_odom_tf>
+      <publish_wheel_tf>true</publish_wheel_tf>
+    </plugin>
+  </gazebo>
+
+  <!-- Sim-only camera source (dev.md Dev 1 runtime-profile table: sim = Gazebo
+       camera, Dev 5 integration, not how perception is qualified). Publishes
+       the same Image + CameraInfo contract as the live_cam v4l2 driver. -->
+  <gazebo reference="camera_link">
+    <sensor type="camera" name="ugv_sim_camera">
+      <update_rate>30.0</update_rate>
+      <camera>
+        <horizontal_fov>1.3962634</horizontal_fov>
+        <image>
+          <width>1280</width>
+          <height>720</height>
+          <format>R8G8B8</format>
+        </image>
+        <clip>
+          <near>0.05</near>
+          <far>50</far>
+        </clip>
+      </camera>
+      <plugin name="ugv_sim_camera_driver" filename="libgazebo_ros_camera.so">
+        <ros>
+          <namespace></namespace>
+          <remapping>image_raw:=camera/image_raw</remapping>
+          <remapping>camera_info:=camera/camera_info</remapping>
+        </ros>
+        <frame_name>camera_optical_frame</frame_name>
+      </plugin>
+    </sensor>
+  </gazebo>
+
+</robot>

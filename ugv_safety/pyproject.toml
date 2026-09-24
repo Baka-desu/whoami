@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ugv-safety"
+version = "0.1.0"
+description = "UGV safety authority (Dev 5): 4-tier /cmd_vel arbiter, watchdog table, decel ramp, motor seam."
+requires-python = ">=3.10"
+dependencies = ["pyyaml"]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[project.scripts]
+arbiter_node = "ugv_safety.node.arbiter_node:main"
+motor_driver_node = "ugv_safety.node.motor_driver_node:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["src/ugv_safety/tests"]
+addopts = "-q"

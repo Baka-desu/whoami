@@ -1,0 +1,6 @@
+# Dev 5 -- secondary footprint (dev.md Dev 5 task 4): tighter envelope for
+# reduced-speed / confined-space operation. Same frame and convention as
+# footprint_primary.yaml. Selection between the two is a Dev 4 planner/costmap
+# concern, not decided here.
+footprint: "[[0.24, 0.18], [0.24, -0.18], [-0.24, -0.18], [-0.24, 0.18]]"
+footprint_padding: 0.01
