@@ -26,7 +26,8 @@ ugv_safety/src/ugv_safety/
   motor/      kinematics.py             twist -> (left_rad_s, right_rad_s), real-hardware seam
   node/       arbiter_node.py           rclpy: wires the above to ROS topics, sole /cmd_vel publisher
               motor_driver_node.py      rclpy: /cmd_vel -> /ugv/wheel_cmd (not used by sim profile)
-  tests/                                pytest, no rclpy required
+  tests/                                pytest; test_arbiter_node_wired.py needs rclpy, skips cleanly without it
+ugv_safety/launch/safety.launch.py     # arbiter_node + motor_driver_node -- ros2 launch ugv_safety safety.launch.py
 ```
 
 Same split Dev 1 uses in `turing/`: arbitration/watchdog/ramp/kinematics logic is pure Python, testable without ROS; the `node/` layer is a thin rclpy wrapper with no decision logic of its own.
@@ -67,8 +68,8 @@ The watchdog table is deliberately arrival-based, not value-based: it trips both
 ## CLI & verification
 
 ```bash
-# Run the safety authority + motor driver seam
-ros2 launch ugv_bringup safety.launch.py
+# Run the safety authority + motor driver seam (also included by every ugv_bringup profile)
+ros2 launch ugv_safety safety.launch.py
 
 # Pure-kernel tests (no ROS required)
 python -m pytest ugv_safety

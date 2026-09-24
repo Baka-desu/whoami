@@ -17,12 +17,14 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 
 _LAUNCH_DIR = Path(__file__).resolve().parent
+_REPO_ROOT = _LAUNCH_DIR.parents[1]
+_SAFETY_LAUNCH = _REPO_ROOT / "ugv_safety" / "launch" / "safety.launch.py"
 _VALID_PROFILES = ("live_cam", "sim", "bag")
 
 
-def _include(name: str) -> IncludeLaunchDescription:
+def _include(path: Path) -> IncludeLaunchDescription:
     return IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(str(_LAUNCH_DIR / name))
+        PythonLaunchDescriptionSource(str(path))
     )
 
 
@@ -33,12 +35,12 @@ def _launch_setup(context, *args, **kwargs):
             f"profile:={profile!r} is not one of {_VALID_PROFILES} (architecture.md §4)"
         )
 
-    actions = [_include("safety.launch.py")]
+    actions = [_include(_SAFETY_LAUNCH)]
 
     if profile == "live_cam":
-        actions.append(_include("camera.launch.py"))
+        actions.append(_include(_LAUNCH_DIR / "camera.launch.py"))
     elif profile == "sim":
-        actions.append(_include("sim.launch.py"))
+        actions.append(_include(_LAUNCH_DIR / "sim.launch.py"))
     elif profile == "bag":
         bag_path = LaunchConfiguration("bag_path").perform(context)
         if not bag_path:

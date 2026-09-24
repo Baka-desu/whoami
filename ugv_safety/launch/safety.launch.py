@@ -1,7 +1,9 @@
 """Safety authority stack: sole /cmd_vel publisher, always launched regardless
 of runtime profile (dev.md Dev 5 tasks 1-3, architecture.md §3.1/§12).
 
-    ros2 launch ugv_bringup safety.launch.py
+    ros2 launch ugv_safety safety.launch.py
+
+Also included by ugv_bringup/launch/bringup.launch.py for every profile.
 """
 
 from __future__ import annotations
