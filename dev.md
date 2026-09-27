@@ -19,9 +19,7 @@ Rules
    They provide context for understanding responsibilities, but ownership is determined by the functional domains defined in "dev.md".
 4. Cross-domain tasks require coordination.
    The developer owning the primary functional domain remains responsible for the task and coordinates with other affected developers where necessary.
-5. "dev.md" defines ownership, not architecture.
-   Developer ownership must not be used to modify, override, or reinterpret architectural decisions defined in "arch.md".
-
+5. "dev.md" defines ownership, not architecture. It cannot override or reinterpret "arch.md"
 ---
 **File:** `dev.md`  
 **Reference Document:** [`architecture.md`](file:///home/light/Documents/sih/architecture.md)  
