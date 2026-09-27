@@ -22,7 +22,7 @@ Rules
 5. "dev.md" defines ownership, not architecture.
    Developer ownership must not be used to modify, override, or reinterpret architectural decisions defined in "arch.md".
 
---
+---
 **File:** `dev.md`  
 **Reference Document:** [`architecture.md`](file:///home/light/Documents/sih/architecture.md)  
 **Scope:** Deployable Software-Only Product for Differential-Drive UGV Autonomous Outdoor Navigation  
