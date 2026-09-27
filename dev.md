@@ -1,5 +1,28 @@
 # Project A: Production Work Breakdown & Modular Architecture
 
+
+---
+
+Development Ownership Policy
+
+"dev.md" defines the functional domain and ownership of each developer. It helps clarify what to do in each domain, but it is not a fixed or exhaustive list of development tasks, examples, or clear ownership boundaries.
+
+As development progresses, new tasks, changes, or conflicting requirements may arise. Any task shall be owned and implemented by the developer whose defined functional domain the task falls under, even if that task is not explicitly listed in "dev.md".
+
+Rules
+
+1. "arch.md" has highest authority.
+   If any task, implementation decision, or developer responsibility conflicts with "arch.md", "arch.md" takes precedence.
+2. Functional-domain ownership resolves task assignment.
+   When a new or conflicting task arises between developers, the developer whose functional domain the task belongs to owns the task.
+3. Existing task lists do not define ownership boundaries.
+   They provide context for understanding responsibilities, but ownership is determined by the functional domains defined in "dev.md".
+4. Cross-domain tasks require coordination.
+   The developer owning the primary functional domain remains responsible for the task and coordinates with other affected developers where necessary.
+5. "dev.md" defines ownership, not architecture.
+   Developer ownership must not be used to modify, override, or reinterpret architectural decisions defined in "arch.md".
+
+--
 **File:** `dev.md`  
 **Reference Document:** [`architecture.md`](file:///home/light/Documents/sih/architecture.md)  
 **Scope:** Deployable Software-Only Product for Differential-Drive UGV Autonomous Outdoor Navigation  
