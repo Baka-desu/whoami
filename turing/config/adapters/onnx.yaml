@@ -1,0 +1,4 @@
+adapter_id: onnx
+backend: openvino_gpu
+weights: weights/onnx-tutorial.xml
+# input_hw, mean, std, to_rgb: fill from the tutorial IR. Do not guess.

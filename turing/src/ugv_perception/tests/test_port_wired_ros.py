@@ -18,7 +18,7 @@ import rclpy
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
 
-from ugv_perception.node.adapter_node import PerceptionAdapterNode
+from ugv_perception.node.adapter_node import PerceptionAdapterNode, camera_info_qos
 from ugv_perception.port.ids import CANONICAL, CONF_ENCODING, MASK_ENCODING
 from ugv_perception.tests.fixtures import FixtureAdapter
 
@@ -51,11 +51,12 @@ def test_wr1_wr2_wr4_wr5_happy_topics() -> None:
     adapter = FixtureAdapter()
     node = PerceptionAdapterNode(
         adapter=adapter,
+        adapter_id="yoloe",
         now_ns_fn=lambda: _STAMP + 10_000_000,
     )
     helper = Node("t10_cam_pub")
     pub_i = helper.create_publisher(Image, "/camera/image_raw", 10)
-    pub_c = helper.create_publisher(CameraInfo, "/camera/camera_info", 10)
+    pub_c = helper.create_publisher(CameraInfo, "/camera/camera_info", camera_info_qos())
     masks: list[Image] = []
     confs: list[Image] = []
     cinfos: list[CameraInfo] = []
@@ -106,11 +107,12 @@ def test_wr3_stale_degrades_no_mask() -> None:
     adapter = FixtureAdapter()
     node = PerceptionAdapterNode(
         adapter=adapter,
+        adapter_id="yoloe",
         now_ns_fn=lambda: _STAMP + 600_000_000,
     )
     helper = Node("t10_cam_stale")
     pub_i = helper.create_publisher(Image, "/camera/image_raw", 10)
-    pub_c = helper.create_publisher(CameraInfo, "/camera/camera_info", 10)
+    pub_c = helper.create_publisher(CameraInfo, "/camera/camera_info", camera_info_qos())
     masks: list[Image] = []
     flags: list[bool] = []
     helper.create_subscription(Image, "/segmentation/mask", masks.append, 10)
