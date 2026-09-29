@@ -1,9 +1,30 @@
 # Project A: Production Work Breakdown & Modular Architecture
 
+
+---
+
+Development Ownership Policy
+
+"dev.md" defines the functional domain and ownership of each developer. It helps clarify what to do in each domain, but it is not a fixed or exhaustive list of development tasks, examples, or clear ownership boundaries.
+
+As development progresses, new tasks, changes, or conflicting requirements may arise. Any task shall be owned and implemented by the developer whose defined functional domain the task falls under, even if that task is not explicitly listed in "dev.md".
+
+Rules
+
+1. "arch.md" has highest authority.
+   If any task, implementation decision, or developer responsibility conflicts with "arch.md", "arch.md" takes precedence.
+2. Functional-domain ownership resolves task assignment.
+   When a new or conflicting task arises between developers, the developer whose functional domain the task belongs to owns the task.
+3. Existing task lists do not define ownership boundaries.
+   They provide context for understanding responsibilities, but ownership is determined by the functional domains defined in "dev.md".
+4. Cross-domain tasks require coordination.
+   The developer owning the primary functional domain remains responsible for the task and coordinates with other affected developers where necessary.
+5. "dev.md" defines ownership, not architecture. It cannot override or reinterpret "arch.md"
+---
 **File:** `dev.md`  
 **Reference Document:** [`architecture.md`](file:///home/light/Documents/sih/architecture.md)  
 **Scope:** Deployable Software-Only Product for Differential-Drive UGV Autonomous Outdoor Navigation  
-**Middleware:** ROS 2 (Jazzy / Humble as specified in architecture §6)  
+**Middleware:** ROS 2 (Lyrical as specified in architecture §6)  
 **Effort Limit:** ~30 Hours per Developer (~144 Hours Total across 5 Developers)  
 
 ---
@@ -12,7 +33,7 @@
 
 Tasks are grouped strictly by **functional domain** so that related engineering problems are owned by the same developer (AI/Vision together, SLAM/Spatial together, Costmaps/Geometry together, Planning/Control logic together, and Safety/Platform together). 
 
-No arbitrary external tech stacks or third-party libraries are imposed; all components adhere strictly to the stack defined in `architecture.md` §6 (ROS 2, RTAB-Map, Nav2, YOLOE, ONNX, Depth Anything, VoxelLayer, Priority Mux / Watchdog).
+No arbitrary external tech stacks or third-party libraries are imposed; all components adhere strictly to the stack defined in `architecture.md` §6 (ROS 2, RTAB-Map, Nav2, RUGD SegFormer, YOLOE selectable, tutorial ONNX eval, Depth Anything 3 Metric Large, VoxelLayer, Priority Mux / Watchdog).
 
 The difficulty hierarchy is calibrated so that **Dev 1 (AI & Vision) is higher in technical difficulty than Dev 4 (Planning/Control Logic) and Dev 5 (Safety/Platform)**:
 
@@ -20,7 +41,7 @@ The difficulty hierarchy is calibrated so that **Dev 1 (AI & Vision) is higher i
                       TECHNICAL DIFFICULTY HIERARCHY
                       
   [Dev 2: SLAM & 3D Spatial Localization] ──► Difficulty: High (4.5 / 5)
-  [Dev 1: Perception, YOLOE & Depth AI]   ──► Difficulty: High (4.0 / 5)  ◄── (Higher than 4 & 5)
+  [Dev 1: Perception, RUGD SegFormer & Depth AI]   ──► Difficulty: High (4.0 / 5)  ◄── (Higher than 4 & 5)
   [Dev 3: Costmaps & Geometry Precedence] ──► Difficulty: High (4.0 / 5)
   [Dev 4: Navigation Planning & Control]  ──► Difficulty: Medium-High (3.5 / 5)
   [Dev 5: Safety Authority & Platform]    ──► Difficulty: Medium (3.0 / 5)
@@ -28,7 +49,7 @@ The difficulty hierarchy is calibrated so that **Dev 1 (AI & Vision) is higher i
 
 | Dev | Functional Domain | Architecture Package Ownership | Workload | Difficulty | Core Product Deliverables |
 |---|---|---|:---:|:---:|---|
-| **Dev 1** | **Perception, AI & Vision** | `ugv_perception/`<br>`config/perception/`<br>`config/ontologies/` | **29h** | **High (4.0/5)**<br>*Hardware-agnostic inference abstraction, multi-model pipelines, latency bounds, confidence math* | Consume camera **data** (`Image` + `CameraInfo`; does **not** own the driver), YOLOE outdoor adapter, Tutorial ONNX adapter, Depth Anything depth model, 3-class canonical port (`0, 1, 2`), confidence normalizer, staleness fail-safe (`/ugv/perception_degraded`). |
+| **Dev 1** | **Perception, AI & Vision** | `ugv_perception/`<br>`config/perception/`<br>`config/ontologies/` | **29h** | **High (4.0/5)**<br>*Hardware-agnostic inference abstraction, multi-model pipelines, latency bounds, confidence math* | Consume camera **data** (`Image` + `CameraInfo`; does **not** own the driver), RUGD SegFormer outdoor adapter, YOLOE selectable, Tutorial ONNX eval adapter, Depth Anything 3 Metric Large, 3-class canonical port (`0, 1, 2`), confidence normalizer, staleness fail-safe (`/ugv/perception_degraded`). |
 | **Dev 2** | **SLAM & Spatial Localization** | `ugv_localization/`<br>`config/cameras/` | **29h** | **High (4.5/5)** | RTAB-Map visual SLAM (stereo/RGB-D/mono), `mapping` vs `localize` database modes, continuous TF tree (`map->odom->base_link`), pose validity monitor node (`/ugv/pose_valid`). |
 | **Dev 3** | **Costmaps & Spatial Geometry** | `ugv_navigation/` (Costmap Subsystem), `config/robots/` | **29h** | **High (4.0/5)** | Semantic Costmap Layer (mask projection via CameraInfo & TF), VoxelLayer geometry integration, Geometry Lethal Precedence Engine (geometry lethal overrides traversable). |
 | **Dev 4** | **Planning & Trajectory Control** | `ugv_navigation/` (Autonomy & Motion Core) | **29h** | **Med-High (3.5/5)** | Nav2 Smac2D global path planner, Regulated Pure Pursuit (RPP) trajectory tracker, dynamic hazard reactivity, recovery behaviors, `/navigate_to_pose`, candidate twist `/cmd_vel_nav2`. |
@@ -49,7 +70,7 @@ The system is decoupled into 5 clear functional domains with zero circular depen
                  ▼                                                        ▼
  ┌────────────────────────────────────────────────────────┐  ┌────────────────────────────────────────────────────────┐
  │           DEV 1: PERCEPTION & VISION SUBSYSTEM         │  │         DEV 2: SLAM & LOCALIZATION SUBSYSTEM           │
- │  Consume Image+CameraInfo -> YOLOE -> Remap            │  │   RTAB-Map Visual SLAM + TF Tree + Pose Validity       │
+ │  Consume Image+CameraInfo -> RUGD SegFormer -> Remap   │  │   RTAB-Map Visual SLAM + TF Tree + Pose Validity       │
  │  (does not own / launch the camera)                    │  │   (does not own the camera driver)                     │
  └───────────────────────────┬────────────────────────────┘  └───────────────────────────┬────────────────────────────┘
                              │ /segmentation/mask {0, 1, 2}                              │ TF (map->odom->base)
@@ -105,8 +126,8 @@ All 5 developers integrate against the topic contracts defined in `architecture.
 
 #### Production Tasks:
 1. **Consume Camera Data (§5, §8.4, §8.5) (4h):** Subscribe to Dev 5’s `Image` + `CameraInfo` (do **not** own the camera driver or V4L2). Convert to perception frames with the **image** timestamp and optical `frame_id` matching `CameraInfo`. Reject missing/fake `K`. Fail closed — no black frame.
-2. **YOLOE Outdoor Adapter Pipeline (§6, §8) (7h):** Implement the primary outdoor perception adapter using YOLOE to generate path and hazard segmentation masks; integrate Tutorial ONNX scaffold baseline.
-3. **Depth Anything Monocular Geometry Pipeline (§6, §9) (5h):** Build inference pipeline for Depth Anything to provide depth geometry for obstacle verification.
+2. **RUGD SegFormer Outdoor Adapter Pipeline (§6, §8) (7h):** Implement the primary outdoor perception adapter using RUGD SegFormer-B5 to generate path and hazard segmentation masks; YOLOE remains selectable; integrate Tutorial ONNX scaffold as eval only.
+3. **Depth Anything 3 Metric Large Geometry Pipeline (§6, §9) (5h):** Build inference pipeline for Depth Anything 3 Metric Large to provide depth geometry for obstacle verification.
 4. **Canonical Ontology Remapping Engine (§8.2) (4h):** Build YAML-driven translation parser mapping raw model labels strictly to canonical classes:
    - `0: unknown` (never free — costmap inflates)
    - `1: traversable` (free / low cost)
@@ -121,7 +142,7 @@ All 5 developers integrate against the topic contracts defined in `architecture.
 #### CLI & Verification Commands:
 ```bash
 # Perception consumes camera topics (Dev 5 must be publishing Image + CameraInfo)
-ros2 run ugv_perception adapter_node --ros-args -p model:=yoloe
+ros2 run ugv_perception adapter_node --ros-args -p adapter:=rugd
 
 # Run unit tests validating 3-class contract (fails if any pixel != 0, 1, 2)
 colcon test --packages-select ugv_perception
@@ -178,7 +199,7 @@ ros2 topic echo /ugv/pose_valid
    - Class 0 (`unknown`) $\to$ inflate / non-free
    - Class 1 (`traversable`) $\to$ free / clear cost
    - Class 2 (`hazard`) $\to$ lethal / inscribed cost
-3. **Geometry Precedence Engine (§9) (7h):** Integrate optional VoxelLayer / Depth Anything geometry side-channel and enforce Design Law: **geometry lethal always wins**; semantic traversable **never** clears geometric lethal obstacles.
+3. **Geometry Precedence Engine (§9) (7h):** Integrate optional VoxelLayer / Depth Anything 3 Metric Large geometry side-channel and enforce Design Law: **geometry lethal always wins**; semantic traversable **never** clears geometric lethal obstacles.
 4. **Multi-Resolution Inflation & Footprint Padding (§8.1) (5h):** Configure costmap inflation layers to pad obstacles based on robot footprint configurations.
 5. **Costmap Validation Testbench (3h):** Build unit tests verifying costmap cell values, projection accuracy, and geometry lethal overrides.
 

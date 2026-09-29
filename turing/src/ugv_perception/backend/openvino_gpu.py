@@ -11,10 +11,31 @@ from ugv_perception.adapter.output import AdapterError, Instance
 from ugv_perception.backend.instances import instances_from_engine
 
 _DEVICE = "GPU"
+_CPU = "CPU"
 # Engine NMS (Ultralytics YOLO-seg defaults). Not T04 τ.
 _CONF_THRES = 0.25
 _IOU_THRES = 0.70
 _MAX_DET = 300
+
+
+def _compile_gpu_then_cpu(core: object, model: object) -> tuple[object, str]:
+    """Prefer OpenVINO GPU (Intel Arc or NVIDIA plugin). CPU is last. Compile once."""
+    devices = [str(d) for d in core.available_devices]
+    names: list[str] = []
+    for prefix in (_DEVICE, "NVIDIA", "CUDA", _CPU):
+        for item in devices:
+            if item.startswith(prefix) and item not in names:
+                names.append(item)
+    if not names:
+        raise AdapterError(f"OpenVINO has no GPU or CPU; devices={devices}")
+    last: Exception | None = None
+    for name in names:
+        try:
+            return core.compile_model(model, name), name
+        except Exception as exc:
+            last = exc
+            continue
+    raise AdapterError("OpenVINO compile failed on GPU and CPU") from last
 
 
 class OpenVinoGpuBackend:
@@ -23,6 +44,7 @@ class OpenVinoGpuBackend:
     def __init__(self) -> None:
         self._compiled = None
         self._prompts: tuple[str, ...] | None = None
+        self.device = _DEVICE
 
     def load(self, weights_path: str, **engine_args: object) -> None:
         prompts = engine_args.get("prompts")
@@ -36,14 +58,13 @@ class OpenVinoGpuBackend:
         except ImportError as exc:
             raise AdapterError("openvino is not installed") from exc
         core = ov.Core()
-        devices = list(core.available_devices)
-        if not any(str(d).startswith(_DEVICE) for d in devices):
-            raise AdapterError(f"OpenVINO {_DEVICE} not available; devices={devices}")
         try:
             model = core.read_model(str(path))
-            self._compiled = core.compile_model(model, _DEVICE)
+            self._compiled, self.device = _compile_gpu_then_cpu(core, model)
+        except AdapterError:
+            raise
         except Exception as exc:
-            raise AdapterError(f"OpenVINO compile on {_DEVICE} failed") from exc
+            raise AdapterError("OpenVINO compile failed") from exc
         self._prompts = prompts
 
     def run(self, rgb: NDArray[np.uint8]) -> tuple[Instance, ...]:
@@ -140,6 +161,8 @@ def decode_yolo_seg(
     boxes_xywh = matrix[:, :4]
     cls = matrix[:, 4 : 4 + n_classes]
     coeffs = matrix[:, 4 + n_classes :]
+    if np.any(~np.isfinite(cls)) or np.any(cls < 0.0) or np.any(cls > 1.0):
+        raise AdapterError("YOLO-seg class scores are not finite and in [0,1]; no clip")
     scores = cls.max(axis=1)
     class_indices = cls.argmax(axis=1).astype(np.int64)
     keep = scores >= conf_thres
@@ -294,3 +317,91 @@ def _masks_from_proto(
     if np.any(~np.isfinite(masks)) or np.any(masks < 0.0) or np.any(masks > 1.0):
         raise AdapterError("YOLO-seg masks are not finite and in [0,1]; no clip")
     return masks
+
+
+class OpenVinoGpuTensorBackend:
+    """Compile an IR on GPU and return the first output tensor. No YOLO decode."""
+
+    id = "openvino_gpu"
+
+    def __init__(self) -> None:
+        self._compiled = None
+        self._core = None
+        self._model = None
+        self._hw: tuple[int, int] | None = None
+        self.device = _DEVICE
+
+    def load(self, weights_path: str, input_hw: tuple[int, int] | None = None) -> None:
+        path = Path(weights_path)
+        if not path.is_file():
+            raise FileNotFoundError(f"OpenVINO IR missing: {path}")
+        try:
+            import openvino as ov
+        except ImportError as exc:
+            raise AdapterError("openvino is not installed") from exc
+        core = ov.Core()
+        try:
+            model = core.read_model(str(path))
+        except Exception as exc:
+            raise AdapterError(f"OpenVINO read failed for {path}") from exc
+        self._core = core
+        self._model = model
+        if input_hw is not None:
+            self.ensure_hw(input_hw[0], input_hw[1])
+        else:
+            self._compile()
+
+    def ensure_hw(self, height: int, width: int) -> None:
+        """Compile once for this model size. A second size is refused."""
+        if self._model is None or self._core is None:
+            raise AdapterError("OpenVinoGpuTensorBackend.load() was not called")
+        if self._compiled is not None:
+            if self._hw != (height, width):
+                raise AdapterError(
+                    f"DA3 IR already compiled for {self._hw}, not {(height, width)}"
+                )
+            return
+        try:
+            self._model.reshape([1, 3, height, width])
+            self._compile()
+        except AdapterError:
+            raise
+        except Exception as exc:
+            raise AdapterError("OpenVINO compile failed") from exc
+        self._hw = (height, width)
+
+    def _compile(self) -> None:
+        try:
+            self._compiled, self.device = _compile_gpu_then_cpu(self._core, self._model)
+        except AdapterError:
+            raise
+        except Exception as exc:
+            raise AdapterError("OpenVINO compile failed") from exc
+        partial = self._model.input(0).get_partial_shape()
+        if not partial.is_dynamic:
+            dims = [dim.get_length() for dim in partial]
+            if len(dims) == 4:
+                self._hw = (int(dims[2]), int(dims[3]))
+
+    def run(self, blob: NDArray[np.float32]) -> np.ndarray:
+        if self._compiled is None:
+            raise AdapterError("OpenVinoGpuTensorBackend.load() was not called")
+        if not isinstance(blob, np.ndarray) or blob.dtype != np.float32 or blob.ndim != 4:
+            raise TypeError("blob must be float32 NCHW")
+        try:
+            result = self._compiled([blob])
+            out = np.asarray(result[self._compiled.output(0)])
+        except Exception as exc:
+            raise AdapterError("OpenVINO GPU run failed") from exc
+        return out
+
+    def run_all(self, blob: NDArray[np.float32]) -> list[np.ndarray]:
+        if self._compiled is None:
+            raise AdapterError("OpenVinoGpuTensorBackend.load() was not called")
+        if not isinstance(blob, np.ndarray) or blob.dtype != np.float32 or blob.ndim != 4:
+            raise TypeError("blob must be float32 NCHW")
+        try:
+            result = self._compiled([blob])
+            return [np.asarray(result[out]) for out in self._compiled.outputs]
+        except Exception as exc:
+            raise AdapterError("OpenVINO GPU run failed") from exc

@@ -1,0 +1,27 @@
+# rtabmap_odom/rgbd_odometry — visual odometry on RGB + DA3 depth (mindmap D5b).
+# Launched for odom_source:=auto|visual. It never publishes TF: odom_selector owns odom->base_link
+# and republishes this as /odom when visual is the active source. odom_frame_id is a label only.
+# Output rate = DA3 depth rate: if that is < 15 Hz, odom->base_link in visual mode is < 15 Hz too
+# (CONFLICTS.md C9). Names verified on rtabmap_ros 0.23.7 / Lyrical (2026-09-28); values untuned.
+/**:
+  ros__parameters:
+    # ---- ROS node params ------------------------------------------------------------
+    frame_id: base_link
+    odom_frame_id: odom_visual
+    publish_tf: false
+    publish_null_when_lost: true    # lost → huge covariance marker; odom_selector drops it
+    subscribe_rgbd: true
+    wait_for_transform: 0.2
+    topic_queue_size: 10
+
+    # ---- RTAB-Map library params (strings) ------------------------------------------
+    Odom/Strategy: "0"              # Frame-to-Map
+    Odom/Holonomic: "false"         # differential drive
+    Odom/ResetCountdown: "1"        # auto reset after 1 lost frame; resumes from last good pose
+    Reg/Force3DoF: "true"
+    Vis/FeatureType: "8"            # GFTT/ORB (same as the SLAM node; BRIEF unavailable)
+    Vis/MaxFeatures: "1000"
+    Vis/MinInliers: "20"
+    Vis/EstimationType: "1"         # PnP
+    Vis/MinDepth: "0.3"
+    Vis/MaxDepth: "8.0"             # keep equal to rtabmap_rgbd.yaml
