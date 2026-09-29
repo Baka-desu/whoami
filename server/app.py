@@ -1,19 +1,19 @@
 """Local REST backend for the WHOAMI perception workbench UI.
 
-Replaces the UI's JS mock (ui/src/analysis/mock.ts) with real model inference: a generic
-segmentation model remapped into the canonical 3-class Perception Port, and a real metric depth
-model. Read-only: this process never touches ROS 2, never publishes anything, and has no
-connection to /cmd_vel or any safety-relevant topic (architecture.md §3.1 is unaffected because
-this code has no path into it at all).
+Replaces the UI's JS mock with real model inference: Dev 1's real Perception Port pipeline
+(turing/, see models.py's docstring) for segmentation, and a real metric depth model. Read-only:
+this process never touches ROS 2, never publishes anything, and has no connection to /cmd_vel or
+any safety-relevant topic (architecture.md §3.1 is unaffected because this code has no path into
+it at all).
 
 Run: .venv\\Scripts\\uvicorn app:app --host 127.0.0.1 --port 8008
 """
-import base64
 import io
+import base64
 import time
 
 import models
-from fastapi import FastAPI, File, UploadFile
+from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image
 
@@ -36,22 +36,30 @@ def _startup() -> None:
 @app.get("/health")
 def health():
     return {"status": "ok" if models.ready() else "loading", "device": models.DEVICE,
-             "seg_model": models.SEG_MODEL_ID, "depth_model": models.DEPTH_MODEL_ID}
+             "seg_model": "JasonTStanley/RUGD-Segformer (via Dev 1's ugv_perception port)",
+             "depth_model": models.DEPTH_MODEL_ID}
 
 
 @app.post("/analyze")
-async def analyze(file: UploadFile = File(...)):
+def analyze(file: UploadFile = File(...), streaming: bool = Form(False)):
+    # A plain `def` route: FastAPI runs it in a worker thread instead of the asyncio event loop,
+    # so a slow synchronous model call here can't stall concurrent requests (notably /health,
+    # which the UI polls every 5s to decide real-vs-mock - an async def route blocking on torch
+    # inference for 2-3s made those polls time out mid-analysis and falsely flip to "offline").
     t0 = time.time()
-    image = Image.open(io.BytesIO(await file.read())).convert("RGB")
+    image = Image.open(io.BytesIO(file.file.read())).convert("RGB")
 
-    mask, seg_ms = models.run_segmentation(image, OUT_W, OUT_H)
+    mask, confidence, valid, degraded, seg_ms = models.run_segmentation(image, OUT_W, OUT_H, streaming=streaming)
     depth, depth_ms = models.run_depth(image, OUT_W, OUT_H)
 
     return {
         "width": OUT_W, "height": OUT_H,
         "mask_b64": base64.b64encode(mask.tobytes()).decode("ascii"),
+        "confidence_b64": base64.b64encode(confidence.tobytes()).decode("ascii"),
         "depth_b64": base64.b64encode(depth.tobytes()).decode("ascii"),
-        "seg_model": models.SEG_MODEL_ID, "depth_model": models.DEPTH_MODEL_ID,
+        "valid": valid, "degraded": degraded,
+        "seg_model": "JasonTStanley/RUGD-Segformer (via Dev 1's ugv_perception port)",
+        "depth_model": models.DEPTH_MODEL_ID,
         "latency_ms": {"seg": round(seg_ms, 1), "depth": round(depth_ms, 1),
                         "total": round((time.time() - t0) * 1000, 1)},
     }

@@ -32,6 +32,7 @@ export async function analyzeViaBackend(frame: ImageBitmap, meta: FrameMeta, url
 
   const form = new FormData()
   form.append('file', blob, 'frame.jpg')
+  form.append('streaming', String(meta.streaming))
   const res = await fetch(`${url}/analyze`, { method: 'POST', body: form })
   if (!res.ok) throw new Error(`backend returned ${res.status}`)
   const j = await res.json()
@@ -43,7 +44,11 @@ export async function analyzeViaBackend(frame: ImageBitmap, meta: FrameMeta, url
   }
   const depth = new Float32Array(depthBytes.buffer)
 
-  return buildAnalysis(meta, mask, depth, 'real', performance.now() - t0, { seg: j.seg_model, depth: j.depth_model })
+  return buildAnalysis(
+    meta, mask, depth, 'real', performance.now() - t0,
+    { seg: j.seg_model, depth: j.depth_model },
+    { valid: j.valid, degraded: j.degraded },
+  )
 }
 
 function base64ToBytes(b64: string): Uint8Array {

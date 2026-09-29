@@ -1,85 +1,141 @@
-"""Loads the two real models once and exposes plain run_* functions.
+"""Loads the real models once and exposes plain run_* functions.
 
-Segmentation: nvidia/segformer-b2-finetuned-ade-512-512 (generic scene segmentation, remapped
-into the canonical 3-class Perception Port via ontology/ade20k_remap.yaml). This is a stand-in
-adapter: no pretrained RUGD SegFormer checkpoint exists publicly (see the PR discussion) -
-training one on the RUGD dataset is dev.md's actual Dev 1 task, not a "connect the API" job.
+Segmentation: Dev 1's real, tested Perception Port pipeline (turing/, installed here as the
+`ugv_perception` library — see server/README.md for why it's imported rather than copied) driving
+the real RUGD SegFormer-B5 checkpoint (JasonTStanley/RUGD-Segformer on Hugging Face, fine-tuned
+from nvidia/segformer-b5-finetuned-ade-640-640 on the actual RUGD classes). `compose_tick()` is
+Dev1's own remap + confidence-gate + freshness pipeline; this file only supplies the one piece
+that didn't exist yet for this hardware: a CUDA PyTorch inference backend (Dev1's own backend
+seam was stubbed for "later, NVIDIA" — turing/src/ugv_perception/backend/cuda_pytorch.py). That
+stub, and its factory rejection, are left untouched: they're Dev1's own file with Dev1's own test
+asserting the current "not on this box" behaviour, so the backend is implemented here instead and
+wired directly into `RugdSegformerAdapter`.
 
 Depth: depth-anything/Depth-Anything-V2-Metric-Outdoor-Large-hf. dev.md/architecture.md name
-"Depth Anything 3 Metric Large", but that model's repo (ByteDance-Seed/depth-anything-3) caps
-Python at 3.13 and pulls in a full multi-view 3D-reconstruction stack (pycolmap, open3d, gsplat)
-that has nothing to do with single-frame depth. This is the direct predecessor, integrates via
-plain `transformers`, and is specifically the outdoor metric variant.
+"Depth Anything 3 Metric Large" (turing/'s own T08 targets the same model); that package's own
+pyproject.toml caps Python at 3.13 (this machine runs 3.14) and pulls in a full multi-view
+3D-reconstruction stack (pycolmap, open3d, gsplat) unrelated to single-frame depth. This is the
+direct predecessor, integrates via plain `transformers`, and is specifically the outdoor variant.
 """
 import time
 from pathlib import Path
 
 import numpy as np
 import torch
-import yaml
 from PIL import Image
-from transformers import (
-    AutoImageProcessor, AutoModelForDepthEstimation,
-    SegformerImageProcessor, SegformerForSemanticSegmentation,
-)
+from transformers import AutoImageProcessor, AutoModelForDepthEstimation, SegformerForSemanticSegmentation
 
-SEG_MODEL_ID = "nvidia/segformer-b2-finetuned-ade-512-512"
+from ugv_perception.adapter.frame import ImageFrame
+from ugv_perception.adapter.rugd import N_CLASSES, RugdSegformerAdapter
+from ugv_perception.compose.load import load_compose_configs
+from ugv_perception.compose.tick import compose_tick
+
+TURING = Path(__file__).parent.parent / "turing"
+RUGD_WEIGHTS = TURING / "weights" / "rugd-segformer"
+RUGD_INPUT_HW = (640, 640)  # matches turing/config/adapters/rugd.yaml
+RUGD_MEAN = (0.485, 0.456, 0.406)
+RUGD_STD = (0.229, 0.224, 0.225)
+
 DEPTH_MODEL_ID = "depth-anything/Depth-Anything-V2-Metric-Outdoor-Large-hf"
-REMAP_PATH = Path(__file__).parent / "ontology" / "ade20k_remap.yaml"
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-_seg_proc = None
-_seg_model = None
-_seg_lut = None  # ade20k class id -> canonical {0,1,2}, built from the remap YAML
+_rugd_model = None
+_rugd_adapter: RugdSegformerAdapter | None = None
+_remap_table = None
+_gate_profile = None
+_freshness_profile = None
 _depth_proc = None
 _depth_model = None
 
 
-def _build_lut(id2label: dict[int, str]) -> np.ndarray:
-    with open(REMAP_PATH, encoding="utf-8") as fh:
-        remap = yaml.safe_load(fh)
-    name_to_canon = {"traversable": 1, "unknown": 0, "hazard": 2}
-    default = name_to_canon[remap["default"]]
-    canon_of_name = {}
-    for group in ("traversable", "unknown"):
-        for name in remap.get(group, []):
-            canon_of_name[name] = name_to_canon[group]
-    lut = np.full(max(id2label) + 1, default, dtype=np.uint8)
-    for idx, name in id2label.items():
-        lut[idx] = canon_of_name.get(name.strip(), default)
-    return lut
+class _TorchRugdBackend:
+    """Satisfies RugdSegformerAdapter's informal backend contract: .run(blob) -> raw logits.
+    Not turing/src/ugv_perception/backend/cuda_pytorch.py - see the module docstring for why."""
+
+    def run(self, blob: np.ndarray) -> np.ndarray:
+        with torch.inference_mode():
+            t = torch.from_numpy(blob).to(DEVICE)
+            logits = _rugd_model(pixel_values=t).logits
+        return logits.cpu().numpy()
 
 
 def load() -> None:
     """Load both models once. Called at server startup so /health is meaningful and the
     first real request isn't slow."""
-    global _seg_proc, _seg_model, _seg_lut, _depth_proc, _depth_model
-    if _seg_model is not None:
+    global _rugd_model, _rugd_adapter, _remap_table, _gate_profile, _freshness_profile
+    global _depth_proc, _depth_model
+    if _rugd_model is not None:
         return
-    _seg_proc = SegformerImageProcessor.from_pretrained(SEG_MODEL_ID)
-    _seg_model = SegformerForSemanticSegmentation.from_pretrained(SEG_MODEL_ID).to(DEVICE).eval()
-    _seg_lut = _build_lut(_seg_model.config.id2label)
+    if not (RUGD_WEIGHTS / "model.safetensors").is_file():
+        raise RuntimeError(
+            f"RUGD weights missing at {RUGD_WEIGHTS}. Fetch them first: "
+            f"bash turing/scripts/fetch_rugd_segformer.sh"
+        )
+    _rugd_model = SegformerForSemanticSegmentation.from_pretrained(str(RUGD_WEIGHTS)).to(DEVICE).eval()
+    if _rugd_model.config.num_labels != N_CLASSES:
+        raise RuntimeError(f"checkpoint has {_rugd_model.config.num_labels} classes, expected {N_CLASSES}")
+    _rugd_adapter = RugdSegformerAdapter(
+        backend=_TorchRugdBackend(), input_hw=RUGD_INPUT_HW, mean=RUGD_MEAN, std=RUGD_STD,
+    )
+    _remap_table, _gate_profile, _freshness_profile = load_compose_configs(
+        remap_path=TURING / "config" / "ontologies" / "rugd.yaml",
+        gates_path=TURING / "config" / "perception" / "rugd.yaml",
+        freshness_path=TURING / "config" / "perception" / "port.yaml",
+    )
+
     _depth_proc = AutoImageProcessor.from_pretrained(DEPTH_MODEL_ID)
     _depth_model = AutoModelForDepthEstimation.from_pretrained(DEPTH_MODEL_ID).to(DEVICE).eval()
 
 
 def ready() -> bool:
-    return _seg_model is not None and _depth_model is not None
+    return _rugd_model is not None and _depth_model is not None
 
 
-def run_segmentation(image: Image.Image, out_w: int, out_h: int) -> tuple[np.ndarray, float]:
-    """Returns a (out_h, out_w) uint8 array with values strictly in {0,1,2}."""
+def run_segmentation(
+    image: Image.Image, out_w: int, out_h: int, *, streaming: bool,
+) -> tuple[np.ndarray, np.ndarray, bool, bool, float]:
+    """Runs the real RUGD adapter through Dev 1's real compose_tick (remap + confidence gate +
+    freshness). Returns (classes, confidence, valid, degraded, latency_ms), each at (out_h,out_w).
+
+    Freshness: `compose_tick`'s own before/after check (`now_ns_after`) is built for a continuous
+    ROS tick loop, where a backed-up queue makes the *next* frame's `now_ns` itself late - the
+    caller can't inject a real post-inference timestamp before calling a synchronous function that
+    hasn't run yet, so we don't try. Instead we apply architecture.md's exact rule (age >
+    perception_max_age -> degraded) against this call's own real measured latency, for a live
+    stream only - a stale/slow mask must not present as current (§8.4/§8.6), and this is the same
+    finding already surfaced for depth on this hardware. A single uploaded/captured still isn't
+    part of the live product's freshness contract at all (there's no "stale" concept for a one-off
+    analysis), so latency alone never degrades it.
+    """
     t0 = time.time()
-    inputs = _seg_proc(images=image, return_tensors="pt").to(DEVICE)
-    with torch.inference_mode():
-        logits = _seg_model(**inputs).logits
-    raw = logits.argmax(dim=1)[0].cpu().numpy()
-    canonical = _seg_lut[raw]
-    resized = np.array(
-        Image.fromarray(canonical, mode="L").resize((out_w, out_h), Image.NEAREST)
+    rgb = np.asarray(image, dtype=np.uint8)
+    stamp_ns = time.time_ns()
+    frame = ImageFrame(rgb=rgb, stamp_ns=stamp_ns, frame_id="workbench_upload")
+
+    out = compose_tick(
+        frame=frame, now_ns=stamp_ns, adapter=_rugd_adapter,
+        remap_table=_remap_table, gate_profile=_gate_profile, freshness_profile=_freshness_profile,
     )
-    return resized.astype(np.uint8), (time.time() - t0) * 1000
+    latency_ms = (time.time() - t0) * 1000
+
+    if out.mask is None:
+        # §8.6 fail-safe: never fabricate traversable/hazard when the real port had nothing to
+        # say (adapter failure, or too few confidently-known pixels). All-unknown is the one
+        # always-safe claim (unknown inflates, never free).
+        classes = np.zeros((out_h, out_w), dtype=np.uint8)
+        confidence = np.zeros((out_h, out_w), dtype=np.float32)
+        return classes, confidence, False, True, latency_ms
+
+    stale = streaming and (latency_ms / 1000.0) > _freshness_profile.perception_max_age
+    valid = out.decision.valid and not stale
+    degraded = out.decision.degraded or stale
+
+    classes = np.array(Image.fromarray(out.mask.classes, mode="L").resize((out_w, out_h), Image.NEAREST), dtype=np.uint8)
+    confidence = np.array(
+        Image.fromarray(out.mask.confidence, mode="F").resize((out_w, out_h), Image.BILINEAR), dtype=np.float32,
+    )
+    return classes, confidence, valid, degraded, latency_ms
 
 
 def run_depth(image: Image.Image, out_w: int, out_h: int) -> tuple[np.ndarray, float]:

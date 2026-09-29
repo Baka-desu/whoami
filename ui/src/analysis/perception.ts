@@ -136,6 +136,7 @@ function findPath(grid: Uint8Array): { x: number; z: number }[] {
 export function buildAnalysis(
   meta: FrameMeta, mask: Uint8Array, depth: Float32Array, engine: 'mock' | 'real',
   latencyMs: number, models?: { seg: string; depth: string },
+  port?: { valid: boolean; degraded: boolean },
 ): Analysis {
   const { fx, fy, cx, vh } = cameraGrid(meta)
   const grid = groundGrid(mask, fx, fy, cx, vh)
@@ -158,14 +159,23 @@ export function buildAnalysis(
 
   const ageMs = Date.now() - meta.stamp
   const reasons: string[] = []
-  // Staleness is a live-stream concept: a still took however long inference took, but its result
-  // is not "stale" the way a frozen or slow-arriving live frame is (architecture.md §8.4 is about
-  // a continuously-produced mask falling behind, not one-off analysis latency).
-  if (meta.streaming && ageMs > PERCEPTION_MAX_AGE_MS) reasons.push('MASK STALE')
+  let degraded: boolean
+  if (port) {
+    // The real Perception Port's own decision (architecture.md §8.4/§8.6: remap/confidence
+    // collapse, adapter failure, or - for a live stream - this analysis's own latency exceeding
+    // perception_max_age) is authoritative; it replaces the age heuristic below entirely.
+    degraded = port.degraded
+    if (degraded) reasons.push(port.valid ? 'PERCEPTION DEGRADED' : 'PERCEPTION PORT INVALID')
+  } else {
+    // Staleness is a live-stream concept: a still took however long inference took, but its
+    // result is not "stale" the way a frozen or slow-arriving live frame is.
+    if (meta.streaming && ageMs > PERCEPTION_MAX_AGE_MS) reasons.push('MASK STALE')
+    degraded = reasons.length > 0
+  }
   if (classPct[1] < 3) reasons.push('NO TRAVERSABLE GROUND')
 
   return {
     meta, mask, depth, grid, path, pathPx, classPct, depthStats, ageMs, latencyMs,
-    degraded: reasons.length > 0, reasons, engine, models,
+    degraded, reasons, engine, models,
   }
 }

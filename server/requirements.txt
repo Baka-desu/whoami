@@ -2,6 +2,10 @@
 # https://pytorch.org/get-started/locally/ (this machine used:
 #   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126
 # ). A plain `pip install torch` on Windows pulls a CPU-only build.
+#
+# ugv_perception (Dev 1's real Perception Port pipeline) is also NOT listed here: install it from
+# the sibling package instead of PyPI:
+#   pip install -e ../turing
 fastapi
 uvicorn[standard]
 python-multipart
