@@ -50,8 +50,9 @@ def load_rugd_config(path: str | Path) -> dict[str, object]:
         data = yaml.safe_load(handle)
     if type(data) is not dict or data.get("adapter_id") != ADAPTER_ID:
         raise ValueError("adapter_id must be rugd")
-    if data.get("backend") != "openvino_gpu":
-        raise ValueError("backend must be openvino_gpu")
+    backend = data.get("backend")
+    if backend not in ("openvino_gpu", "cuda_pytorch"):
+        raise ValueError("backend must be openvino_gpu or cuda_pytorch")
     weights = data.get("weights")
     if type(weights) is not str or weights == "":
         raise ValueError("weights must be a local path str")
@@ -69,7 +70,7 @@ def load_rugd_config(path: str | Path) -> dict[str, object]:
     std = _triple(data.get("std"), "std")
     return {
         "adapter_id": ADAPTER_ID,
-        "backend": "openvino_gpu",
+        "backend": backend,
         "weights": weights,
         "input_hw": (hw[0], hw[1]),
         "mean": mean,

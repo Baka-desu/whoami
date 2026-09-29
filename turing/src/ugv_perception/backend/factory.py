@@ -21,7 +21,7 @@ def build_backend(
     if backend_id in _FORBIDDEN:
         raise ValueError(f"backend {backend_id!r} is not a product runtime")
     if backend_id == "cuda_pytorch":
-        raise RuntimeError("cuda_pytorch is not available on this Intel Arc box")
+        raise RuntimeError("cuda_pytorch YOLOE is not wired; live path is RUGD")
     if backend_id == "openvino_gpu":
         from ugv_perception.backend.openvino_gpu import OpenVinoGpuBackend
 

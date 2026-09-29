@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from ugv_perception.adapter.output import AdapterError
+from ugv_perception.adapter.rugd import load_rugd_config
 from ugv_perception.backend import device
 from ugv_perception.backend.cuda_pytorch import CudaPytorchTensorBackend
 from ugv_perception.backend.device import (
@@ -25,6 +26,21 @@ def _weights(tmp_path: Path, *, xml: bool, safetensors: bool) -> tuple[Path, Pat
     if safetensors:
         (folder / "model.safetensors").write_bytes(b"st")
     return ir, folder
+
+
+def test_load_rugd_config_accepts_cuda_pytorch(tmp_path: Path) -> None:
+    path = tmp_path / "rugd.yaml"
+    path.write_text(
+        "adapter_id: rugd\n"
+        "backend: cuda_pytorch\n"
+        "weights: weights/rugd-segformer\n"
+        "input_hw: [640, 640]\n"
+        "mean: [0.485, 0.456, 0.406]\n"
+        "std: [0.229, 0.224, 0.225]\n",
+        encoding="utf-8",
+    )
+    cfg = load_rugd_config(path)
+    assert cfg["backend"] == "cuda_pytorch"
 
 
 def test_device_py_has_no_module_level_vendor_imports() -> None:
@@ -90,15 +106,26 @@ def test_pick_none_when_no_weights(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     assert pick_tensor_backend(ir_xml=xml, safetensors_dir=folder, kind="rugd") is None
 
 
-def test_cuda_tensor_load_raises_without_cuda(tmp_path: Path) -> None:
+def test_cuda_tensor_load_raises_without_cuda(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     folder = tmp_path / "da3metric-large"
     folder.mkdir()
     (folder / "model.safetensors").write_bytes(b"st")
+    try:
+        import torch
+    except ImportError:
+        backend = CudaPytorchTensorBackend()
+        with pytest.raises(AdapterError, match="torch is not installed"):
+            backend.load(str(folder), kind="da3")
+        return
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
     backend = CudaPytorchTensorBackend()
-    with pytest.raises(AdapterError):
+    with pytest.raises(AdapterError, match="CUDA is not available"):
         backend.load(str(folder), kind="da3")
 
 
+@pytest.mark.skipif(cuda_available(), reason="CUDA present")
 def test_cuda_unavailable_on_this_box() -> None:
     assert cuda_available() is False
 

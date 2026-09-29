@@ -43,10 +43,17 @@ class CudaPytorchTensorBackend:
             raise AdapterError("torch is not installed") from exc
         if not torch.cuda.is_available():
             raise AdapterError("CUDA is not available")
-        if kind == "rugd":
-            self._model = _load_rugd(path)
-        else:
-            self._model = _load_da3(path)
+        try:
+            if kind == "rugd":
+                self._model = _load_rugd(path)
+            else:
+                self._model = _load_da3(path)
+        except AdapterError:
+            raise
+        except ImportError as exc:
+            raise AdapterError("CUDA backend dependency missing") from exc
+        except Exception as exc:
+            raise AdapterError("CUDA load failed") from exc
         self._kind = kind
         self.device = "cuda"
 
@@ -104,9 +111,11 @@ def _load_da3(path: Path) -> object:
     if any(key.startswith("model.") for key in state):
         state = {key.removeprefix("model."): value for key, value in state.items()}
     missing, unexpected = net.load_state_dict(state, strict=False)
-    if unexpected:
-        raise AdapterError(f"unexpected DA3 checkpoint keys: {unexpected[:8]}")
-    del missing
+    if missing or unexpected:
+        raise AdapterError(
+            "DA3 checkpoint does not match the net "
+            f"(missing={len(missing)} unexpected={len(unexpected)})"
+        )
     net.eval()
     return _Da3Head(net).to("cuda")
 

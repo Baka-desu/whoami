@@ -1,4 +1,5 @@
 adapter_id: rugd
+# Intel default. Live picker uses CUDA safetensors when Intel GPU is missing.
 backend: openvino_gpu
 weights: weights/rugd-segformer.xml
 input_hw: [640, 640]
