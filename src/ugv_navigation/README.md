@@ -17,7 +17,7 @@ Dev 3 costmap params ─► local_costmap  (in controller_server) ─► RPP ◄
 |---|---|
 | `config/planner_server.yaml` | 1 Smac2D (`allow_unknown: false`, bounded plan time) |
 | `config/controller_server.yaml` | 2 RPP (adaptive lookahead, curvature + cost regulation, collision detection, rotate-to-heading) · 3 fresh-costmap wait · 5 unstamped `Twist` |
-| `behavior_trees/navigate_to_pose_ugv.xml` | 3 replan at 2 Hz if path > 2 s old / goal updated / `IsPathValid` fails · 4 spin / wait / backup |
+| `behavior_trees/navigate_to_pose_ugv.xml` | 3 replan at 2 Hz if path > 2 s old / goal updated / `ValidatePath` fails on the path ahead (unknown counts as obstacle) · 4 spin / wait / backup |
 | `config/behavior_server.yaml` | 4 recovery plugins (spin, backup, wait) |
 | `config/bt_navigator.yaml` | 4 `/navigate_to_pose` |
 | `launch/navigation.launch.py` | all; 5 remaps every Nav2 `cmd_vel` to `/cmd_vel_nav2` |
@@ -35,6 +35,10 @@ Dev 3 costmap params ─► local_costmap  (in controller_server) ─► RPP ◄
   Dev 5's.
 - **No footprint and no costmap values** are set in any Dev 4 file. Smac2D and RPP
   read the footprint and inflation from Dev 3's costmaps.
+- **Target distro is ROS 2 Lyrical** (`CLAUDE.md`). Configs use Lyrical Nav2 names
+  (`error_code_name_prefixes`, `ValidatePath`, RPP `max_linear_vel`, controller
+  `path_handler_plugins`) and will not load on Jazzy Nav2. The static tests check
+  every name against the installed Nav2, so run them on Lyrical.
 
 ## Values to confirm with other devs
 
@@ -57,8 +61,17 @@ Dev 3 costmap params ─► local_costmap  (in controller_server) ─► RPP ◄
 
 ## Commands
 
+Without a native Lyrical install, build + run every test in Docker (from the repo root;
+nothing is written back to the repo):
+
 ```bash
-source /opt/ros/jazzy/setup.bash
+docker/test_in_lyrical.sh src/ugv_navigation
+```
+
+Native Lyrical:
+
+```bash
+source /opt/ros/lyrical/setup.bash
 colcon build --symlink-install --packages-select ugv_navigation
 colcon test --packages-select ugv_navigation && colcon test-result --verbose
 source install/setup.bash

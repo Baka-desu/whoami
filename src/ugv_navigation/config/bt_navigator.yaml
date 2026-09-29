@@ -11,11 +11,15 @@ bt_navigator:
     bt_loop_duration: 10
     default_server_timeout: 20
     wait_for_service_timeout: 1000
-    action_server_result_timeout: 900.0
     # Only NavigateToPose is part of the Dev 4 contract.
     navigators: ["navigate_to_pose"]
     navigate_to_pose:
       plugin: "nav2_bt_navigator::NavigateToPoseNavigator"
-    error_code_names:
-      - compute_path_error_code
-      - follow_path_error_code
+    # Lyrical: blackboard keys "<prefix>_error_code" / "<prefix>_error_msg" reported in the
+    # NavigateToPose result. The old `error_code_names` makes bt_navigator throw.
+    error_code_name_prefixes:
+      - compute_path
+      - follow_path
+      - spin
+      - wait
+      - backup

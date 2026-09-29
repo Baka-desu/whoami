@@ -4,10 +4,11 @@ Live ROS graph check of navigation.launch.py (Dev 4 boundary).
 Launches the real launch file with autostart:=false and a TEST-ONLY costmap fixture,
 then CONFIGURES the Nav2 servers. Configuring loads the Smac2D, RPP, behavior and
 navigator plugins with the Dev 4 params and creates every publisher and action server,
-without needing TF, odometry or costmap data from Dev 2/3. bt_navigator alone is then
-ACTIVATED, which makes BehaviorTree.CPP load and build navigate_to_pose_ugv.xml against
-the live planner / controller / behavior action servers. The planner and controller
-are never activated (that needs Dev 2 TF).
+without needing TF, odometry or costmap data from Dev 2/3. The last test then ACTIVATES
+all four servers in lifecycle_manager order, using a TEST-ONLY identity static TF
+map -> odom -> base_link in place of Dev 2. bt_navigator activation makes
+BehaviorTree.CPP build navigate_to_pose_ugv.xml; on Lyrical that needs the planner's
+is_path_valid service (ValidatePath), which only exists once the planner is active.
 
 It does not drive the robot and does not claim end-to-end navigation works.
 """
@@ -30,6 +31,8 @@ LAUNCH_FILE = PKG / 'launch' / 'navigation.launch.py'
 FIXTURE = PKG / 'test' / 'fixtures' / 'test_only_costmaps.yaml'
 SERVERS = ['planner_server', 'controller_server', 'behavior_server', 'bt_navigator']
 TWIST = 'geometry_msgs/msg/Twist'
+# TEST-ONLY stand-in for Dev 2's TF chain (identity transforms).
+TEST_TF = [('map', 'odom'), ('odom', 'base_link')]
 
 
 def change_state(node, name, transition_id):
@@ -49,6 +52,10 @@ def configured_stack():
         ['ros2', 'launch', str(LAUNCH_FILE), f'costmap_params_file:={FIXTURE}',
          'autostart:=false'],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, start_new_session=True)
+    tf_procs = [subprocess.Popen(
+        ['ros2', 'run', 'tf2_ros', 'static_transform_publisher',
+         '--frame-id', parent, '--child-frame-id', child],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) for parent, child in TEST_TF]
     rclpy.init()
     node = rclpy.create_node('dev4_graph_test')
     try:
@@ -59,6 +66,9 @@ def configured_stack():
     finally:
         node.destroy_node()
         rclpy.shutdown()
+        for tf_proc in tf_procs:
+            tf_proc.terminate()
+            tf_proc.wait(timeout=10)
         os.killpg(proc.pid, signal.SIGINT)
         try:
             output, _ = proc.communicate(timeout=20)
@@ -96,6 +106,14 @@ def test_navigate_to_pose_action_server_exists(configured_stack):
     client.destroy()
 
 
-def test_bt_navigator_activates_with_ugv_behavior_tree(configured_stack):
-    # Runs last: activation parses the BT XML and instantiates every BT node.
-    assert change_state(configured_stack, 'bt_navigator', Transition.TRANSITION_ACTIVATE)
+def test_stack_activates_with_ugv_behavior_tree(configured_stack):
+    # Runs last. Same order as lifecycle_manager; bt_navigator activation parses the BT
+    # XML and instantiates every BT node against the live servers.
+    for name in SERVERS:
+        assert change_state(configured_stack, name, Transition.TRANSITION_ACTIVATE), \
+            f'{name} failed to activate'
+    # Active publishers still respect the boundary.
+    infos = wait_for_publishers(configured_stack, '/cmd_vel_nav2',
+                                {'controller_server', 'behavior_server'})
+    assert {i.node_name for i in infos} == {'controller_server', 'behavior_server'}
+    assert configured_stack.get_publishers_info_by_topic('/cmd_vel') == []

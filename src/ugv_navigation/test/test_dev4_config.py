@@ -76,8 +76,12 @@ def test_controller_is_rpp_and_installed():
 
 
 def test_rpp_parameter_names_exist_in_installed_nav2():
-    header = (Path(get_package_prefix('nav2_regulated_pure_pursuit_controller')) / 'include'
-              / 'nav2_regulated_pure_pursuit_controller' / 'parameter_handler.hpp')
+    pkg = 'nav2_regulated_pure_pursuit_controller'
+    # Lyrical installs headers under include/<pkg>/<pkg>/, older distros under include/<pkg>/.
+    headers = sorted((Path(get_package_prefix(pkg)) / 'include').glob(
+        f'**/{pkg}/parameter_handler.hpp'))
+    assert headers, f'{pkg} parameter_handler.hpp not installed'
+    header = headers[0]
     known = set()
     for decl in re.findall(r'^\s+(?:double|bool|int)\s+([^;(]+);', header.read_text(), re.M):
         known.update(name.strip() for name in decl.split(','))
@@ -99,7 +103,7 @@ def test_rpp_curvature_and_collision_aware_regulation():
     assert r['use_cost_regulated_linear_velocity_scaling'] is True
     assert r['use_collision_detection'] is True
     assert r['max_allowed_time_to_collision_up_to_carrot'] > 0
-    assert 0 < r['regulated_linear_scaling_min_speed'] < r['desired_linear_vel']
+    assert 0 < r['regulated_linear_scaling_min_speed'] < r['max_linear_vel']
 
 
 def test_rpp_differential_drive():
@@ -107,6 +111,23 @@ def test_rpp_differential_drive():
     assert r['use_rotate_to_heading'] is True
     # RPP rejects rotate-to-heading together with reversing.
     assert r['allow_reversing'] is False
+
+
+def test_rpp_velocity_bounds_are_explicit():
+    # Lyrical RPP defaults are min_linear_vel -0.5 and |angular| 2.5 rad/s; set our own.
+    r = params('controller_server.yaml', 'controller_server')['FollowPath']
+    assert 'desired_linear_vel' not in r  # deprecated name in Lyrical
+    assert r['min_linear_vel'] == 0.0 < r['max_linear_vel']
+    assert r['min_angular_vel'] == -r['max_angular_vel'] < 0
+    assert r['rotate_to_heading_angular_vel'] <= r['max_angular_vel']
+
+
+def test_controller_path_handler_is_installed():
+    p = params('controller_server.yaml', 'controller_server')
+    assert p['path_handler_plugins'] == ['PathHandler']
+    cls = 'nav2_controller::FeasiblePathHandler'
+    assert p['PathHandler']['plugin'] == cls
+    assert plugin_registered('nav2_controller', cls)
 
 
 # ---------------------------------------------------------------- 3. Dynamic reactivity
@@ -124,7 +145,10 @@ def test_bt_replans_on_timer_and_invalid_path():
     rate = bt_root().find('.//RateController')
     assert rate is not None and float(rate.get('hz')) >= 1.0
     assert rate.find('.//ComputePathToPose') is not None
-    assert rate.find('.//IsPathValid') is not None
+    validate = rate.find('.//ValidatePath')
+    assert validate is not None
+    # Unknown != free (architecture §8.1): unknown cells on the path force a replan.
+    assert validate.get('consider_unknown_as_obstacle') == 'true'
     assert rate.find('.//PathExpiringTimer') is not None
 
 
@@ -155,10 +179,13 @@ def test_bt_ids_match_server_plugins():
     controller = params('controller_server.yaml', 'controller_server')['controller_plugins']
     assert root.find('.//PlannerSelector').get('default_planner') in planner
     assert root.find('.//ControllerSelector').get('default_controller') in controller
-    names = params('bt_navigator.yaml', 'bt_navigator')['error_code_names']
+    p = params('bt_navigator.yaml', 'bt_navigator')
+    # Lyrical bt_navigator throws on startup if the old name is present.
+    assert 'error_code_names' not in p
+    prefixes = p['error_code_name_prefixes']
     used = {el.get('error_code_id').strip('{}') for el in root.iter()
             if el.get('error_code_id')}
-    assert used <= set(names)
+    assert used == {f'{prefix}_error_code' for prefix in prefixes}
 
 
 def test_behavior_server_plugins():
