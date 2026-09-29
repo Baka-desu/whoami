@@ -6,6 +6,13 @@
 # ugv_perception (Dev 1's real Perception Port pipeline) is also NOT listed here: install it from
 # the sibling package instead of PyPI:
 #   pip install -e ../turing
+#
+# depth_anything_3 is also NOT listed here - see server/README.md's "Depth" section for why (its
+# own pyproject.toml caps Python at 3.13 and pulls in a full 3D-reconstruction stack this doesn't
+# need). Only these three packages are actually required to build+run its metric depth model:
+omegaconf
+addict
+einops
 fastapi
 uvicorn[standard]
 python-multipart

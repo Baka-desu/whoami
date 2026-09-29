@@ -1,21 +1,23 @@
 """Loads the real models once and exposes plain run_* functions.
 
-Segmentation: Dev 1's real, tested Perception Port pipeline (turing/, installed here as the
-`ugv_perception` library — see server/README.md for why it's imported rather than copied) driving
-the real RUGD SegFormer-B5 checkpoint (JasonTStanley/RUGD-Segformer on Hugging Face, fine-tuned
-from nvidia/segformer-b5-finetuned-ade-640-640 on the actual RUGD classes). `compose_tick()` is
-Dev1's own remap + confidence-gate + freshness pipeline; this file only supplies the one piece
-that didn't exist yet for this hardware: a CUDA PyTorch inference backend (Dev1's own backend
-seam was stubbed for "later, NVIDIA" — turing/src/ugv_perception/backend/cuda_pytorch.py). That
-stub, and its factory rejection, are left untouched: they're Dev1's own file with Dev1's own test
-asserting the current "not on this box" behaviour, so the backend is implemented here instead and
-wired directly into `RugdSegformerAdapter`.
+Both segmentation and depth now run through Dev 1's real, tested Perception pipeline (turing/,
+installed here as the `ugv_perception` library) - not a reimplementation, and not a substitute
+model. `build_live_adapter()` and `build_depth_channel()` are Dev 1's own top-level factories
+(turing/src/ugv_perception/backend/rugd_live.py, depth_live.py), which pick Intel OpenVINO GPU,
+then NVIDIA CUDA safetensors, then OpenVINO CPU (turing/src/ugv_perception/backend/device.py -
+Dev 1's own code, added after this server's first version, which had to stand in a CUDA backend
+of its own; that stand-in is gone now that Dev 1's real one exists upstream).
 
-Depth: depth-anything/Depth-Anything-V2-Metric-Outdoor-Large-hf. dev.md/architecture.md name
-"Depth Anything 3 Metric Large" (turing/'s own T08 targets the same model); that package's own
-pyproject.toml caps Python at 3.13 (this machine runs 3.14) and pulls in a full multi-view
-3D-reconstruction stack (pycolmap, open3d, gsplat) unrelated to single-frame depth. This is the
-direct predecessor, integrates via plain `transformers`, and is specifically the outdoor variant.
+Segmentation: the real RUGD SegFormer-B5 checkpoint (JasonTStanley/RUGD-Segformer on Hugging
+Face), through Dev 1's real compose_tick() (remap + confidence gate + freshness - see
+run_segmentation()'s docstring for the one adaptation needed for a REST call instead of a ROS tick
+loop).
+
+Depth: the real Depth Anything 3 Metric Large checkpoint (depth-anything/DA3METRIC-LARGE), through
+Dev 1's real DepthChannel. Getting the model class to build needs only `omegaconf`, `addict` and
+`einops` - not the full depth-anything-3 pip package (which requires Python <=3.13 and pulls in a
+whole multi-view 3D-reconstruction stack unrelated to this). See server/README.md for the install
+step (`pip install --no-deps --ignore-requires-python -e <clone>`).
 """
 import time
 from pathlib import Path
@@ -23,73 +25,45 @@ from pathlib import Path
 import numpy as np
 import torch
 from PIL import Image
-from transformers import AutoImageProcessor, AutoModelForDepthEstimation, SegformerForSemanticSegmentation
 
 from ugv_perception.adapter.frame import ImageFrame
-from ugv_perception.adapter.rugd import N_CLASSES, RugdSegformerAdapter
+from ugv_perception.backend.depth_live import DepthChannel, build_depth_channel
+from ugv_perception.backend.rugd_live import build_live_adapter
 from ugv_perception.compose.load import load_compose_configs
 from ugv_perception.compose.tick import compose_tick
 
 TURING = Path(__file__).parent.parent / "turing"
-RUGD_WEIGHTS = TURING / "weights" / "rugd-segformer"
-RUGD_INPUT_HW = (640, 640)  # matches turing/config/adapters/rugd.yaml
-RUGD_MEAN = (0.485, 0.456, 0.406)
-RUGD_STD = (0.229, 0.224, 0.225)
 
-DEPTH_MODEL_ID = "depth-anything/Depth-Anything-V2-Metric-Outdoor-Large-hf"
-
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-
-_rugd_model = None
-_rugd_adapter: RugdSegformerAdapter | None = None
+_rugd_adapter = None
 _remap_table = None
 _gate_profile = None
 _freshness_profile = None
-_depth_proc = None
-_depth_model = None
-
-
-class _TorchRugdBackend:
-    """Satisfies RugdSegformerAdapter's informal backend contract: .run(blob) -> raw logits.
-    Not turing/src/ugv_perception/backend/cuda_pytorch.py - see the module docstring for why."""
-
-    def run(self, blob: np.ndarray) -> np.ndarray:
-        with torch.inference_mode():
-            t = torch.from_numpy(blob).to(DEVICE)
-            logits = _rugd_model(pixel_values=t).logits
-        return logits.cpu().numpy()
+_depth_channel: DepthChannel | None = None
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
 def load() -> None:
     """Load both models once. Called at server startup so /health is meaningful and the
     first real request isn't slow."""
-    global _rugd_model, _rugd_adapter, _remap_table, _gate_profile, _freshness_profile
-    global _depth_proc, _depth_model
-    if _rugd_model is not None:
+    global _rugd_adapter, _remap_table, _gate_profile, _freshness_profile, _depth_channel
+    if _rugd_adapter is not None:
         return
-    if not (RUGD_WEIGHTS / "model.safetensors").is_file():
-        raise RuntimeError(
-            f"RUGD weights missing at {RUGD_WEIGHTS}. Fetch them first: "
-            f"bash turing/scripts/fetch_rugd_segformer.sh"
-        )
-    _rugd_model = SegformerForSemanticSegmentation.from_pretrained(str(RUGD_WEIGHTS)).to(DEVICE).eval()
-    if _rugd_model.config.num_labels != N_CLASSES:
-        raise RuntimeError(f"checkpoint has {_rugd_model.config.num_labels} classes, expected {N_CLASSES}")
-    _rugd_adapter = RugdSegformerAdapter(
-        backend=_TorchRugdBackend(), input_hw=RUGD_INPUT_HW, mean=RUGD_MEAN, std=RUGD_STD,
-    )
+    _rugd_adapter = build_live_adapter(TURING)
     _remap_table, _gate_profile, _freshness_profile = load_compose_configs(
         remap_path=TURING / "config" / "ontologies" / "rugd.yaml",
         gates_path=TURING / "config" / "perception" / "rugd.yaml",
         freshness_path=TURING / "config" / "perception" / "port.yaml",
     )
-
-    _depth_proc = AutoImageProcessor.from_pretrained(DEPTH_MODEL_ID)
-    _depth_model = AutoModelForDepthEstimation.from_pretrained(DEPTH_MODEL_ID).to(DEVICE).eval()
+    _depth_channel = build_depth_channel(TURING)
+    if _depth_channel is None:
+        raise RuntimeError(
+            "DA3-Metric-Large weights missing. Fetch them first: "
+            "bash turing/scripts/fetch_da3metric_large.sh"
+        )
 
 
 def ready() -> bool:
-    return _rugd_model is not None and _depth_model is not None
+    return _rugd_adapter is not None and _depth_channel is not None
 
 
 def run_segmentation(
@@ -138,16 +112,19 @@ def run_segmentation(
     return classes, confidence, valid, degraded, latency_ms
 
 
-def run_depth(image: Image.Image, out_w: int, out_h: int) -> tuple[np.ndarray, float]:
-    """Returns a (out_h, out_w) float32 array of metric depth in metres."""
+def run_depth(
+    image: Image.Image, out_w: int, out_h: int, k: np.ndarray,
+) -> tuple[np.ndarray, float]:
+    """Runs Dev 1's real DepthChannel (DA3-Metric-Large). Returns a (out_h, out_w) float32 array
+    of metric depth in metres. `k` is the 3x3 camera intrinsics matrix (real or assumed - honesty
+    about which is the UI's job, not this server's)."""
     t0 = time.time()
-    inputs = _depth_proc(images=image, return_tensors="pt").to(DEVICE)
-    with torch.inference_mode():
-        raw = _depth_model(**inputs).predicted_depth
-    full = torch.nn.functional.interpolate(
-        raw.unsqueeze(1), size=image.size[::-1], mode="bicubic", align_corners=False,
-    ).squeeze().cpu().numpy()
+    rgb = np.asarray(image, dtype=np.uint8)
+    depth_m, _points = _depth_channel.maps(rgb, k)
+    # Sky/holes come back as NaN (no measurable depth). Treat as far, matching the mock's own
+    # far-clamp convention, so downstream min/median/max and sorting never see a NaN.
+    depth_m = np.nan_to_num(depth_m, nan=30.0, posinf=30.0, neginf=0.0)
     resized = np.array(
-        Image.fromarray(full.astype(np.float32), mode="F").resize((out_w, out_h), Image.BILINEAR)
+        Image.fromarray(depth_m.astype(np.float32), mode="F").resize((out_w, out_h), Image.BILINEAR)
     )
     return resized.astype(np.float32), (time.time() - t0) * 1000
