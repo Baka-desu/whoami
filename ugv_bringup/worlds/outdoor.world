@@ -1,0 +1,134 @@
+<?xml version="1.0"?>
+<!--
+  Dev 5 - outdoor Gazebo world (dev.md Dev 5 task 5). Minimal v1: uneven-ish
+  ground plane, a dirt-track heightmap stand-in (flat plane + scattered rock/
+  box obstacles), and a few lethal obstacles for the safety/costmap DoD check
+  (architecture.md §13 item 5, geometry-vs-semantic precedence). This is an
+  integration/CI aid (architecture.md §4), not the qualification bar for
+  perception - see turing/README.md runtime-profiles table.
+-->
+<sdf version="1.9">
+  <world name="ugv_outdoor">
+
+    <physics name="1ms" type="ode">
+      <max_step_size>0.001</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+    </physics>
+
+    <plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics"/>
+    <plugin filename="gz-sim-user-commands-system" name="gz::sim::systems::UserCommands"/>
+    <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/>
+    <plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+    </plugin>
+
+    <light type="directional" name="sun">
+      <cast_shadows>true</cast_shadows>
+      <pose>0 0 10 0 0 0</pose>
+      <diffuse>0.9 0.9 0.85 1</diffuse>
+      <specular>0.2 0.2 0.2 1</specular>
+      <direction>-0.4 0.2 -0.9</direction>
+    </light>
+
+    <model name="ground_plane">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <plane>
+              <normal>0 0 1</normal>
+              <size>60 60</size>
+            </plane>
+          </geometry>
+          <surface>
+            <friction>
+              <ode>
+                <mu>0.8</mu>
+                <mu2>0.8</mu2>
+              </ode>
+            </friction>
+          </surface>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <plane>
+              <normal>0 0 1</normal>
+              <size>60 60</size>
+            </plane>
+          </geometry>
+          <material>
+            <ambient>0.45 0.36 0.22 1</ambient>
+            <diffuse>0.5 0.4 0.25 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Dirt track markers: two long thin traversable strips (visual only, no
+         collision) so the semantic layer has a real path/off-path boundary
+         to segment, per §8.1 (traversable vs unknown vs hazard). -->
+    <model name="dirt_track_east">
+      <static>true</static>
+      <pose>4 0 0.001 0 0 0</pose>
+      <link name="link">
+        <visual name="visual">
+          <geometry>
+            <plane>
+              <normal>0 0 1</normal>
+              <size>2.0 10.0</size>
+            </plane>
+          </geometry>
+          <material>
+            <ambient>0.55 0.45 0.3 1</ambient>
+            <diffuse>0.6 0.5 0.32 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Lethal obstacles: real collision geometry for the geometry-precedence
+         DoD check (architecture.md §9 / §13 item 5). -->
+    <model name="rock_01">
+      <static>true</static>
+      <pose>4 -1.2 0.25 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry><sphere><radius>0.3</radius></sphere></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><sphere><radius>0.3</radius></sphere></geometry>
+          <material><ambient>0.3 0.3 0.3 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="rock_02">
+      <static>true</static>
+      <pose>4.5 1.0 0.2 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry><sphere><radius>0.25</radius></sphere></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><sphere><radius>0.25</radius></sphere></geometry>
+          <material><ambient>0.3 0.3 0.3 1</ambient><diffuse>0.35 0.35 0.35 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="crate_obstacle">
+      <static>true</static>
+      <pose>6 0 0.25 0 0 0.4</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry><box><size>0.5 0.5 0.5</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>0.5 0.5 0.5</size></box></geometry>
+          <material><ambient>0.4 0.25 0.1 1</ambient><diffuse>0.45 0.28 0.12 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+  </world>
+</sdf>

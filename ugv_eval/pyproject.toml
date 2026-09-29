@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ugv-eval"
+version = "0.1.0"
+description = "UGV eval/verification tools (Dev 5): e-stop CLI, safety status echo."
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[project.scripts]
+ugv-estop = "ugv_eval.estop_cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["src/ugv_eval/tests"]
+addopts = "-q"
