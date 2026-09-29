@@ -322,3 +322,26 @@ def test_openvino_cpu_forced_run_without_product_picker() -> None:
     tensors = [np.asarray(result[port]) for port in compiled.outputs]
     assert len(tensors) >= 1
     assert all(t.size > 0 for t in tensors)
+
+
+def test_openvino_cpu_forced_rugd_and_da3_without_product_picker() -> None:
+    """Force CPU compile+infer on live IRs. Does not call the product picker."""
+    import openvino as ov
+
+    root = Path(__file__).resolve().parents[3]
+    rugd = root / "weights" / "rugd-segformer.xml"
+    da3 = root / "weights" / "da3metric-large.xml"
+    if not rugd.is_file() or not da3.is_file():
+        pytest.skip("RUGD or DA3 IR missing")
+    core = ov.Core()
+    if not any(str(d).startswith("CPU") for d in core.available_devices):
+        pytest.skip("OpenVINO CPU device missing")
+    compiled_r = core.compile_model(core.read_model(str(rugd)), "CPU")
+    logits = np.asarray(compiled_r([np.zeros((1, 3, 640, 640), dtype=np.float32)])[compiled_r.output(0)])
+    assert logits.ndim == 4
+    assert logits.shape[1] == 25
+    compiled_d = core.compile_model(core.read_model(str(da3)), "CPU")
+    outs = compiled_d([np.zeros((1, 3, 336, 504), dtype=np.float32)])
+    tensors = [np.asarray(outs[port]) for port in compiled_d.outputs]
+    assert len(tensors) >= 2
+    assert all(t.size > 0 for t in tensors)
