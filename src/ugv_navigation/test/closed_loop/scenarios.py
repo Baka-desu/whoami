@@ -11,6 +11,7 @@ test values, not project values.
 """
 
 from dataclasses import dataclass, field
+import math
 
 RESOLUTION = 0.05
 ORIGIN = (-1.0, -2.5)
@@ -96,3 +97,41 @@ def min_clearance(x, y, cells):
     """Distance from (x, y) to the nearest blocked cell centre (inf if none)."""
     return min((((cx - x) ** 2 + (cy - y) ** 2) ** 0.5 for cx, cy in cells),
                default=float('inf'))
+
+
+def footprint_at(points, x, y, yaw):
+    """Robot footprint polygon (base_link points) placed at map pose (x, y, yaw)."""
+    c, s = math.cos(yaw), math.sin(yaw)
+    return [(x + c * px - s * py, y + s * px + c * py) for px, py in points]
+
+
+def _inside(poly, qx, qy):
+    inside = False
+    for (x1, y1), (x2, y2) in zip(poly, poly[1:] + poly[:1]):
+        if (y1 > qy) != (y2 > qy) and qx < x1 + (qy - y1) * (x2 - x1) / (y2 - y1):
+            inside = not inside
+    return inside
+
+
+def _segment_distance(qx, qy, x1, y1, x2, y2):
+    dx, dy = x2 - x1, y2 - y1
+    t = max(0.0, min(1.0, ((qx - x1) * dx + (qy - y1) * dy) / (dx * dx + dy * dy)))
+    return math.hypot(qx - (x1 + t * dx), qy - (y1 + t * dy))
+
+
+def polygon_clearance(poly, cells, reach=1.5):
+    """
+    Distance from the polygon to the nearest cell centre; 0 if a centre is inside.
+
+    Only cells within `reach` metres of the polygon's first vertex are checked.
+    """
+    ax, ay = poly[0]
+    best = float('inf')
+    for qx, qy in cells:
+        if abs(qx - ax) > reach or abs(qy - ay) > reach:
+            continue
+        if _inside(poly, qx, qy):
+            return 0.0
+        for (x1, y1), (x2, y2) in zip(poly, poly[1:] + poly[:1]):
+            best = min(best, _segment_distance(qx, qy, x1, y1, x2, y2))
+    return best

@@ -24,11 +24,13 @@ silently running Nav2's default costmap layers.
 """
 
 from pathlib import Path
+import tempfile
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+import yaml
 
 # Resolves to src/ugv_navigation (source) or share/ugv_navigation (install).
 PKG_DIR = Path(__file__).resolve().parent.parent
@@ -52,6 +54,8 @@ NAV2_SERVERS = [
     ('nav2_bt_navigator', 'bt_navigator', 'bt_navigator', 'bt_navigator.yaml', False),
 ]
 LIFECYCLE_NODES = [name for _, _, name, _, _ in NAV2_SERVERS]
+# Nodes hosting a costmap (they get the robot footprint).
+COSTMAP_HOSTS = {'planner_server': 'global_costmap', 'controller_server': 'local_costmap'}
 
 
 def resolve_robot_params(robot, robot_params_file):
@@ -69,9 +73,48 @@ def resolve_robot_params(robot, robot_params_file):
     return str(path)
 
 
-def parameter_files(params_file, costmap_params_file, robot_params_file):
-    """Later entries override earlier ones: Dev 4 defaults < Dev 3 costmaps < robot."""
+def find_footprint_file(robot, start=PKG_DIR):
+    """
+    Dev 5's config/robots/footprint_<robot>.yaml, searched upward from this package.
+
+    Found from the source tree and from an install space built inside the repo.
+    Returns '' if not found (the footprint then comes from Dev 3's costmap params).
+    """
+    for parent in [start, *start.parents]:
+        candidate = parent / 'config' / 'robots' / f'footprint_{robot}.yaml'
+        if candidate.is_file():
+            return str(candidate)
+    return ''
+
+
+def load_footprint(path):
+    """Read Dev 5's footprint format: `footprint` (polygon string) + `footprint_padding`."""
+    data = yaml.safe_load(Path(path).read_text()) or {}
+    footprint = data.get('footprint')
+    points = yaml.safe_load(footprint) if isinstance(footprint, str) else None
+    if not (isinstance(points, list) and len(points) >= 3 and
+            all(isinstance(pt, list) and len(pt) == 2 for pt in points)):
+        raise RuntimeError(f'navigation.launch.py: {path}: `footprint` must be a polygon '
+                           'string like "[[x, y], [x, y], [x, y]]"')
+    return {'footprint': footprint, 'footprint_padding': float(data.get('footprint_padding', 0.0))}
+
+
+def footprint_params_file(footprint):
+    """Write the footprint as costmap parameters for both costmaps; return the path."""
+    params = {costmap: {costmap: {'ros__parameters': dict(footprint)}}
+              for costmap in COSTMAP_HOSTS.values()}
+    with tempfile.NamedTemporaryFile('w', prefix='ugv_footprint_', suffix='.yaml',
+                                     delete=False) as f:
+        yaml.safe_dump(params, f)
+    return f.name
+
+
+def parameter_files(params_file, costmap_params_file, robot_params_file,
+                    footprint_file=''):
+    """Later entries override: Dev 4 defaults < Dev 3 costmaps < footprint < robot."""
     files = [str(CONFIG_DIR / params_file), costmap_params_file]
+    if footprint_file:
+        files.append(footprint_file)
     if robot_params_file:
         files.append(robot_params_file)
     return files
@@ -81,12 +124,23 @@ def _launch_setup(context, *args, **kwargs):
     costmap_params_file = LaunchConfiguration('costmap_params_file').perform(context)
     robot = LaunchConfiguration('robot').perform(context)
     robot_params_file = LaunchConfiguration('robot_params_file').perform(context)
+    footprint_file = LaunchConfiguration('footprint_file').perform(context)
     bt_xml = LaunchConfiguration('bt_xml').perform(context)
     use_sim_time = LaunchConfiguration('use_sim_time').perform(context).lower() == 'true'
     autostart = LaunchConfiguration('autostart').perform(context).lower() == 'true'
     log_level = LaunchConfiguration('log_level').perform(context)
 
     robot_params_file = resolve_robot_params(robot, robot_params_file)
+    # Footprint selection (Dev 5 files, Dev 4 selects): explicit file, else Dev 5's
+    # footprint_<robot>.yaml if reachable, else whatever Dev 3's costmap params set.
+    if not footprint_file and robot:
+        footprint_file = find_footprint_file(robot)
+    footprint_params = ''
+    if footprint_file:
+        if not Path(footprint_file).is_file():
+            raise RuntimeError(f'navigation.launch.py: footprint_file not found: '
+                               f'{footprint_file}')
+        footprint_params = footprint_params_file(load_footprint(footprint_file))
     if not costmap_params_file and DEFAULT_COSTMAP_PARAMS.is_file():
         costmap_params_file = str(DEFAULT_COSTMAP_PARAMS)
     if not costmap_params_file:
@@ -104,8 +158,10 @@ def _launch_setup(context, *args, **kwargs):
     common = {'use_sim_time': use_sim_time}
     nodes = []
     for package, executable, name, params_file, publishes_cmd_vel in NAV2_SERVERS:
-        # Files (Dev 4 defaults < Dev 3 costmaps < robot overlay) < launch overrides.
-        parameters = parameter_files(params_file, costmap_params_file, robot_params_file)
+        # Files (Dev 4 defaults < Dev 3 costmaps < footprint < robot) < launch overrides.
+        parameters = parameter_files(
+            params_file, costmap_params_file, robot_params_file,
+            footprint_params if name in COSTMAP_HOSTS else '')
         parameters.append(common)
         if name == 'bt_navigator':
             parameters.append({'default_nav_to_pose_bt_xml': bt_xml})
@@ -154,6 +210,11 @@ def generate_launch_description():
             'robot_params_file', default_value='',
             description='Optional per-robot overlay from config/robots/<robot>/ '
                         '(speed / acceleration limits for RPP and recoveries).'),
+        DeclareLaunchArgument(
+            'footprint_file', default_value='',
+            description='Robot footprint in Dev 5 format (footprint + footprint_padding), '
+                        'applied to both costmaps. Default with robot:=<name>: Dev 5 '
+                        'config/robots/footprint_<name>.yaml if found above this package.'),
         DeclareLaunchArgument(
             'bt_xml', default_value=str(DEFAULT_BT_XML),
             description='NavigateToPose behavior tree XML.'),

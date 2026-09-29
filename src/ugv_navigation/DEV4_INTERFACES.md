@@ -26,8 +26,10 @@ Evidence: `docker/test_in_lyrical.sh src/ugv_navigation` runs every test below.
 **Watchdog.** Use `/ugv/nav2_heartbeat` for the §12 "Nav2 crash / no controller
 heartbeat" row: hold on `false` **or** on message age > your timeout (the heartbeat
 node itself can die). Do **not** use `/cmd_vel_nav2` age as Nav2 liveness: it is
-silent whenever no goal is running and for 5 s during the Wait recovery. A stale
-`/cmd_vel_nav2` should still be treated as zero (never repeat the last candidate).
+silent whenever no goal is running and for 5 s during the Wait recovery. Keep a
+separate freshness check on the candidate: a `/cmd_vel_nav2` older than ~0.5 s must be
+treated as zero at Level 4 (never repeat the last candidate). That is a candidate
+property, not a health fault.
 
 **Bringup include** (IMPLEMENTED on our side):
 
@@ -110,10 +112,18 @@ Needs a joint decision against architecture §8.1.
 
 ## 4. Per-robot configuration
 
-`ros2 launch ugv_navigation navigation.launch.py robot:=<name>` loads
-`config/robots/<name>/nav2_limits.yaml` after the Dev 4 defaults and Dev 3's costmap
-params. `robot_params_file:=<path>` still works for an ad-hoc file (not both).
-Footprints stay in Dev 3 / Dev 5's costmap params, not here.
+`ros2 launch ugv_navigation navigation.launch.py robot:=<name>` selects, per robot:
+
+| What | File | Owner | Applied to |
+|---|---|---|---|
+| Speed / acceleration limits | `config/robots/<name>/nav2_limits.yaml` (this package) | Dev 4 file, Dev 5 values | controller + behavior server |
+| Footprint (`footprint`, `footprint_padding`) | Dev 5's `config/robots/footprint_<name>.yaml`, found by searching upward from this package (source tree, or an install space built inside the repo) | Dev 5 (selection is Dev 4's, per Dev 5) | both costmaps |
+
+Parameter order: Dev 4 defaults < Dev 3 costmap params < footprint < robot limits.
+`footprint_file:=<path>` overrides the footprint lookup; `robot_params_file:=<path>`
+replaces the limits file (not together with `robot:=`). Without either, the footprint
+is whatever Dev 3's costmap params set. The closed-loop tests run every scenario with
+both of Dev 5's footprints (TEST-ONLY copies from #15 until it is merged).
 
 ## 5. Evidence (Lyrical, Nav2 1.5.1)
 
@@ -121,5 +131,5 @@ Footprints stay in Dev 3 / Dev 5's costmap params, not here.
 |---|---|
 | `test_dev4_config` | Every plugin / parameter / BT node exists in the installed Nav2; contracts above |
 | `test_navigation_graph` | Full stack activates; only controller + behavior server publish `/cmd_vel_nav2`; nothing publishes `/cmd_vel`; heartbeat `false` while configured, `true` when active, `false` after `controller_server` is killed |
-| `test_closed_loop` | A→B in 5 scenarios (open, wall with opening, corridor, unknown block, hazard appearing mid-run) with a TEST-ONLY fake base: goal reached, footprint clear of lethal and unknown, twists within limits. Benchmark CSV in the build dir; numbers in `README.md` |
+| `test_closed_loop` | A→B in 5 scenarios (open, wall with opening, corridor, unknown block, hazard appearing mid-run) × Dev 5's 2 footprints, TEST-ONLY fake base: goal reached, footprint polygon clear of lethal and unknown cells, twists within limits. Benchmark CSV in the build dir; numbers in `README.md` |
 | `test_heartbeat_core`, `test_testbench_core` | Heartbeat and testbench logic |
