@@ -1,0 +1,17 @@
+# rtabmap_util/pointcloud_to_depthimage — Dev 1's DA3 cloud → registered depth image for rgbd_sync.
+# Dev 1 publishes /perception/depth_cloud (PointCloud2, x/y/z float32 m, unorganized, sky/holes
+# dropped) back-projected with the RAW camera K at camera resolution, stamped with the SOURCE image
+# stamp in the camera optical frame. Re-projecting with the same CameraInfo puts every point back on
+# its own pixel, so the conversion is exact; dropped points become 0 (= no depth for RTAB-Map).
+# Names verified on rtabmap_ros 0.23.7 / Lyrical (2026-09-29, `ros2 param list` on a live node).
+/**:
+  ros__parameters:
+    approx: false               # cloud stamp == image stamp == CameraInfo stamp (Dev 1 contract)
+    fixed_frame_id: ""          # cloud is already in the camera optical frame: no motion compensation
+    decimation: 1               # full camera resolution (must match the RGB for rgbd_sync)
+    fill_holes_size: 0          # never invent depth for sky / holes
+    wait_for_transform: 0.2
+    topic_queue_size: 10
+    sync_queue_size: 30         # ≥ camera fps × DA3 latency: the cloud arrives late
+    qos: 2                      # best effort: connects to reliable or best-effort publishers
+    qos_camera_info: 2

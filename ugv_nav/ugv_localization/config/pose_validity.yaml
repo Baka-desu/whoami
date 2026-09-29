@@ -1,0 +1,39 @@
+# /ugv/pose_valid policy (architecture §10.1, §12). Starting values, NOT architecture — tune in sim.
+# Every threshold is a float on purpose (0.5, not 1): intent must be explicit.
+
+# Freshness (now - stamp). dev.md §12 table: localization/TF 0.5 s.
+# With odom_source=visual the TF/odom stamps are DA3 depth stamps (= image stamps), so their age
+# includes DA3 latency + 1/depth_fps. Measure it before trusting 0.5 s (SENSOR_HONESTY.md).
+localization_max_age_s: 0.5   # TF map->base_link
+odom_max_age_s: 0.5           # /odom (selected source from odom_selector)
+camera_max_age_s: 0.5         # CameraInfo stamp = image stamp proxy for the SLAM camera
+depth_max_age_s: 0.5          # DA3 depth Image stamp (= source image stamp) — includes DA3 latency
+slam_max_age_s: 2.0           # rtabmap/info; published per processed frame (Rtabmap/DetectionRate)
+max_future_s: 0.05            # stamps ahead of our clock are lies
+
+# Covariance bounds on the selected odom pose (§10.1 "not exploded").
+max_xy_variance_m2: 1.0
+max_yaw_variance_rad2: 0.25
+
+# Depth contract (interfaces.md "Depth input"): fraction of sampled pixels with finite depth > 0.
+# Same idea as Dev 1's valid_coverage 0.5; sky/holes are NaN by contract.
+min_depth_coverage: 0.3
+
+# Dead-reckon budget: path since the last map constraint (loop closure / proximity / landmark).
+max_dead_reckon_m: 8.0
+max_dead_reckon_s: 0.0        # 0.0 = disabled
+dead_reckon_in_mapping: false # mapping defines the map from odom + depth; exploration has no loop closures to wait for
+
+# map->odom correction jumps after the first relocalization → brief hold.
+max_correction_jump_m: 1.0
+max_correction_jump_rad: 0.35
+correction_jump_hold_s: 1.0
+
+# Hysteresis: all checks must pass continuously this long before valid=true again.
+recover_hold_s: 1.0
+
+# Hold after odom_selector changes source (auto: wheel <-> visual). 0.0 = no hold.
+odom_switch_hold_s: 0.5
+
+# /ugv/pose_valid is published at this rate ALWAYS (heartbeat for Dev 5 watchdog).
+publish_rate_hz: 20.0
