@@ -1,6 +1,8 @@
-"""CUDA PyTorch backend. Not runnable on this Arc box."""
+"""CUDA PyTorch backends. Tensor path is live RUGD/DA3 on NVIDIA. YOLOE stays a stub."""
 
 from __future__ import annotations
+
+from pathlib import Path
 
 import numpy as np
 from numpy.typing import NDArray
@@ -12,7 +14,125 @@ class CudaPytorchBackend:
     id = "cuda_pytorch"
 
     def load(self, weights_path: str, **engine_args: object) -> None:
-        raise AdapterError("cuda_pytorch is not available on this Intel Arc box")
+        raise AdapterError("cuda_pytorch YOLOE is not wired; live path is RUGD")
 
     def run(self, rgb: NDArray[np.uint8]) -> tuple[Instance, ...]:
-        raise AdapterError("cuda_pytorch is not available on this Intel Arc box")
+        raise AdapterError("cuda_pytorch YOLOE is not wired; live path is RUGD")
+
+
+class CudaPytorchTensorBackend:
+    """SegFormer logits or DA3 depth_raw+sky on CUDA. Same blob contract as OpenVINO."""
+
+    id = "cuda_pytorch"
+
+    def __init__(self) -> None:
+        self._model = None
+        self._kind: str | None = None
+        self._hw: tuple[int, int] | None = None
+        self.device = "cuda"
+
+    def load(self, weights_path: str, kind: str = "rugd") -> None:
+        path = Path(weights_path)
+        if not (path / "model.safetensors").is_file():
+            raise FileNotFoundError(f"safetensors missing: {path / 'model.safetensors'}")
+        if kind not in ("rugd", "da3"):
+            raise ValueError("kind must be rugd or da3")
+        try:
+            import torch
+        except ImportError as exc:
+            raise AdapterError("torch is not installed") from exc
+        if not torch.cuda.is_available():
+            raise AdapterError("CUDA is not available")
+        if kind == "rugd":
+            self._model = _load_rugd(path)
+        else:
+            self._model = _load_da3(path)
+        self._kind = kind
+        self.device = "cuda"
+
+    def ensure_hw(self, height: int, width: int) -> None:
+        if self._model is None:
+            raise AdapterError("CudaPytorchTensorBackend.load() was not called")
+        self._hw = (int(height), int(width))
+
+    def run(self, blob: NDArray[np.float32]) -> np.ndarray:
+        return self.run_all(blob)[0]
+
+    def run_all(self, blob: NDArray[np.float32]) -> list[np.ndarray]:
+        if self._model is None or self._kind is None:
+            raise AdapterError("CudaPytorchTensorBackend.load() was not called")
+        if not isinstance(blob, np.ndarray) or blob.dtype != np.float32 or blob.ndim != 4:
+            raise TypeError("blob must be float32 NCHW")
+        try:
+            import torch
+        except ImportError as exc:
+            raise AdapterError("torch is not installed") from exc
+        try:
+            tensor = torch.from_numpy(blob).to("cuda")
+            with torch.inference_mode():
+                if self._kind == "rugd":
+                    logits = self._model(pixel_values=tensor).logits
+                    return [logits.detach().cpu().numpy()]
+                depth, sky = self._model(tensor)
+                return [
+                    depth.detach().cpu().numpy(),
+                    sky.detach().cpu().numpy(),
+                ]
+        except AdapterError:
+            raise
+        except Exception as exc:
+            raise AdapterError("CUDA run failed") from exc
+
+
+def _load_rugd(path: Path) -> object:
+    from transformers import SegformerForSemanticSegmentation
+
+    model = SegformerForSemanticSegmentation.from_pretrained(
+        str(path), local_files_only=True
+    )
+    model.eval()
+    return model.to("cuda")
+
+
+def _load_da3(path: Path) -> object:
+    from depth_anything_3.cfg import create_object, load_config
+    from depth_anything_3.registry import MODEL_REGISTRY
+    from safetensors.torch import load_file
+
+    net = create_object(load_config(MODEL_REGISTRY["da3metric-large"]))
+    state = load_file(str(path / "model.safetensors"))
+    if any(key.startswith("model.") for key in state):
+        state = {key.removeprefix("model."): value for key, value in state.items()}
+    missing, unexpected = net.load_state_dict(state, strict=False)
+    if unexpected:
+        raise AdapterError(f"unexpected DA3 checkpoint keys: {unexpected[:8]}")
+    del missing
+    net.eval()
+    return _Da3Head(net).to("cuda")
+
+
+class _Da3Head:
+    """depth_raw and sky from the depth head, before sky-fill. Matches the IR export."""
+
+    def __init__(self, net: object) -> None:
+        self.net = net
+
+    def __call__(self, pixel_values: object) -> tuple[object, object]:
+        image = pixel_values.unsqueeze(1)
+        feats, _aux = self.net.backbone(
+            image,
+            cam_token=None,
+            export_feat_layers=[],
+            ref_view_strategy="saddle_balanced",
+        )
+        height, width = int(image.shape[-2]), int(image.shape[-1])
+        output = self.net._process_depth_head(feats, height, width)
+        return output.depth[:, 0], output.sky[:, 0]
+
+    def to(self, device: str) -> "_Da3Head":
+        self.net = self.net.to(device)
+        return self
+
+    def eval(self) -> "_Da3Head":
+        self.net.eval()
+        return self
