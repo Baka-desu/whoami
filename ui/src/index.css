@@ -205,6 +205,34 @@ input:disabled { opacity: 0.5; }
 .scale i.depth { height: 6px; background: linear-gradient(90deg, #d9902d, #170f04); }
 
 @media (max-width: 1000px) {
-  .app { grid-template: 48px auto minmax(320px, 60vh) auto / 1fr; grid-template-areas: 'top' 'source' 'view' 'inspect'; height: auto; min-height: 100vh; }
+  .app { grid-template: auto auto minmax(320px, 60vh) auto / 1fr; grid-template-areas: 'top' 'source' 'view' 'inspect'; height: auto; min-height: 100vh; }
   .source, .inspector { border: 0; border-bottom: 1px solid var(--line); overflow: visible; }
+  .topbar { flex-wrap: wrap; row-gap: 8px; padding: 10px 16px; }
+}
+
+/* phone: bigger touch targets, no iOS input zoom, tighter overlay offsets */
+@media (max-width: 480px) {
+  .brand span { display: none; }
+
+  .tabs button { padding: 13px 0; }
+  .btn { padding: 15px 12px; }
+  .toggle { padding: 10px 0; }
+  .toggle i { width: 16px; height: 16px; }
+  .drop { min-height: 128px; }
+
+  input:not([type='checkbox']) { font-size: 16px; padding: 11px 10px; }
+
+  .viewport { padding: 12px; }
+  .viewport::before, .viewport::after { width: 14px; height: 14px; }
+  .viewport::before { top: 4px; left: 4px; }
+  .viewport::after { right: 4px; bottom: 4px; }
+  .legend { left: 16px; bottom: 16px; right: 16px; }
+  .banner, .assumed { top: 16px; font-size: 10px; }
+  .banner { left: 16px; }
+  .assumed { right: 16px; }
+}
+
+/* Touch devices: no blue tap-flash, no 300ms tap delay */
+@media (hover: none) {
+  .btn, .tabs button, .toggle, .drop { -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
 }
