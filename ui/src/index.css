@@ -38,13 +38,13 @@ button, input { font: inherit; color: inherit; }
 }
 .brand { font-weight: 700; letter-spacing: 0.22em; }
 .brand span { margin-left: 12px; font-weight: 400; letter-spacing: 0.08em; color: var(--dim); }
-.mock {
+.engine {
   padding: 2px 8px;
-  border: 1px solid var(--red-dim);
-  color: var(--red);
   font-size: 10px;
   letter-spacing: 0.16em;
 }
+.engine.mock { border: 1px solid var(--red-dim); color: var(--red); }
+.engine.real { border: 1px solid var(--line); color: var(--dim); }
 .note { margin-left: auto; color: var(--dim); font-size: 12px; }
 .note.err { color: var(--red); }
 .pill { display: flex; align-items: center; gap: 8px; margin-left: auto; letter-spacing: 0.16em; font-size: 11px; }

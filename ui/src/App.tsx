@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { analyze } from './analysis/mock'
+import { analyzeViaBackend, checkBackend } from './analysis/backend'
 import { useFreshness } from './analysis/freshness'
+import { analyze } from './analysis/mock'
 import { Inspector } from './components/Inspector'
 import { SourcePanel } from './components/SourcePanel'
 import { TopBar } from './components/TopBar'
@@ -12,6 +13,8 @@ import {
 } from './types'
 
 const FRAME_INTERVAL_MS = 250
+const BACKEND_URL = 'http://127.0.0.1:8008'
+const BACKEND_POLL_MS = 5000
 
 export default function App() {
   const [source, setSource] = useState<SourceKind>('upload')
@@ -31,8 +34,25 @@ export default function App() {
   const lastFrameAt = useRef(0)
   const rosInfo = useRef<Intrinsics | null>(null)
   const freshness = useFreshness(analysis)
+  const [backendOnline, setBackendOnline] = useState(false)
+  // ingest must stay a stable callback (the live-camera effect depends on it), so the backend's
+  // on/off state is read from a ref, not from React state, inside it.
+  const backendOnlineRef = useRef(false)
 
-  const ingest = useCallback((bmp: ImageBitmap, src: SourceKind, stamp: number, frameId: string, streaming: boolean, K?: Intrinsics | null) => {
+  useEffect(() => {
+    let cancelled = false
+    const poll = async () => {
+      const h = await checkBackend(BACKEND_URL)
+      if (cancelled) return
+      backendOnlineRef.current = h.online
+      setBackendOnline(h.online)
+    }
+    poll()
+    const id = window.setInterval(poll, BACKEND_POLL_MS)
+    return () => { cancelled = true; window.clearInterval(id) }
+  }, [])
+
+  const ingest = useCallback(async (bmp: ImageBitmap, src: SourceKind, stamp: number, frameId: string, streaming: boolean, K?: Intrinsics | null) => {
     const meta: FrameMeta = {
       source: src, frameId, stamp, width: bmp.width, height: bmp.height,
       K: K ?? assumedIntrinsics(bmp.width, bmp.height), kAssumed: !K, streaming,
@@ -42,6 +62,16 @@ export default function App() {
     lastFrameAt.current = now
     setFps((f) => (dt > 0 && dt < 2000 ? f * 0.7 + (1000 / dt) * 0.3 : 0))
     setFrame(bmp)
+    if (backendOnlineRef.current) {
+      try {
+        setAnalysis(await analyzeViaBackend(bmp, meta, BACKEND_URL))
+        return
+      } catch {
+        // backend dropped mid-session; fall back to mock until the next health poll finds it again
+        backendOnlineRef.current = false
+        setBackendOnline(false)
+      }
+    }
     setAnalysis(analyze(bmp, meta))
   }, [])
 
@@ -61,7 +91,7 @@ export default function App() {
     stopLive()
     setNote('')
     try {
-      ingest(await createImageBitmap(file), 'upload', Date.now(), file.name, false)
+      await ingest(await createImageBitmap(file), 'upload', Date.now(), file.name, false)
       setStatus('still')
     } catch {
       setStatus('error')
@@ -79,7 +109,7 @@ export default function App() {
     try {
       const cam = await openCamera()
       await new Promise((r) => setTimeout(r, 500)) // let exposure settle
-      ingest(await createImageBitmap(cam.video), 'camera', Date.now(), 'camera', false)
+      await ingest(await createImageBitmap(cam.video), 'camera', Date.now(), 'camera', false)
       cam.stop()
       setStatus('still')
       setNote('')
@@ -104,7 +134,7 @@ export default function App() {
         if (busy) return
         busy = true
         try {
-          ingest(await createImageBitmap(cam.video), 'camera', Date.now(), 'camera', true)
+          await ingest(await createImageBitmap(cam.video), 'camera', Date.now(), 'camera', true)
         } finally {
           busy = false
         }
@@ -121,12 +151,17 @@ export default function App() {
     }
   }, [live, ingest])
 
+  const rosBusy = useRef(false)
   useEffect(() => {
     if (!rosOn) return
     return connectRos(rosCfg, {
       onInfo: (K) => { rosInfo.current = K },
       onFrame: (bmp, stamp, frameId) => {
-        ingest(bmp, 'ros2', stamp, frameId, true, rosInfo.current)
+        // real inference takes far longer than a rosbridge frame interval; drop frames that
+        // arrive while one is still being analysed rather than piling up requests
+        if (rosBusy.current) { bmp.close(); return }
+        rosBusy.current = true
+        ingest(bmp, 'ros2', stamp, frameId, true, rosInfo.current).finally(() => { rosBusy.current = false })
         setStatus('live')
       },
       onStatus: (text, ok) => {
@@ -148,7 +183,7 @@ export default function App() {
 
   return (
     <div className="app">
-      <TopBar status={status} fps={fps} note={note} />
+      <TopBar status={status} fps={fps} note={note} backendOnline={backendOnline} models={analysis?.models} />
       <SourcePanel
         source={source} onSource={pickSource}
         layers={layers} onLayers={setLayers}

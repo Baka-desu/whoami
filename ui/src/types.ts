@@ -50,7 +50,8 @@ export interface Analysis {
   latencyMs: number
   degraded: boolean
   reasons: string[]
-  mock: true
+  engine: 'mock' | 'real'
+  models?: { seg: string; depth: string } // present when engine === 'real'
 }
 
 export interface Layers {

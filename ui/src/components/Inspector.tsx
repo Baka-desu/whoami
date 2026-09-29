@@ -83,6 +83,9 @@ export function Inspector({ analysis: a, freshness: fr }: { analysis: Analysis |
         <Row k="fx / fy" v={`${meta.K.fx.toFixed(0)} / ${meta.K.fy.toFixed(0)}`} />
         <Row k="cx / cy" v={`${meta.K.cx.toFixed(0)} / ${meta.K.cy.toFixed(0)}`} />
         <Row k="latency" v={`${a.latencyMs.toFixed(0)} ms`} />
+        <Row k="engine" v={a.engine === 'real' ? 'REAL' : 'MOCK'} tone={a.engine === 'mock' ? 'warn' : undefined} />
+        {a.models && <Row k="seg model" v={a.models.seg} />}
+        {a.models && <Row k="depth model" v={a.models.depth} />}
       </Section>
     </aside>
   )
