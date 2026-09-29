@@ -1,0 +1,24 @@
+# odom_selector profile (Dev 2). Starting values, not architecture — tune in sim.
+# The policy itself (auto | wheel | visual) is the launch arg odom_source, not a YAML value.
+# Every threshold is a float on purpose (0.5, not 1): intent must be explicit.
+
+# Dev 5 /wheel/odom (nav_msgs/Odometry, frame odom -> child base_link, NO TF from Dev 5).
+wheel_gate:
+  odom_frame: odom
+  base_frame: base_link
+  max_future_s: 0.05     # stamps ahead of our clock by more than this are lies
+  quat_norm_tol: 0.01    # renormalize within tolerance; reject beyond
+
+# RTAB-Map rgbd_odometry (RGB + DA3 depth). odom_frame_id is only a label here: the node runs
+# with publish_tf:=false, so odom_visual is never a TF frame. The selector owns odom->base_link.
+visual_gate:
+  odom_frame: odom_visual
+  base_frame: base_link
+  max_future_s: 0.05
+  quat_norm_tol: 0.01
+
+selector:
+  wheel_timeout_s: 0.25       # wheel silent this long → auto falls back to visual
+  visual_timeout_s: 0.5       # visual silent this long → dead (depth rate = DA3 rate; keep > 1/fps)
+  switch_back_hold_s: 1.0     # auto: wheel must be healthy this long before it takes over again
+  visual_lost_variance: 1000.0  # any pose variance >= this = rgbd_odometry lost/reset marker (9999)
