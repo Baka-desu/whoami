@@ -2,6 +2,7 @@
 
 Nav2 planning/control core (architecture.md §3.1, §6, §11; dev.md Dev 4).
 The costmap subsystem in this package belongs to Dev 3 and is **not** configured here.
+Interfaces and open decisions for Dev 2 / 3 / 5: [`DEV4_INTERFACES.md`](DEV4_INTERFACES.md).
 
 ```
 Dev 3 costmap params ─► global_costmap (in planner_server)  ─► Smac2D ─┐
@@ -20,7 +21,9 @@ Dev 3 costmap params ─► local_costmap  (in controller_server) ─► RPP ◄
 | `behavior_trees/navigate_to_pose_ugv.xml` | 3 replan at 2 Hz if path > 2 s old / goal updated / `ValidatePath` fails on the path ahead (unknown counts as obstacle) · 4 spin / wait / backup |
 | `config/behavior_server.yaml` | 4 recovery plugins (spin, backup, wait) |
 | `config/bt_navigator.yaml` | 4 `/navigate_to_pose` |
-| `launch/navigation.launch.py` | all; 5 remaps every Nav2 `cmd_vel` to `/cmd_vel_nav2` |
+| `launch/navigation.launch.py` | all; 5 remaps every Nav2 `cmd_vel` to `/cmd_vel_nav2`; `robot:=<name>` overlay |
+| `scripts/nav2_heartbeat`, `ugv_navigation/heartbeat_core.py` | `/ugv/nav2_heartbeat` (20 Hz, fail closed) for Dev 5's §12 watchdog |
+| `config/robots/{primary,secondary}/nav2_limits.yaml` | per-robot `[ROBOT LIMIT]` overlays (placeholders until Dev 5's limits) |
 | `scripts/nav_goal_testbench`, `ugv_navigation/testbench_core.py` | 6 CLI / goal benchmark |
 | `test/` | static contract tests, testbench unit tests, live graph boundary test |
 | `test/closed_loop/`, `test/test_closed_loop.py` | 2 · 3 · 6 closed-loop A→B scenarios + benchmark CSV (TEST-ONLY fake base and maps) |
@@ -66,7 +69,7 @@ drift, Dev 3 costmaps, Dev 5 safety gate or real dynamics. Retune on the platfor
 
 | Key | Owner | Why |
 |---|---|---|
-| `[ROBOT LIMIT]` values in `controller_server.yaml` and `behavior_server.yaml` (speeds, accelerations) | Dev 5 platform | Conservative placeholders. Override per robot with `robot_params_file:=config/robots/<robot>/<file>.yaml` |
+| `[ROBOT LIMIT]` values in `controller_server.yaml` and `behavior_server.yaml` (speeds, accelerations) | Dev 5 platform | Conservative placeholders. Per robot: `config/robots/<robot>/nav2_limits.yaml`, selected with `robot:=<robot>` |
 | `FollowPath.inflation_cost_scaling_factor` (3.0) | Dev 3 | Must equal the local inflation layer's `cost_scaling_factor` |
 | Global inflation layer `inflation_radius` | Dev 3 | Smac2D needs it to be **at least half the robot's largest cross-section**, otherwise its collision checking degrades and it logs *"inflation is not set sufficiently"* |
 | Inflation layer `inflate_around_unknown: true` (both costmaps) | Dev 3 | Architecture §8.1 "unknown = never free — inflate". Without it paths hug unknown space; in the closed-loop `unknown_block` run the robot cut a corner, ended with its centre in unknown cells and Smac2D (`allow_unknown: false`) aborted with *"Start occupied"*. With it, the robot keeps ≥ 0.5 m from unknown |
@@ -103,6 +106,13 @@ source install/setup.bash
 # Launch (uses Dev 3's config/costmaps.yaml if present; otherwise pass the file)
 ros2 launch ugv_navigation navigation.launch.py
 ros2 launch ugv_navigation navigation.launch.py costmap_params_file:=/path/to/dev3_costmaps.yaml
+
+# Per-robot limits (config/robots/<robot>/nav2_limits.yaml)
+ros2 launch ugv_navigation navigation.launch.py robot:=secondary
+
+# Nav2 liveness for Dev 5's watchdog (false = hold) and the reason
+ros2 topic echo /ugv/nav2_heartbeat
+ros2 topic echo /ugv/nav2_status
 
 # Boundary / action / lifecycle check
 ros2 run ugv_navigation nav_goal_testbench check

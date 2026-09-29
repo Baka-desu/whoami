@@ -220,6 +220,8 @@ def test_navigate_to_pose_navigator():
 
 def test_candidate_twist_is_unstamped():
     assert params('controller_server.yaml', 'controller_server')['enable_stamped_cmd_vel'] is False
+    # Dev 5 contract: a zero twist when a goal ends.
+    assert params('controller_server.yaml', 'controller_server')['publish_zero_velocity'] is True
     assert params('behavior_server.yaml', 'behavior_server')['enable_stamped_cmd_vel'] is False
 
 
@@ -230,45 +232,121 @@ def test_launch_remaps_every_cmd_vel_publisher_to_candidate():
     assert publishers == {'controller_server', 'behavior_server'}
 
 
-def test_launch_starts_only_dev4_nodes():
-    launch = load_launch_module()
+def launch_context(**overrides):
     context = LaunchContext()
     context.launch_configurations.update({
-        'costmap_params_file': str(FIXTURE_COSTMAPS), 'robot_params_file': '',
+        'costmap_params_file': str(FIXTURE_COSTMAPS), 'robot': '', 'robot_params_file': '',
         'bt_xml': str(BT_XML), 'use_sim_time': 'false', 'autostart': 'false',
-        'log_level': 'info'})
-    nodes = launch._launch_setup(context)
+        'log_level': 'info', **overrides})
+    return context
+
+
+def test_launch_starts_only_dev4_nodes():
+    nodes = load_launch_module()._launch_setup(launch_context())
     assert {(n.node_package, n.node_executable) for n in nodes} == {
         ('nav2_planner', 'planner_server'), ('nav2_controller', 'controller_server'),
         ('nav2_behaviors', 'behavior_server'), ('nav2_bt_navigator', 'bt_navigator'),
-        ('nav2_lifecycle_manager', 'lifecycle_manager')}
+        ('nav2_lifecycle_manager', 'lifecycle_manager'),
+        ('ugv_navigation', 'nav2_heartbeat')}
 
 
 def test_launch_requires_dev3_costmap_params():
     launch = load_launch_module()
-    context = LaunchContext()
-    context.launch_configurations.update({
-        'costmap_params_file': '', 'robot_params_file': '', 'bt_xml': str(BT_XML),
-        'use_sim_time': 'false', 'autostart': 'false', 'log_level': 'info'})
     launch.DEFAULT_COSTMAP_PARAMS = PKG / 'test' / 'fixtures' / 'does_not_exist.yaml'
     with pytest.raises(RuntimeError, match='Dev 3'):
-        launch._launch_setup(context)
+        launch._launch_setup(launch_context(costmap_params_file=''))
 
 
 def test_launch_uses_dev3_default_costmap_params_when_present():
     launch = load_launch_module()
     launch.DEFAULT_COSTMAP_PARAMS = FIXTURE_COSTMAPS  # stands in for Dev 3's file
-    context = LaunchContext()
-    context.launch_configurations.update({
-        'costmap_params_file': '', 'robot_params_file': '', 'bt_xml': str(BT_XML),
-        'use_sim_time': 'false', 'autostart': 'false', 'log_level': 'info'})
-    nodes = launch._launch_setup(context)
-    assert len(nodes) == 5
+    nodes = launch._launch_setup(launch_context(costmap_params_file=''))
+    assert len(nodes) == 6
+
+
+# ---------------------------------------------------------------- per-robot overlays
+
+ROBOTS = sorted(d.name for d in (CONFIG / 'robots').iterdir() if d.is_dir())
+
+
+def robot_limit_keys():
+    """{node: {dotted key}} for every value marked [ROBOT LIMIT] in the Dev 4 defaults."""
+    marked = {}
+    for file_name, node in (('controller_server.yaml', 'controller_server'),
+                            ('behavior_server.yaml', 'behavior_server')):
+        stack = []
+        for line in (CONFIG / file_name).read_text().splitlines():
+            m = re.match(r'^( *)([A-Za-z_]+):', line)
+            if not m:
+                continue
+            depth = len(m.group(1)) // 2
+            stack = stack[:depth] + [m.group(2)]
+            if '[ROBOT LIMIT]' in line:
+                marked.setdefault(node, set()).add('.'.join(stack[2:]))
+    return marked
+
+
+def flatten(d, prefix=''):
+    for k, v in d.items():
+        if isinstance(v, dict):
+            yield from flatten(v, f'{prefix}{k}.')
+        else:
+            yield f'{prefix}{k}', v
+
+
+def test_there_are_two_robot_overlays():
+    # architecture §13 item 9: a second robot / footprint.
+    assert {'primary', 'secondary'} <= set(ROBOTS)
+
+
+@pytest.mark.parametrize('robot', ROBOTS)
+def test_robot_overlay_covers_exactly_the_robot_limits(robot):
+    data = yaml.safe_load((CONFIG / 'robots' / robot / 'nav2_limits.yaml').read_text())
+    marked = robot_limit_keys()
+    assert set(data) == set(marked)
+    for node, keys in marked.items():
+        assert set(dict(flatten(data[node]['ros__parameters']))) == keys, node
+
+
+@pytest.mark.parametrize('robot', ROBOTS)
+def test_robot_overlay_limits_are_consistent(robot):
+    data = yaml.safe_load((CONFIG / 'robots' / robot / 'nav2_limits.yaml').read_text())
+    r = data['controller_server']['ros__parameters']['FollowPath']
+    b = data['behavior_server']['ros__parameters']
+    assert r['max_linear_vel'] > 0
+    assert r['min_angular_vel'] == -r['max_angular_vel'] < 0
+    assert r['max_linear_accel'] > 0 > r['max_linear_decel']
+    assert r['max_angular_accel'] > 0 > r['max_angular_decel']
+    assert 0 < r['rotate_to_heading_angular_vel'] <= r['max_angular_vel']
+    assert r['cancel_deceleration'] > 0
+    assert 0 < b['min_rotational_vel'] <= b['max_rotational_vel']
+    assert b['rotational_acc_lim'] > 0
+
+
+@pytest.mark.parametrize('robot', ROBOTS)
+def test_launch_robot_arg_loads_overlay_last(robot):
+    launch = load_launch_module()
+    overlay = launch.resolve_robot_params(robot, '')
+    assert overlay == str(CONFIG / 'robots' / robot / 'nav2_limits.yaml')
+    # Dev 4 defaults < Dev 3 costmaps < robot overlay
+    assert launch.parameter_files('controller_server.yaml', 'dev3.yaml', overlay) == [
+        str(CONFIG / 'controller_server.yaml'), 'dev3.yaml', overlay]
+    assert len(launch._launch_setup(launch_context(robot=robot))) == 6
+
+
+def test_launch_rejects_unknown_robot_and_double_overlay():
+    launch = load_launch_module()
+    with pytest.raises(RuntimeError, match='unknown robot'):
+        launch._launch_setup(launch_context(robot='no_such_robot'))
+    with pytest.raises(RuntimeError, match='not both'):
+        launch._launch_setup(launch_context(robot='primary',
+                                            robot_params_file=str(FIXTURE_COSTMAPS)))
 
 
 # ---------------------------------------------------------------- ownership boundary
 
-@pytest.mark.parametrize('file_name', DEV4_YAMLS)
+@pytest.mark.parametrize('file_name', DEV4_YAMLS + [
+    f'robots/{robot}/nav2_limits.yaml' for robot in ROBOTS])
 def test_dev4_config_holds_no_costmap_or_footprint(file_name):
     with open(CONFIG / file_name) as f:
         data = yaml.safe_load(f)
