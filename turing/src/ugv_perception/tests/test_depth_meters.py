@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from ugv_perception.depth.geometry import (
     SKY_THRESHOLD,
@@ -95,6 +96,21 @@ def test_focal_model_scales_meters() -> None:
     z_lo = float(meters_from_raw(raw, f_lo)[0, 0])
     z_hi = float(meters_from_raw(raw, f_hi)[0, 0])
     assert abs(z_hi / z_lo - 2.0) < 1e-6
+
+
+def test_depth_image_msg_is_32fc1_meters() -> None:
+    sensor_msgs = pytest.importorskip("sensor_msgs")
+    from ugv_perception.node.cloud import depth_to_image
+
+    depth = np.array([[2.0, np.nan], [3.0, 4.0]], dtype=np.float32)
+    msg = depth_to_image(depth, 1_000_000_000, "camera_optical")
+    assert msg.encoding == "32FC1"
+    assert msg.height == 2 and msg.width == 2
+    assert msg.header.frame_id == "camera_optical"
+    packed = np.frombuffer(bytes(msg.data), dtype=np.float32).reshape(2, 2)
+    assert packed[0, 0] == 2.0
+    assert np.isnan(packed[0, 1])
+    assert packed[1, 1] == 4.0
 
 
 def test_export_wrapper_stops_before_sky_fill() -> None:
