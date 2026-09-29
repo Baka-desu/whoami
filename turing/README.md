@@ -13,7 +13,7 @@ Dev 1 is **not** the brain. The brain is RTAB-Map + Nav2 (Dev 2 / Dev 4).
 Dev 1 owns:
 
 1. **The Perception Port** — the only semantic contract the rest of the product is allowed to see.
-2. **Adapters** that implement that port (YOLOE outdoor default; tutorial ONNX is eval-only).
+2. **Adapters** that implement that port (RUGD SegFormer-B5 outdoor default; YOLOE selectable; tutorial ONNX is eval-only).
 3. **Optional geometry side-channel** (Depth Anything) that is **not** the port.
 
 Downstream (Dev 3 costmaps, Dev 5 safety) bind only to port outputs. They never import YOLOE classes, ONNX labels, or raw model scores.
@@ -27,7 +27,7 @@ T03 remap engine           YAML, no model
 T04 confidence gates       YAML, no model
 T05 freshness / degraded   time + flags, no model
 T12 backend seam           OpenVINO GPU on Arc B580; CUDA PyTorch later (low VRAM)
-T06 YOLOE adapter          first real masks  ← IR on disk; uses T12
+T06 YOLOE adapter          selectable masks; live outdoor adapter is RUGD SegFormer (T12)
 T07 port node              compose + publish canonical mask + degraded
 T10 contract tests         T01–T07 wired: encoding, {0,1,2}, stamp, frame, degraded
 T11 performance / latency  capture→mask, FPS, bounded queue  ← prefer real camera
@@ -36,14 +36,14 @@ T09 tutorial ONNX          eval scaffold only, not product
 ```
 
 **Implemented (2026-09-18):** T01–T05 kernels, T02 decode+ros_bridge, T06 pack, T07 `compose_tick` + Lyrical `adapter_node`, T12 seam.  
-**On disk:** YOLOE-26s OpenVINO IR (`weights/yoloe-26s-seg.xml`). **No DummySource.** Outdoor product `infer` still needs a Dev 5 Image+CameraInfo stream.  
+**On disk:** RUGD SegFormer-B5 OpenVINO IR (`weights/rugd-segformer.xml`, 25 RUGD classes, Arc `device=GPU`) is the live adapter. YOLOE-26s IR remains at `weights/yoloe-26s-seg.xml`. **No DummySource.** Outdoor product `infer` still needs a Dev 5 Image+CameraInfo stream.  
 T10 uses header/label fixtures. T11 policy (latest-only queue + starve watchdog) **shipped**; live p95 waits on Dev 5. Outdoor camera is Dev 5.
 
 Runtime: Intel Arc B580 **now** (OpenVINO 2026.4.0, `device=GPU`). ROS 2 **Lyrical** on this RHEL 10 box. Later NVIDIA, less VRAM (CUDA + PyTorch). See [HARDWARE.md](HARDWARE.md).
 
 ### T07 port node (explicit)
 
-- Compose ingestion + YOLOE + remap + confidence + freshness
+- Compose ingestion + RUGD SegFormer + remap + confidence + freshness
 - Publish the canonical product mask
 - Publish `perception_degraded`
 - Preserve original sensor timestamp
@@ -123,6 +123,8 @@ If a task cannot be tested without a fake camera, the task is not done — get a
 | [subarchs/subarch5.md](subarchs/subarch5.md) | T05 freshness/degraded-policy architecture (wins over the T05 checklist) |
 | [subarchs/subarch6.md](subarchs/subarch6.md) | T06 YOLOE adapter architecture (wins over the T06 checklist) |
 | [subarchs/subarch7.md](subarchs/subarch7.md) | T07 port-composition architecture (wins over the T07 checklist) |
+| [subarchs/subarch8.md](subarchs/subarch8.md) | T08 depth side-channel (DA3METRIC-LARGE; frozen; head-only export) |
+| [subarchs/subarch9.md](subarchs/subarch9.md) | T09 tutorial ONNX eval scaffold (not live; not frozen) |
 | [subarchs/subarch10.md](subarchs/subarch10.md) | T10 wired port-contract tests (wins over the T10 checklist; T08 still deferred) |
 | [subarchs/subarch11.md](subarchs/subarch11.md) | T11 latency / latest-only queue (wins over the T11 checklist; T08 still deferred) |
 | [subarchs/subarch12.md](subarchs/subarch12.md) | T12 OpenVINO GPU seam (matches shipped T06 Protocol; wins over old T12 checklist) |

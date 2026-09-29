@@ -1,0 +1,7 @@
+adapter_id: onnx
+# Architecture scaffold names. Replace from the tutorial labels file when the IR is pinned.
+map:
+  background: 0
+  sidewalk: 1
+  grass: 1
+default: 0

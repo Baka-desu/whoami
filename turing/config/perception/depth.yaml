@@ -1,0 +1,10 @@
+enabled: false
+weights: weights/da3metric-large.xml
+process_res: 504
+resize_mode: upper_bound_resize
+patch: 14
+sky_threshold: 0.3
+valid_coverage: 0.5
+metric_scale: 300
+# Measured OpenVINO GPU peak with both models resident. Empty until startup measures it.
+gpu_peak_bytes: null

@@ -1,0 +1,8 @@
+adapter_id: onnx
+normalizer: identity
+# Eval-only. Not the product τ in rugd.yaml.
+tau_min: 0.20
+tau_trav: 0.40
+tau_haz: 0.40
+kappa: 0.10
+min_known_fraction: 0.05
