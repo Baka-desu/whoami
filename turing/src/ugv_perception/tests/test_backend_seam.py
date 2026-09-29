@@ -171,8 +171,8 @@ def test_b12_backend_does_not_import_port_stack() -> None:
                     assert name not in stripped, f"{py.name}: {stripped}"
 
 
-def test_b13_cuda_pytorch_factory_raises_on_this_box() -> None:
-    with pytest.raises(RuntimeError, match="Intel Arc"):
+def test_b13_cuda_pytorch_factory_raises_yoloe_unwired() -> None:
+    with pytest.raises(RuntimeError, match="YOLOE is not wired"):
         build_backend("cuda_pytorch", "weights/x.pt", _PROMPTS)
 
 
