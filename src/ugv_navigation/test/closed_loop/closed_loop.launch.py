@@ -6,7 +6,8 @@ Runs the real navigation.launch.py with test-only stand-ins for the other devs:
     Dev 2 TF / odom -> identity map->odom + fake_base_node odom->base_link, /odom
     Dev 5 base      -> fake_base_node integrates /cmd_vel_nav2 (no /cmd_vel)
 
-    ros2 launch src/ugv_navigation/test/closed_loop/closed_loop.launch.py scenario:=wall_gap
+    ros2 launch src/ugv_navigation/test/closed_loop/closed_loop.launch.py scenario:=wall_gap \
+        footprint_file:=src/ugv_navigation/test/fixtures/test_only_footprint_primary.yaml
     ros2 run ugv_navigation nav_goal_testbench goal 4.0,0.0
 """
 
@@ -26,6 +27,9 @@ COSTMAPS = PKG / 'test' / 'fixtures' / 'test_only_closed_loop_costmaps.yaml'
 def generate_launch_description():
     scenario = LaunchConfiguration('scenario')
     return LaunchDescription([
+        DeclareLaunchArgument('footprint_file', default_value='',
+                              description='Robot footprint (Dev 5 format); empty = the '
+                                          'fixture robot_radius 0.2 m'),
         DeclareLaunchArgument('scenario', default_value='open',
                               description='open | wall_gap | corridor | unknown_block | '
                                           'dynamic_obstacle'),
@@ -39,5 +43,6 @@ def generate_launch_description():
             output='screen'),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(str(PKG / 'launch' / 'navigation.launch.py')),
-            launch_arguments={'costmap_params_file': str(COSTMAPS)}.items()),
+            launch_arguments={'costmap_params_file': str(COSTMAPS),
+                              'footprint_file': LaunchConfiguration('footprint_file')}.items()),
     ])

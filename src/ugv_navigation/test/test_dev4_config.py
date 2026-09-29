@@ -236,7 +236,7 @@ def launch_context(**overrides):
     context = LaunchContext()
     context.launch_configurations.update({
         'costmap_params_file': str(FIXTURE_COSTMAPS), 'robot': '', 'robot_params_file': '',
-        'bt_xml': str(BT_XML), 'use_sim_time': 'false', 'autostart': 'false',
+        'footprint_file': '', 'bt_xml': str(BT_XML), 'use_sim_time': 'false', 'autostart': 'false',
         'log_level': 'info', **overrides})
     return context
 
@@ -332,6 +332,48 @@ def test_launch_robot_arg_loads_overlay_last(robot):
     assert launch.parameter_files('controller_server.yaml', 'dev3.yaml', overlay) == [
         str(CONFIG / 'controller_server.yaml'), 'dev3.yaml', overlay]
     assert len(launch._launch_setup(launch_context(robot=robot))) == 6
+
+
+FIXTURE_FOOTPRINT = PKG / 'test' / 'fixtures' / 'test_only_footprint_primary.yaml'
+
+
+def test_footprint_file_becomes_costmap_params_for_both_costmaps():
+    launch = load_launch_module()
+    footprint = launch.load_footprint(FIXTURE_FOOTPRINT)
+    assert yaml.safe_load(footprint['footprint'])[0] == [0.30, 0.22]
+    data = yaml.safe_load(Path(launch.footprint_params_file(footprint)).read_text())
+    for costmap in ('global_costmap', 'local_costmap'):
+        assert data[costmap][costmap]['ros__parameters'] == footprint
+    # Dev 4 defaults < Dev 3 costmaps < footprint < robot limits
+    assert launch.parameter_files('planner_server.yaml', 'dev3.yaml', 'robot.yaml',
+                                  'fp.yaml')[1:] == ['dev3.yaml', 'fp.yaml', 'robot.yaml']
+
+
+def test_footprint_only_goes_to_costmap_hosts():
+    launch = load_launch_module()
+    # planner_server hosts global_costmap, controller_server hosts local_costmap.
+    assert launch.COSTMAP_HOSTS == {'planner_server': 'global_costmap',
+                                    'controller_server': 'local_costmap'}
+    nodes = launch._launch_setup(launch_context(footprint_file=str(FIXTURE_FOOTPRINT)))
+    assert len(nodes) == 6
+
+
+def test_robot_arg_finds_dev5_footprint_above_package(tmp_path):
+    launch = load_launch_module()
+    pkg = tmp_path / 'src' / 'ugv_navigation'
+    pkg.mkdir(parents=True)
+    assert launch.find_footprint_file('primary', pkg) == ''
+    (tmp_path / 'config' / 'robots').mkdir(parents=True)
+    dev5 = tmp_path / 'config' / 'robots' / 'footprint_primary.yaml'
+    dev5.write_text(FIXTURE_FOOTPRINT.read_text())
+    assert launch.find_footprint_file('primary', pkg) == str(dev5)
+
+
+def test_bad_footprint_is_rejected(tmp_path):
+    bad = tmp_path / 'bad.yaml'
+    bad.write_text('footprint: "[[0.3, 0.2], [0.3]]"\n')
+    with pytest.raises(RuntimeError, match='polygon'):
+        load_launch_module().load_footprint(bad)
 
 
 def test_launch_rejects_unknown_robot_and_double_overlay():

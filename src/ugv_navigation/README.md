@@ -21,7 +21,7 @@ Dev 3 costmap params ─► local_costmap  (in controller_server) ─► RPP ◄
 | `behavior_trees/navigate_to_pose_ugv.xml` | 3 replan at 2 Hz if path > 2 s old / goal updated / `ValidatePath` fails on the path ahead (unknown counts as obstacle) · 4 spin / wait / backup |
 | `config/behavior_server.yaml` | 4 recovery plugins (spin, backup, wait) |
 | `config/bt_navigator.yaml` | 4 `/navigate_to_pose` |
-| `launch/navigation.launch.py` | all; 5 remaps every Nav2 `cmd_vel` to `/cmd_vel_nav2`; `robot:=<name>` overlay |
+| `launch/navigation.launch.py` | all; 5 remaps every Nav2 `cmd_vel` to `/cmd_vel_nav2`; `robot:=<name>` selects limits + Dev 5's footprint |
 | `scripts/nav2_heartbeat`, `ugv_navigation/heartbeat_core.py` | `/ugv/nav2_heartbeat` (20 Hz, fail closed) for Dev 5's §12 watchdog |
 | `config/robots/{primary,secondary}/nav2_limits.yaml` | per-robot `[ROBOT LIMIT]` overlays (placeholders until Dev 5's limits) |
 | `scripts/nav_goal_testbench`, `ugv_navigation/testbench_core.py` | 6 CLI / goal benchmark |
@@ -48,19 +48,23 @@ Dev 3 costmap params ─► local_costmap  (in controller_server) ─► RPP ◄
 
 `test_closed_loop` drives the real launch file against a TEST-ONLY kinematic base
 (integrates `/cmd_vel_nav2`, publishes `/odom` + `odom→base_link`; stands in for Dev 2
-and Dev 5) and synthetic maps (stand in for Dev 3). For each scenario it asserts goal
-reached, footprint never on lethal or unknown cells, candidate twists inside the RPP
-limits, the mid-run hazard avoided, and no `/cmd_vel` publisher. Results are written to
-`build/ugv_navigation/closed_loop_benchmark.csv`. Lyrical, placeholder robot limits
-(0.4 m/s, 0.8 rad/s), 4/4 repeated runs identical:
+and Dev 5) and synthetic maps (stand in for Dev 3), once per scenario for each of Dev 5's
+footprints (primary 0.60 × 0.44 m + 0.02 m padding, secondary 0.48 × 0.36 m + 0.01 m;
+test copies from #15). It asserts goal reached, footprint polygon never on lethal or
+unknown cells, candidate twists inside the RPP limits, the mid-run hazard avoided, and
+no `/cmd_vel` publisher. Results go to `build/ugv_navigation/closed_loop_benchmark.csv`.
+Lyrical, placeholder limits (0.4 m/s, 0.8 rad/s); clearance = physical footprint to
+nearest cell centre:
 
-| Scenario | Time | Path | Min clearance | Recoveries |
-|---|---|---|---|---|
-| open | 10.3 s | 3.76 m | – | 0 |
-| wall_gap (0.8 m opening) | 15.1 s | 4.74 m | 0.37 m to lethal | 0 |
-| corridor (1.2 m) | 10.3 s | 3.75 m | 0.63 m to lethal | 0 |
-| unknown_block | 16.0 s | 5.12 m | 0.50 m to unknown | 0 |
-| dynamic_obstacle (appears at x ≥ 0.8 m) | 14.9 s | 4.74 m | 0.47 m to lethal | 0 |
+| Scenario | Robot | Time | Path | Min clearance | Recoveries |
+|---|---|---|---|---|---|
+| open | primary / secondary | 10.2 s / 10.2 s | 3.76 m | – | 0 |
+| wall_gap (0.8 m opening) | primary / secondary | 15.1 s / 15.1 s | 4.77 / 4.75 m | 0.14 / 0.19 m to lethal | 0 |
+| corridor (1.2 m) | primary / secondary | 10.4 s / 10.2 s | 3.76 m | 0.41 / 0.45 m to lethal | 0 |
+| unknown_block | primary / secondary | 16.0 s / 16.2 s | 5.12 m | 0.28 / 0.32 m to unknown | 0 |
+| dynamic_obstacle (appears at x ≥ 0.8 m) | primary / secondary | 15.3 s / 14.9 s | 4.73 m | 0.26 / 0.30 m to lethal | 0 |
+
+The 0.8 m opening is the tightest case: the primary robot passes with 0.14 m to spare.
 
 This proves the planning/control logic, not the robot: no perception, localization
 drift, Dev 3 costmaps, Dev 5 safety gate or real dynamics. Retune on the platform.
@@ -107,8 +111,10 @@ source install/setup.bash
 ros2 launch ugv_navigation navigation.launch.py
 ros2 launch ugv_navigation navigation.launch.py costmap_params_file:=/path/to/dev3_costmaps.yaml
 
-# Per-robot limits (config/robots/<robot>/nav2_limits.yaml)
+# Per robot: limits (config/robots/<robot>/nav2_limits.yaml) + Dev 5's
+# config/robots/footprint_<robot>.yaml if found above this package
 ros2 launch ugv_navigation navigation.launch.py robot:=secondary
+ros2 launch ugv_navigation navigation.launch.py robot:=primary footprint_file:=/path/to/footprint.yaml
 
 # Nav2 liveness for Dev 5's watchdog (false = hold) and the reason
 ros2 topic echo /ugv/nav2_heartbeat
@@ -122,7 +128,8 @@ ros2 run ugv_navigation nav_goal_testbench goal 3.0,0.0 3.0,2.0,1.57 --csv runs.
 
 # Closed loop without Dev 2/3/5 (TEST-ONLY fake base + synthetic map, from the repo root):
 #   open | wall_gap | corridor | unknown_block | dynamic_obstacle
-ros2 launch src/ugv_navigation/test/closed_loop/closed_loop.launch.py scenario:=wall_gap
+ros2 launch src/ugv_navigation/test/closed_loop/closed_loop.launch.py scenario:=wall_gap \
+  footprint_file:=src/ugv_navigation/test/fixtures/test_only_footprint_primary.yaml
 ros2 run ugv_navigation nav_goal_testbench goal 4.0,0.0
 
 # Raw CLI equivalents

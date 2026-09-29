@@ -4,8 +4,10 @@ Closed-loop A->B tests of the Dev 4 stack (dev.md Dev 4 tasks 2, 3, 6).
 For each TEST-ONLY scenario (test/closed_loop/scenarios.py) this launches
 closed_loop.launch.py: the real navigation.launch.py (Smac2D + RPP + BT + recoveries)
 driving a kinematic fake base on /cmd_vel_nav2, with the scenario map fed to both
-costmaps. It sends a NavigateToPose goal and checks that the robot arrives without
-its footprint touching lethal or unknown cells, respects the RPP
+costmaps. Every scenario runs for both of Dev 5's robot footprints (primary and
+secondary, applied through navigation.launch.py footprint_file). It sends a
+NavigateToPose goal and checks that the robot arrives without its footprint polygon
+touching lethal or unknown cells, respects the RPP
 velocity bounds, reacts to a hazard that appears mid-run, and that nothing publishes
 /cmd_vel. Per-scenario timings go to a benchmark CSV (UGV_CLOSED_LOOP_CSV).
 
@@ -38,16 +40,20 @@ sys.path.insert(0, str(HARNESS))
 sys.path.insert(0, str(PKG))
 
 from scenarios import (  # noqa: E402, I100 (needs the sys.path entry above)
-    cells_with, LETHAL, min_clearance, RESOLUTION, SCENARIOS, UNKNOWN)
+    cells_with, footprint_at, LETHAL, polygon_clearance, RESOLUTION, SCENARIOS, UNKNOWN)
 from ugv_navigation.testbench_core import (  # noqa: E402
     format_summary, GoalRun, TwistStats, yaw_to_quaternion)
 
 RPP = yaml.safe_load((PKG / 'config' / 'controller_server.yaml').read_text())[
     'controller_server']['ros__parameters']['FollowPath']
-ROBOT_RADIUS = 0.2              # test fixture value
+FIXTURES = PKG / 'test' / 'fixtures'
+# Dev 5's footprints (TEST-ONLY copies until their PR lands).
+ROBOTS = {name: FIXTURES / f'test_only_footprint_{name}.yaml'
+          for name in ('primary', 'secondary')}
 GOAL_TOLERANCE = 0.3            # goal checker xy 0.25 + integration slack
-# Footprint (radius) must stay off lethal AND unknown cells; half-cell discretisation.
-MIN_CLEARANCE = ROBOT_RADIUS - RESOLUTION / 2
+# The physical footprint (no padding) must stay off lethal AND unknown cells: its
+# distance to every such cell centre must exceed half a cell.
+MIN_CLEARANCE = RESOLUTION / 2
 VEL_EPS = 1e-3
 LATCHED = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
                      reliability=ReliabilityPolicy.RELIABLE)
@@ -65,13 +71,13 @@ def ros_and_benchmark():
         if out:
             with open(out, 'w', newline='') as f:
                 writer = csv.writer(f)
-                writer.writerow(['scenario', 'status', 'elapsed_s', 'recoveries',
+                writer.writerow(['robot', 'scenario', 'status', 'elapsed_s', 'recoveries',
                                  'path_length_m', 'min_lethal_clearance_m',
                                  'min_unknown_clearance_m', 'cmd_msgs',
                                  'max_abs_v', 'max_abs_w'])
                 for r in RESULTS:
                     run = r['run']
-                    writer.writerow([r['scenario'], run.status, f'{run.elapsed_s:.2f}',
+                    writer.writerow([r['robot'], r['scenario'], run.status, f'{run.elapsed_s:.2f}',
                                      run.recoveries, f'{r["length"]:.2f}',
                                      f'{r["clearance"]:.3f}', f'{r["unknown"]:.3f}',
                                      run.twist.count,
@@ -96,8 +102,8 @@ class Recorder:
                                  self.on_costmap, LATCHED)
 
     def on_odom(self, msg):
-        p = msg.pose.pose.position
-        self.poses.append((p.x, p.y))
+        p, q = msg.pose.pose.position, msg.pose.pose.orientation
+        self.poses.append((p.x, p.y, 2.0 * math.atan2(q.z, q.w)))
 
     def on_twist(self, msg):
         self.stats.add(msg.linear.x, msg.angular.z)
@@ -128,18 +134,40 @@ def bt_navigator_active(node):
         node.destroy_client(client)
 
 
-def run_scenario(scenario):
+# Nodes of one scenario run; the next run must not start while any is still in the graph
+# (same names, and a stale scenario map on the latched topic).
+HARNESS_NODES = {'planner_server', 'controller_server', 'behavior_server', 'bt_navigator',
+                 'lifecycle_manager_navigation', 'nav2_heartbeat', 'test_fake_base',
+                 'test_scenario_map', 'test_map_to_odom'}
+
+
+def wait_until_graph_clear(timeout=30.0):
+    probe = rclpy.create_node('closed_loop_graph_probe')
+    try:
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            if not HARNESS_NODES & set(probe.get_node_names()):
+                return
+            rclpy.spin_once(probe, timeout_sec=0.2)
+        left = sorted(HARNESS_NODES & set(probe.get_node_names()))
+        raise AssertionError(f'previous scenario still running: {left}')
+    finally:
+        probe.destroy_node()
+
+
+def run_scenario(scenario, footprint_file):
+    wait_until_graph_clear()
     proc = subprocess.Popen(
         ['ros2', 'launch', str(HARNESS / 'closed_loop.launch.py'),
-         f'scenario:={scenario.name}'],
+         f'scenario:={scenario.name}', f'footprint_file:={footprint_file}'],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, start_new_session=True)
     node = rclpy.create_node(f'closed_loop_test_{scenario.name}')
     rec = Recorder(node)
     try:
         assert spin_until(node, lambda: bt_navigator_active(node), 60.0), \
-            'Nav2 did not become active'
+            f'{scenario.name}: Nav2 did not become active'
         assert spin_until(node, lambda: rec.global_costmap and rec.maps, 20.0), \
-            'scenario map never reached the global costmap'
+            f'{scenario.name}: scenario map never reached the global costmap'
 
         client = ActionClient(node, NavigateToPose, '/navigate_to_pose')
         assert client.wait_for_server(timeout_sec=10.0)
@@ -160,7 +188,7 @@ def run_scenario(scenario):
         send = client.send_goal_async(goal, feedback_callback=on_feedback)
         rclpy.spin_until_future_complete(node, send, timeout_sec=10.0)
         handle = send.result()
-        assert handle is not None and handle.accepted, 'goal rejected'
+        assert handle is not None and handle.accepted, f'{scenario.name}: goal rejected'
         result = handle.get_result_async()
         spin_until(node, result.done, scenario.timeout_s)
         elapsed = time.monotonic() - start
@@ -187,43 +215,50 @@ def run_scenario(scenario):
             print(output)
 
 
+def clearance(poses, points, cells):
+    """Min distance from the footprint polygon to `cells` over the run (10 Hz samples)."""
+    return min((polygon_clearance(footprint_at(points, x, y, yaw), cells)
+                for x, y, yaw in poses[::5]), default=float('inf'))
+
+
+@pytest.mark.parametrize('robot', list(ROBOTS))
 @pytest.mark.parametrize('name', list(SCENARIOS))
-def test_closed_loop_scenario(name):
+def test_closed_loop_scenario(name, robot):
     scenario = SCENARIOS[name]
-    run, rec, cmd_vel_publishers = run_scenario(scenario)
+    run, rec, cmd_vel_publishers = run_scenario(scenario, ROBOTS[robot])
+    points = yaml.safe_load(yaml.safe_load(ROBOTS[robot].read_text())['footprint'])
     final_map = rec.maps[-1].data
-    lethal, unknown_cells = cells_with(final_map, LETHAL), cells_with(final_map, UNKNOWN)
-    clearance = min((min_clearance(x, y, lethal) for x, y in rec.poses),
-                    default=float('inf'))
-    unknown = min((min_clearance(x, y, unknown_cells) for x, y in rec.poses),
-                  default=float('inf'))
-    length = sum(math.dist(a, b) for a, b in zip(rec.poses, rec.poses[1:]))
-    RESULTS.append({'scenario': name, 'run': run, 'length': length, 'clearance': clearance,
-                    'unknown': unknown})
+    lethal = clearance(rec.poses, points, cells_with(final_map, LETHAL))
+    unknown = clearance(rec.poses, points, cells_with(final_map, UNKNOWN))
+    xy = [(x, y) for x, y, _ in rec.poses]
+    length = sum(math.dist(a, b) for a, b in zip(xy, xy[1:]))
+    RESULTS.append({'robot': robot, 'scenario': name, 'run': run, 'length': length,
+                    'clearance': lethal, 'unknown': unknown})
 
-    assert run.status == 'SUCCEEDED', f'{name}: {run.status} {run.error_code} {run.error_msg}'
+    tag = f'{robot}/{name}'
+    assert run.status == 'SUCCEEDED', f'{tag}: {run.status} {run.error_code} {run.error_msg}'
     gx, gy, _ = scenario.goal
-    fx, fy = rec.poses[-1]
-    assert math.hypot(fx - gx, fy - gy) <= GOAL_TOLERANCE, f'{name}: stopped at {fx, fy}'
+    fx, fy = xy[-1]
+    assert math.hypot(fx - gx, fy - gy) <= GOAL_TOLERANCE, f'{tag}: stopped at {fx, fy}'
 
-    # Footprint never overlaps a lethal cell.
-    assert clearance >= MIN_CLEARANCE, f'{name}: came within {clearance:.3f} m of lethal'
-    # Unknown != free (arch §8.1): nor an unknown cell.
-    assert unknown >= MIN_CLEARANCE, f'{name}: came within {unknown:.3f} m of unknown'
+    # Footprint polygon never overlaps a lethal cell ...
+    assert lethal >= MIN_CLEARANCE, f'{tag}: footprint within {lethal:.3f} m of lethal'
+    # ... nor an unknown one (unknown != free, arch §8.1).
+    assert unknown >= MIN_CLEARANCE, f'{tag}: footprint within {unknown:.3f} m of unknown'
 
     # Candidate twists stay inside the RPP velocity window (BackUp may reverse).
     assert rec.stats.max_abs_linear <= RPP['max_linear_vel'] + VEL_EPS
     assert rec.stats.max_abs_angular <= RPP['max_angular_vel'] + VEL_EPS
     if run.recoveries == 0:
-        assert rec.stats.min_linear >= -VEL_EPS, f'{name}: reversed without a recovery'
+        assert rec.stats.min_linear >= -VEL_EPS, f'{tag}: reversed without a recovery'
     # Boundary: only Dev 5 may publish /cmd_vel; nothing here does.
     assert cmd_vel_publishers == []
 
     if name == 'wall_gap':
-        crossing = [y for x, y in rec.poses if abs(x - 2.0) < 0.1]
+        crossing = [y for x, y in xy if abs(x - 2.0) < 0.1]
         assert crossing and all(1.0 < y < 1.8 for y in crossing), 'did not use the opening'
     if name == 'corridor':
-        inside = [y for x, y in rec.poses if 1.0 < x < 3.0]
+        inside = [y for x, y in xy if 1.0 < x < 3.0]
         assert inside and all(abs(y) < 0.6 for y in inside), 'left the corridor'
     if name == 'dynamic_obstacle':
         assert len(rec.maps) >= 2, 'the late hazard was never published'

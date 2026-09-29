@@ -1,0 +1,9 @@
+# TEST FIXTURE ONLY — copy of Dev 5's config/robots/footprint_primary.yaml from
+# ligth279/whoami PR #15 (e9c6c1e), so the closed-loop test can use the real robot
+# size before that PR is merged. The source of truth is Dev 5's file.
+# Dev 5 -- primary footprint (dev.md Dev 5 task 4). Full physical envelope plus
+# a conservative safety margin. base_link frame, meters, CCW polygon.
+# Assumes the base chassis in ugv_robot_description/urdf/ugv.urdf.xacro:
+# length 0.50m x width 0.35m, centered on base_link.
+footprint: "[[0.30, 0.22], [0.30, -0.22], [-0.30, -0.22], [-0.30, 0.22]]"
+footprint_padding: 0.02
