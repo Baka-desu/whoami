@@ -22,6 +22,9 @@ controller_server:
     min_y_velocity_threshold: 0.5
     min_theta_velocity_threshold: 0.001
     failure_tolerance: 0.3
+    # Contract with Dev 5: one zero twist on /cmd_vel_nav2 whenever a goal ends
+    # (success, failure, cancel). Explicit so it does not depend on a Nav2 default.
+    publish_zero_velocity: true
     # Velocity feedback for the controller. External: odometry from Dev 2 (VO) or Dev 5 (base).
     odom_topic: /odom
     use_realtime_priority: false

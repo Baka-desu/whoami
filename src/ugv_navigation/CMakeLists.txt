@@ -19,7 +19,7 @@ install(
 )
 
 install(
-  PROGRAMS scripts/nav_goal_testbench
+  PROGRAMS scripts/nav_goal_testbench scripts/nav2_heartbeat
   DESTINATION lib/${PROJECT_NAME}
 )
 
@@ -43,6 +43,10 @@ if(BUILD_TESTING)
     TIMEOUT 60
   )
   ament_add_pytest_test(test_testbench_core test/test_testbench_core.py
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    TIMEOUT 60
+  )
+  ament_add_pytest_test(test_heartbeat_core test/test_heartbeat_core.py
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
     TIMEOUT 60
   )

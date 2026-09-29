@@ -11,7 +11,7 @@ TWIST_TYPE = 'geometry_msgs/msg/Twist'
 # Nodes started by navigation.launch.py, including the costmap sub-nodes.
 DEV4_NODES = frozenset({
     'planner_server', 'controller_server', 'behavior_server', 'bt_navigator',
-    'lifecycle_manager_navigation', 'global_costmap', 'local_costmap',
+    'lifecycle_manager_navigation', 'global_costmap', 'local_costmap', 'nav2_heartbeat',
 })
 LIFECYCLE_NODES = ('planner_server', 'controller_server', 'behavior_server', 'bt_navigator')
 

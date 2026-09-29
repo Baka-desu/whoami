@@ -7,6 +7,7 @@ Launches only Dev 4 nodes:
     behavior_server (spin / wait / backup)
     bt_navigator (/navigate_to_pose)
     lifecycle_manager_navigation
+    nav2_heartbeat (/ugv/nav2_heartbeat for Dev 5's watchdog, architecture §12)
 
 Does NOT launch camera, perception, RTAB-Map / localization, TF, robot_state_publisher,
 map_server, safety authority, velocity smoother, collision monitor or motor driver.
@@ -35,6 +36,8 @@ CONFIG_DIR = PKG_DIR / 'config'
 DEFAULT_BT_XML = PKG_DIR / 'behavior_trees' / 'navigate_to_pose_ugv.xml'
 # Owned and written by Dev 3 (costmap subsystem). Dev 4 only looks it up.
 DEFAULT_COSTMAP_PARAMS = CONFIG_DIR / 'costmaps.yaml'
+# Dev 4 per-robot speed / acceleration overlays: config/robots/<robot>/nav2_limits.yaml
+ROBOTS_DIR = CONFIG_DIR / 'robots'
 
 CANDIDATE_CMD_VEL_TOPIC = '/cmd_vel_nav2'
 # Nav2 servers publish on relative `cmd_vel`; route them to the candidate topic.
@@ -51,14 +54,39 @@ NAV2_SERVERS = [
 LIFECYCLE_NODES = [name for _, _, name, _, _ in NAV2_SERVERS]
 
 
+def resolve_robot_params(robot, robot_params_file):
+    """robot:=<name> -> config/robots/<name>/nav2_limits.yaml, or the explicit file."""
+    if robot and robot_params_file:
+        raise RuntimeError('navigation.launch.py: pass robot:=<name> or robot_params_file, '
+                           'not both.')
+    if not robot:
+        return robot_params_file
+    path = ROBOTS_DIR / robot / 'nav2_limits.yaml'
+    if not path.is_file():
+        known = sorted(d.name for d in ROBOTS_DIR.iterdir() if d.is_dir())
+        raise RuntimeError(f'navigation.launch.py: unknown robot "{robot}" '
+                           f'(known: {", ".join(known)})')
+    return str(path)
+
+
+def parameter_files(params_file, costmap_params_file, robot_params_file):
+    """Later entries override earlier ones: Dev 4 defaults < Dev 3 costmaps < robot."""
+    files = [str(CONFIG_DIR / params_file), costmap_params_file]
+    if robot_params_file:
+        files.append(robot_params_file)
+    return files
+
+
 def _launch_setup(context, *args, **kwargs):
     costmap_params_file = LaunchConfiguration('costmap_params_file').perform(context)
+    robot = LaunchConfiguration('robot').perform(context)
     robot_params_file = LaunchConfiguration('robot_params_file').perform(context)
     bt_xml = LaunchConfiguration('bt_xml').perform(context)
     use_sim_time = LaunchConfiguration('use_sim_time').perform(context).lower() == 'true'
     autostart = LaunchConfiguration('autostart').perform(context).lower() == 'true'
     log_level = LaunchConfiguration('log_level').perform(context)
 
+    robot_params_file = resolve_robot_params(robot, robot_params_file)
     if not costmap_params_file and DEFAULT_COSTMAP_PARAMS.is_file():
         costmap_params_file = str(DEFAULT_COSTMAP_PARAMS)
     if not costmap_params_file:
@@ -76,11 +104,8 @@ def _launch_setup(context, *args, **kwargs):
     common = {'use_sim_time': use_sim_time}
     nodes = []
     for package, executable, name, params_file, publishes_cmd_vel in NAV2_SERVERS:
-        # Later entries override earlier ones: Dev 4 defaults < Dev 3 costmaps <
-        # per-robot overlay < launch overrides.
-        parameters = [str(CONFIG_DIR / params_file), costmap_params_file]
-        if robot_params_file:
-            parameters.append(robot_params_file)
+        # Files (Dev 4 defaults < Dev 3 costmaps < robot overlay) < launch overrides.
+        parameters = parameter_files(params_file, costmap_params_file, robot_params_file)
         parameters.append(common)
         if name == 'bt_navigator':
             parameters.append({'default_nav_to_pose_bt_xml': bt_xml})
@@ -103,6 +128,15 @@ def _launch_setup(context, *args, **kwargs):
         arguments=['--ros-args', '--log-level', log_level],
         parameters=[common, {'autostart': autostart, 'node_names': LIFECYCLE_NODES}],
     ))
+    # Not a lifecycle node: it must keep publishing (false) while Nav2 is down.
+    nodes.append(Node(
+        package='ugv_navigation',
+        executable='nav2_heartbeat',
+        name='nav2_heartbeat',
+        output='screen',
+        arguments=['--ros-args', '--log-level', log_level],
+        parameters=[common, {'servers': LIFECYCLE_NODES}],
+    ))
     return nodes
 
 
@@ -112,6 +146,10 @@ def generate_launch_description():
             'costmap_params_file', default_value='',
             description='Dev 3 costmap params (global_costmap / local_costmap). '
                         'Default: config/costmaps.yaml (Dev 3) if present.'),
+        DeclareLaunchArgument(
+            'robot', default_value='',
+            description='Robot overlay config/robots/<robot>/nav2_limits.yaml '
+                        '(e.g. primary, secondary). Empty = Dev 4 defaults.'),
         DeclareLaunchArgument(
             'robot_params_file', default_value='',
             description='Optional per-robot overlay from config/robots/<robot>/ '

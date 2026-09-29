@@ -8,8 +8,9 @@
     NavigateToPose behavior tree + recoveries, candidate twist on /cmd_vel_nav2, goal testbench.
     Costmap layers / footprint (Dev 3) are loaded from an external params file.
   </description>
-  <maintainer email="sivuiii@todo.todo">sivuiii</maintainer>
-  <license>TODO: License declaration</license>
+  <maintainer email="sivnandnanduz@gmail.com">sivuiii</maintainer>
+  <!-- Same as ugv_localization (Dev 2); no LICENSE file in the repo. -->
+  <license>Proprietary</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
   <buildtool_depend>ament_cmake_python</buildtool_depend>
@@ -31,6 +32,7 @@
   <exec_depend>nav2_msgs</exec_depend>
   <exec_depend>geometry_msgs</exec_depend>
   <exec_depend>lifecycle_msgs</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>

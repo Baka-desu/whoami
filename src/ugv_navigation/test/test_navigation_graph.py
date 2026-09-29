@@ -4,7 +4,8 @@ Live ROS graph check of navigation.launch.py (Dev 4 boundary).
 Launches the real launch file with autostart:=false and a TEST-ONLY costmap fixture,
 then CONFIGURES the Nav2 servers. Configuring loads the Smac2D, RPP, behavior and
 navigator plugins with the Dev 4 params and creates every publisher and action server,
-without needing TF, odometry or costmap data from Dev 2/3. The last test then ACTIVATES
+without needing TF, odometry or costmap data from Dev 2/3. /ugv/nav2_heartbeat must
+publish false (fail closed) while the servers are only configured. The last test then ACTIVATES
 all four servers in lifecycle_manager order, using a TEST-ONLY identity static TF
 map -> odom -> base_link in place of Dev 2. bt_navigator activation makes
 BehaviorTree.CPP build navigate_to_pose_ugv.xml; on Lyrical that needs the planner's
@@ -25,6 +26,7 @@ from nav2_msgs.action import NavigateToPose
 import pytest
 import rclpy
 from rclpy.action import ActionClient
+from std_msgs.msg import Bool
 
 PKG = Path(__file__).resolve().parent.parent
 LAUNCH_FILE = PKG / 'launch' / 'navigation.launch.py'
@@ -106,6 +108,23 @@ def test_navigate_to_pose_action_server_exists(configured_stack):
     client.destroy()
 
 
+def heartbeats(node, seconds):
+    seen = []
+    sub = node.create_subscription(Bool, '/ugv/nav2_heartbeat', lambda m: seen.append(m.data),
+                                   10)
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        rclpy.spin_once(node, timeout_sec=0.05)
+    node.destroy_subscription(sub)
+    return seen
+
+
+def test_heartbeat_fails_closed_while_servers_are_only_configured(configured_stack):
+    seen = heartbeats(configured_stack, 2.0)
+    assert len(seen) >= 20, 'heartbeat is not publishing at ~20 Hz'
+    assert not any(seen)
+
+
 def test_stack_activates_with_ugv_behavior_tree(configured_stack):
     # Runs last. Same order as lifecycle_manager; bt_navigator activation parses the BT
     # XML and instantiates every BT node against the live servers.
@@ -117,3 +136,15 @@ def test_stack_activates_with_ugv_behavior_tree(configured_stack):
                                 {'controller_server', 'behavior_server'})
     assert {i.node_name for i in infos} == {'controller_server', 'behavior_server'}
     assert configured_stack.get_publishers_info_by_topic('/cmd_vel') == []
+    # Everything active -> heartbeat turns true (poll 5 Hz, publish 20 Hz).
+    assert heartbeats(configured_stack, 2.0)[-10:] == [True] * 10
+
+
+def test_heartbeat_drops_when_a_server_crashes(configured_stack):
+    # Runs after activation. Architecture §12: Nav2 crash -> Dev 5 hold.
+    assert heartbeats(configured_stack, 1.0)[-5:] == [True] * 5
+    subprocess.run(['pkill', '-KILL', '-f', '__node:=controller_server'], check=True)
+    seen = heartbeats(configured_stack, 3.0)
+    assert seen and seen[-1] is False, 'heartbeat still true after controller_server died'
+    # Keeps publishing (false) so Dev 5 sees a fresh "unhealthy", not just silence.
+    assert len(seen) >= 30
