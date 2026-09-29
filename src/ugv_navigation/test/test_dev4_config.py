@@ -113,13 +113,26 @@ def test_rpp_differential_drive():
     assert r['allow_reversing'] is False
 
 
-def test_rpp_velocity_bounds_are_explicit():
-    # Lyrical RPP defaults are min_linear_vel -0.5 and |angular| 2.5 rad/s; set our own.
+def test_rpp_velocity_and_accel_bounds_are_enforced():
     r = params('controller_server.yaml', 'controller_server')['FollowPath']
     assert 'desired_linear_vel' not in r  # deprecated name in Lyrical
+    # RPP only applies min/max velocity and decel limits inside the dynamic window.
+    assert r['use_dynamic_window'] is True
+    # Lyrical defaults are min_linear_vel -0.5, |angular| 2.5 rad/s, accel 2.5 m/s^2.
     assert r['min_linear_vel'] == 0.0 < r['max_linear_vel']
     assert r['min_angular_vel'] == -r['max_angular_vel'] < 0
+    assert r['max_linear_accel'] > 0 > r['max_linear_decel']
+    assert r['max_angular_accel'] > 0 > r['max_angular_decel']
+    # Rotate-to-heading runs outside the window.
     assert r['rotate_to_heading_angular_vel'] <= r['max_angular_vel']
+
+
+def test_bt_follow_path_names_its_plugins():
+    p = params('controller_server.yaml', 'controller_server')
+    follow = bt_root().find('.//FollowPath')
+    assert follow.get('goal_checker_id') in p['goal_checker_plugins']
+    assert follow.get('progress_checker_id') in p['progress_checker_plugins']
+    assert follow.get('path_handler_id') in p['path_handler_plugins']
 
 
 def test_controller_path_handler_is_installed():

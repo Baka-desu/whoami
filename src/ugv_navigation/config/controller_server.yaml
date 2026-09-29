@@ -51,15 +51,23 @@ controller_server:
     FollowPath:
       plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
 
-      # --- Speed --------------------------------------------------------------
+      # --- Speed / acceleration ------------------------------------------------
+      # Dynamic Window Pure Pursuit (Lyrical): the path-tracking command is chosen inside
+      # the velocity + acceleration window below. RPP applies min/max_*_vel and the
+      # linear / angular decel limits ONLY when this is true; without it the angular
+      # command is v * curvature, unbounded by max_angular_vel.
+      use_dynamic_window: true
       max_linear_vel: 0.4                     # [ROBOT LIMIT] m/s cruise
       # Forward only: Smac2D paths are forward, reversing is the BackUp recovery's job.
       min_linear_vel: 0.0
-      # Bounds every angular command, not just rotate-to-heading (Lyrical default 2.5).
       max_angular_vel: 0.8                    # [ROBOT LIMIT] rad/s
       min_angular_vel: -0.8                   # [ROBOT LIMIT] rad/s
+      max_linear_accel: 0.5                   # [ROBOT LIMIT] m/s^2
+      max_linear_decel: -1.0                  # [ROBOT LIMIT] m/s^2 (negative)
+      max_angular_accel: 2.0                  # [ROBOT LIMIT] rad/s^2 (also rotate-to-heading)
+      max_angular_decel: -2.0                 # [ROBOT LIMIT] rad/s^2 (negative)
+      # Rotate-to-heading is outside the window; keep it <= max_angular_vel.
       rotate_to_heading_angular_vel: 0.8      # [ROBOT LIMIT] rad/s
-      max_angular_accel: 2.0                  # [ROBOT LIMIT] rad/s^2
       use_cancel_deceleration: true
       cancel_deceleration: 1.0                # [ROBOT LIMIT] m/s^2 when a goal is canceled
 
