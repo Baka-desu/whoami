@@ -1,0 +1,58 @@
+# RTAB-Map SLAM — mono camera RGB + Depth Anything 3 Metric depth from Dev 1 (mindmap D7, D8),
+# odometry from odom_selector (/odom: wheel | visual | auto, mindmap D5b).
+# Input is one synced rtabmap_msgs/RGBDImage from rtabmap_sync/rgbd_sync (config/rgbd_sync.yaml).
+# Mode params (Mem/IncrementalMemory, Mem/InitWMWithAllNodes) are NOT here: they come from
+# ugv_localization.modes.plan_mode (single source of truth), passed by localization.launch.py.
+# subscribe_odom_info is set by the launch (true only for odom_source:=visual).
+#
+# Parameter NAMES verified against rtabmap_ros 0.23.7 / Lyrical (2026-09-28: `rtabmap --params` for
+# library params, `ros2 param list` on a live node for node params). VALUES are untuned until the
+# Dev 5 sim camera + DA3 depth run. Re-check after any rtabmap upgrade (docs/localization/README.md).
+# Library params (Group/Name) MUST be quoted strings (rtabmap_ros declares them as strings).
+/**:
+  ros__parameters:
+    # ---- ROS node params ------------------------------------------------------------
+    frame_id: base_link
+    map_frame_id: map
+    publish_tf: true            # map->odom (Dev 2 owns the whole chain, mindmap D6)
+    tf_delay: 0.05              # 20 Hz map->odom  (contract: >= 15 Hz)
+    tf_tolerance: 0.1
+    wait_for_transform: 0.2
+    subscribe_rgbd: true        # rgbd_sync output: RGB + DA3 depth + CameraInfo, exact stamps
+    subscribe_rgb: false
+    subscribe_depth: false
+    subscribe_stereo: false
+    subscribe_scan: false
+    subscribe_odom: true        # /odom from odom_selector
+    approx_sync: true           # rgbd_image (depth rate) vs /odom (wheel rate) stamps differ
+    sync_queue_size: 30
+    topic_queue_size: 10
+
+    # ---- RTAB-Map library params (strings) ------------------------------------------
+    Reg/Strategy: "0"               # visual registration
+    Reg/Force3DoF: "true"           # ground robot: x, y, yaw only
+    Kp/DetectorStrategy: "8"        # GFTT/ORB (BRIEF needs OpenCV xfeatures2d: absent in the Lyrical binary)
+    Vis/FeatureType: "8"            # GFTT/ORB for transform estimation
+    Kp/MaxFeatures: "500"
+    Vis/MaxFeatures: "1000"
+    Vis/MinInliers: "20"
+    Vis/EstimationType: "1"         # 3D->2D PnP; 3D words come from DA3 depth
+    Vis/MinDepth: "0.3"             # m
+    Vis/MaxDepth: "8.0"             # m — DA3 metric error grows with range; tune from depth_report
+    Kp/MaxDepth: "8.0"              # same cap for loop-closure vocabulary words
+    Rtabmap/DetectionRate: "2"      # Hz; pose_validity slam_max_age_s must exceed 1/rate
+    RGBD/LinearUpdate: "0.1"        # m between graph nodes
+    RGBD/AngularUpdate: "0.1"       # rad between graph nodes
+    RGBD/ProximityBySpace: "true"   # local loop closures
+    RGBD/NeighborLinkRefining: "true"  # refine odom links visually (needs depth; tune in sim)
+    RGBD/OptimizeMaxError: "3.0"    # reject loop closures that tear the graph
+    # Optimizer/Strategy: build default (GTSAM in the Lyrical 0.23.7 binary).
+
+    # Occupancy grid /map from DA3 depth (optional for Dev 3; not a Nav2 requirement).
+    Grid/Sensor: "1"                # 1 = depth image (0 = laser scan, 2 = both)
+    Grid/3D: "false"                # 2D grid
+    Grid/CellSize: "0.05"
+    Grid/RangeMin: "0.3"
+    Grid/RangeMax: "5.0"            # shorter than Vis/MaxDepth: far DA3 depth smears obstacles
+    Grid/RayTracing: "true"         # clear free space between camera and obstacles
+    Grid/MaxObstacleHeight: "1.0"   # m above base_link; ignore overhangs (tune to robot height)
