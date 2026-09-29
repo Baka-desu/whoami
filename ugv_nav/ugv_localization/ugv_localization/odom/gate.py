@@ -1,7 +1,7 @@
-"""Wheel odometry gate → odom->base_link TF edge.
+"""Odometry gate → candidate odom->base_link TF edge.
 
-Mono + wheel odom (mindmap D5/D6): Dev 5 publishes /wheel/odom without TF; Dev 2 owns the
-odom->base_link edge. This kernel decides whether a sample may become that edge.
+Dev 2 owns the odom->base_link edge (mindmap D6). Each odometry source (Dev 5 /wheel/odom,
+RTAB-Map rgbd_odometry) has its own gate; odom/select.py picks which gated source becomes the edge.
 Never restamps, never fabricates, never smooths — a bad sample is dropped, not repaired
 (except renormalizing a quaternion that is within float tolerance of unit length).
 """
@@ -62,9 +62,14 @@ class GateResult:
 
 
 def load_odom_gate_profile(path: str | Path) -> OdomGateProfile:
-    data = load_yaml_mapping(path)
+    return odom_gate_profile_from_mapping(load_yaml_mapping(path), where=str(path))
+
+
+def odom_gate_profile_from_mapping(data: object, *, where: str) -> OdomGateProfile:
+    if not isinstance(data, dict):
+        raise ValueError(f"{where}: gate profile must be a mapping")
     require_exact_keys(
-        data, {"odom_frame", "base_frame", "max_future_s", "quat_norm_tol"}, where=str(path)
+        data, {"odom_frame", "base_frame", "max_future_s", "quat_norm_tol"}, where=where
     )
     for key in ("odom_frame", "base_frame"):
         if not isinstance(data[key], str) or not data[key]:

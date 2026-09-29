@@ -1,4 +1,4 @@
-"""Odom gate: wheel odometry → odom->base_link edge. Clocks + numeric tables."""
+"""Odom gate: odometry sample → candidate odom->base_link edge. Clocks + numeric tables."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from ugv_localization.odom import (
     OdomSample,
     Rejection,
     load_odom_gate_profile,
+    odom_gate_profile_from_mapping,
 )
 
 _NS = 1_000_000_000
@@ -160,6 +161,9 @@ def test_o17_profile_yaml_rejects_unknown_key(tmp_path: Path) -> None:
 
 
 def test_o18_product_profile_loads() -> None:
-    product = Path(__file__).resolve().parents[1] / "config" / "odom_bridge.yaml"
-    prof = load_odom_gate_profile(product)
+    import yaml
+
+    product = Path(__file__).resolve().parents[1] / "config" / "odom_select.yaml"
+    data = yaml.safe_load(product.read_text(encoding="utf-8"))["wheel_gate"]
+    prof = odom_gate_profile_from_mapping(data, where="wheel_gate")
     assert prof.odom_frame == "odom" and prof.base_frame == "base_link"

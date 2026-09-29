@@ -10,7 +10,8 @@ from ugv_localization.common.yamlio import load_yaml_mapping, require_exact_keys
 from ugv_localization.validity.monitor import ValidityProfile
 
 # Thresholds where 0.0 is a meaningful value (disabled / no hysteresis / no future tolerance).
-_ZERO_OK = {"max_dead_reckon_s", "recover_hold_s", "max_future_s"}
+_ZERO_OK = {"max_dead_reckon_s", "recover_hold_s", "max_future_s", "odom_switch_hold_s"}
+_FRACTIONS = {"min_depth_coverage"}  # (0.0, 1.0]
 _BOOLS = {"dead_reckon_in_mapping"}
 
 
@@ -24,4 +25,7 @@ def load_validity_profile(path: str | Path) -> ValidityProfile:
             kwargs[name] = require_bool(data[name], name=name)
         else:
             kwargs[name] = require_positive_float(data[name], name=name, allow_zero=name in _ZERO_OK)
+    for name in _FRACTIONS:
+        if kwargs[name] > 1.0:  # type: ignore[operator]
+            raise ValueError(f"{name} must be <= 1.0, got {kwargs[name]}")
     return ValidityProfile(**kwargs)  # type: ignore[arg-type]

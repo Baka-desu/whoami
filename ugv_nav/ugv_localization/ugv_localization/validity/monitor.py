@@ -2,12 +2,13 @@
 
 Valid only if ALL hold (fail closed; startup = invalid):
   * TF map->base_link present and fresh           (§10.1 required TFs, pose age)
-  * gated wheel odom fresh, covariance bounded     (§10.1 "not exploded")
+  * selected odom (wheel or visual) fresh, covariance bounded  (§10.1 "not exploded")
   * SLAM camera CameraInfo fresh and sane          (§12 camera watch)
+  * DA3 depth fresh and honouring the depth contract (RGB-D SLAM input; §12 camera watch)
   * RTAB-Map alive (info fresh)                    (§10.1 status not lost)
-  * localize: visually localized at least once, and dead-reckoning since the last visual
-    constraint within budget — the mono "VO-lost" equivalent (mindmap gap note)
-  * no recent large map->odom correction jump
+  * localize: visually localized at least once, and path since the last map constraint
+    (loop closure / proximity / landmark) within the dead-reckon budget
+  * no recent large map->odom correction jump, no recent odom source switch
   * all of the above continuously for recover_hold_s (hysteresis)
 
 Pure: the node feeds stamps/values and a clock. No ROS imports.
@@ -32,6 +33,9 @@ class Reason(str, Enum):
     CAMERA_MISSING = "camera_missing"
     CAMERA_STALE = "camera_stale"
     CAMERA_INFO_INVALID = "camera_info_invalid"
+    DEPTH_MISSING = "depth_missing"
+    DEPTH_STALE = "depth_stale"
+    DEPTH_INVALID = "depth_invalid"
     SLAM_MISSING = "slam_missing"
     SLAM_STALE = "slam_stale"
     FUTURE_STAMP = "future_stamp"
@@ -39,6 +43,7 @@ class Reason(str, Enum):
     DEAD_RECKON_DISTANCE = "dead_reckon_distance"
     DEAD_RECKON_TIME = "dead_reckon_time"
     CORRECTION_JUMP = "correction_jump"
+    ODOM_SOURCE_SWITCH = "odom_source_switch"
     CLOCK_RESET = "clock_reset"
     RECOVERING = "recovering"
 
@@ -48,10 +53,12 @@ class ValidityProfile:
     localization_max_age_s: float
     odom_max_age_s: float
     camera_max_age_s: float
+    depth_max_age_s: float
     slam_max_age_s: float
     max_future_s: float
     max_xy_variance_m2: float
     max_yaw_variance_rad2: float
+    min_depth_coverage: float  # used by the node's depth gate; lives here with the other policy
     max_dead_reckon_m: float
     max_dead_reckon_s: float  # 0.0 = disabled
     dead_reckon_in_mapping: bool
@@ -59,6 +66,7 @@ class ValidityProfile:
     max_correction_jump_rad: float
     correction_jump_hold_s: float
     recover_hold_s: float
+    odom_switch_hold_s: float  # 0.0 = no hold after an odom source switch
     publish_rate_hz: float
 
 
@@ -92,6 +100,9 @@ class PoseValidityMonitor:
         self._odom_cov_ok = False
         self._cam_ns: int | None = None
         self._cam_ok = False
+        self._depth_ns: int | None = None
+        self._depth_ok = False
+        self._switch_until_ns: int | None = None
         self._slam_ns: int | None = None
         self._path_m = 0.0
         mapping = self._mode is Mode.MAPPING
@@ -132,9 +143,20 @@ class PoseValidityMonitor:
         self._cam_ns = require_stamp(stamp_ns, name="stamp_ns")
         self._cam_ok = require_bool(ok, name="ok")
 
+    def on_depth(self, stamp_ns: int, ok: bool) -> None:
+        """ok: the frame passed depth.check_depth_frame (32FC1, camera frame + size, coverage)."""
+        self._depth_ns = require_stamp(stamp_ns, name="stamp_ns")
+        self._depth_ok = require_bool(ok, name="ok")
+
+    def on_odom_source_switch(self, now_ns: int) -> None:
+        """The odom selector changed source (/ugv/localization/odom_source): brief hold."""
+        now_ns = require_stamp(now_ns, name="now_ns")
+        if self._p.odom_switch_hold_s > 0.0:
+            self._switch_until_ns = now_ns + _ns(self._p.odom_switch_hold_s)
+
     def on_slam_info(self, stamp_ns: int, visual_constraint: bool) -> None:
         """visual_constraint: RTAB-Map matched the current frame to the map (loop closure /
-        proximity / relocalization) — the only thing that bounds mono+wheel drift."""
+        proximity / relocalization) — what bounds odometry drift against the map."""
         self._slam_ns = require_stamp(stamp_ns, name="stamp_ns")
         if require_bool(visual_constraint, name="visual_constraint"):
             self._localized = True
@@ -183,6 +205,9 @@ class PoseValidityMonitor:
         fresh(self._cam_ns, self._p.camera_max_age_s, Reason.CAMERA_MISSING, Reason.CAMERA_STALE)
         if self._cam_ns is not None and not self._cam_ok:
             reasons.append(Reason.CAMERA_INFO_INVALID)
+        fresh(self._depth_ns, self._p.depth_max_age_s, Reason.DEPTH_MISSING, Reason.DEPTH_STALE)
+        if self._depth_ns is not None and not self._depth_ok:
+            reasons.append(Reason.DEPTH_INVALID)
         fresh(self._slam_ns, self._p.slam_max_age_s, Reason.SLAM_MISSING, Reason.SLAM_STALE)
 
         distance: float | None = None
@@ -206,6 +231,8 @@ class PoseValidityMonitor:
 
         if self._jump_until_ns is not None and now_ns < self._jump_until_ns:
             reasons.append(Reason.CORRECTION_JUMP)
+        if self._switch_until_ns is not None and now_ns < self._switch_until_ns:
+            reasons.append(Reason.ODOM_SOURCE_SWITCH)
 
         hard = tuple(dict.fromkeys(reasons))  # dedupe, keep order
         if hard:

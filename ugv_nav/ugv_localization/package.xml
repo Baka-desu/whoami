@@ -4,7 +4,8 @@
   <name>ugv_localization</name>
   <version>0.1.0</version>
   <description>
-    Dev 2: RTAB-Map mono visual SLAM (wheel-odom scale), map-&gt;odom-&gt;base_link TF chain,
+    Dev 2: RTAB-Map RGB-D SLAM on a mono camera + Depth Anything 3 depth (from Dev 1),
+    switchable odometry (wheel | visual | auto), map-&gt;odom-&gt;base_link TF chain,
     mapping/localize modes, and /ugv/pose_valid monitor (architecture.md §10, §10.1).
   </description>
   <maintainer email="dev@neogenmedia.com">jeswin-christie</maintainer>
@@ -19,9 +20,12 @@
   <exec_depend>tf2_ros</exec_depend>
   <exec_depend>tf2_msgs</exec_depend>
   <exec_depend>rtabmap_slam</exec_depend>
+  <exec_depend>rtabmap_sync</exec_depend>
+  <exec_depend>rtabmap_odom</exec_depend>
   <exec_depend>rtabmap_msgs</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
+  <exec_depend>ament_index_python</exec_depend>
   <exec_depend>ros2bag</exec_depend>
   <exec_depend>python3-numpy</exec_depend>
   <exec_depend>python3-yaml</exec_depend>

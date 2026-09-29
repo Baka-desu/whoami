@@ -11,6 +11,7 @@ from ugv_localization.odom import OdomGate, OdomGateProfile
 from ugv_localization.rosconv import (
     calibration_from_camera_info_msg,
     camera_info_ok,
+    depth_frame_from_image_msg,
     ns_to_sec_nanosec,
     odom_msg_to_sample,
     odom_variances,
@@ -113,3 +114,36 @@ def test_r8_transform_yaw() -> None:
     x, y, yaw = transform_to_xy_yaw(tf)
     assert (x, y) == (1.0, -2.0)
     assert yaw == pytest.approx(math.pi / 2)
+
+
+def test_r9_depth_image_to_frame() -> None:
+    import numpy as np
+
+    img = np.full((4, 6), 2.0, dtype="<f4")
+    img[:, :3] = np.nan  # left half is sky / holes
+    msg = NS(
+        header=NS(stamp=_stamp(), frame_id="camera_optical"),
+        encoding="32FC1",
+        width=6,
+        height=4,
+        step=24,
+        is_bigendian=0,
+        data=img.tobytes(),
+    )
+    f = depth_frame_from_image_msg(msg, stride=1)
+    assert (f.stamp_ns, f.frame_id, f.encoding, f.width, f.height) == (
+        12 * 1_000_000_000 + 500,
+        "camera_optical",
+        "32FC1",
+        6,
+        4,
+    )
+    assert f.coverage == pytest.approx(0.5)
+
+
+def test_r10_depth_wrong_encoding_has_zero_coverage() -> None:
+    msg = NS(
+        header=NS(stamp=_stamp(), frame_id="c"), encoding="16UC1", width=2, height=1, step=4, is_bigendian=0, data=b"\x00" * 4
+    )
+    f = depth_frame_from_image_msg(msg, stride=1)
+    assert f.encoding == "16UC1" and f.coverage == 0.0  # never decoded as float

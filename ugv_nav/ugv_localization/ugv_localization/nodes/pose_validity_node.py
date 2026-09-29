@@ -1,12 +1,15 @@
 """/ugv/pose_valid publisher (architecture §10.1, §12; consumed by Dev 5 level-3 hold).
 
-Subscribes : odom          nav_msgs/Odometry      (gated wheel odom from odom_tf_bridge)
+Subscribes : odom          nav_msgs/Odometry      (selected odom from odom_selector)
              camera_info   sensor_msgs/CameraInfo (SLAM camera; freshness proxy for images)
+             depth         sensor_msgs/Image      (DA3 depth, 32FC1 m; contract + freshness)
              rtabmap/info  rtabmap_msgs/Info      (alive + visual constraint)
+             /ugv/localization/odom_source std_msgs/String (latched; each change = brief hold)
              TF map->base_link, map->odom
 Publishes  : /ugv/pose_valid          std_msgs/Bool   every tick (heartbeat), false at startup
              /ugv/localization_status std_msgs/String reasons, on change
-Params     : profile_path, mode (mapping|localize), map_frame, odom_frame, base_frame
+Params     : profile_path, mode (mapping|localize), map_frame, odom_frame, base_frame,
+             depth_stride (coverage sampled on every Nth pixel row/column)
 """
 
 from __future__ import annotations
@@ -15,16 +18,18 @@ import rclpy
 from rclpy.executors import ExternalShutdownException
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
 from rclpy.time import Time
 from rtabmap_msgs.msg import Info
-from sensor_msgs.msg import CameraInfo
+from sensor_msgs.msg import CameraInfo, Image
 from std_msgs.msg import Bool, String
 from tf2_ros import Buffer, TransformException, TransformListener
 
+from ugv_localization.depth import check_depth_frame
 from ugv_localization.modes import parse_mode
 from ugv_localization.rosconv import (
     camera_info_ok,
+    depth_frame_from_image_msg,
     odom_variances,
     slam_info_visual_constraint,
     stamp_to_ns,
@@ -43,9 +48,15 @@ class PoseValidityNode(Node):
         self._map = self.declare_parameter("map_frame", "map").value
         self._odom = self.declare_parameter("odom_frame", "odom").value
         self._base = self.declare_parameter("base_frame", "base_link").value
+        self._depth_stride = int(self.declare_parameter("depth_stride", 8).value)
+        if self._depth_stride < 1:
+            raise RuntimeError("depth_stride must be >= 1")
 
         profile = load_validity_profile(profile_path)
+        self._profile = profile
         self._monitor = PoseValidityMonitor(profile, mode)
+        self._cam_frame: str | None = None
+        self._cam_size: tuple[int, int] | None = None
         self._tf_buffer = Buffer()
         self._tf_listener = TransformListener(self._tf_buffer, self)
         self._last_m2o_ns: int | None = None
@@ -55,7 +66,10 @@ class PoseValidityNode(Node):
         self._pub_status = self.create_publisher(String, "/ugv/localization_status", 10)
         self.create_subscription(Odometry, "odom", self._on_odom, 20)
         self.create_subscription(CameraInfo, "camera_info", self._on_camera_info, qos_profile_sensor_data)
+        self.create_subscription(Image, "depth", self._on_depth, qos_profile_sensor_data)
         self.create_subscription(Info, "rtabmap/info", self._on_info, 10)
+        latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self.create_subscription(String, "/ugv/localization/odom_source", self._on_odom_source, latched)
         self.create_timer(1.0 / profile.publish_rate_hz, self._tick)
         self.get_logger().info(f"pose validity: mode={mode.value}, publishing /ugv/pose_valid")
 
@@ -72,7 +86,40 @@ class PoseValidityNode(Node):
             ns = stamp_to_ns(msg.header.stamp)
         except (TypeError, ValueError):
             return
-        self._monitor.on_camera_info(ns, camera_info_ok(msg))
+        ok = camera_info_ok(msg)
+        if ok:
+            self._cam_frame = str(msg.header.frame_id)
+            self._cam_size = (int(msg.width), int(msg.height))
+        self._monitor.on_camera_info(ns, ok)
+
+    def _on_depth(self, msg: Image) -> None:
+        now_ns = self.get_clock().now().nanoseconds
+        if now_ns <= 0:
+            return
+        try:
+            frame = depth_frame_from_image_msg(msg, self._depth_stride)
+        except (TypeError, ValueError) as exc:
+            self.get_logger().warning(f"dropping depth: {exc}", throttle_duration_sec=2.0)
+            return
+        why = check_depth_frame(
+            frame,
+            camera_frame=self._cam_frame,
+            camera_size=self._cam_size,
+            now_ns=now_ns,
+            min_coverage=self._profile.min_depth_coverage,
+            max_future_s=self._profile.max_future_s,
+        )
+        if why is not None:
+            self.get_logger().warning(
+                f"depth violates contract: {why.value} (coverage={frame.coverage:.2f})",
+                throttle_duration_sec=2.0,
+            )
+        self._monitor.on_depth(frame.stamp_ns, why is None)
+
+    def _on_odom_source(self, msg: String) -> None:
+        now_ns = self.get_clock().now().nanoseconds
+        if now_ns > 0:
+            self._monitor.on_odom_source_switch(now_ns)
 
     def _on_info(self, msg: Info) -> None:
         try:
@@ -108,8 +155,11 @@ class PoseValidityNode(Node):
         if status != self._last_status:
             self._last_status = status
             self._pub_status.publish(String(data=status))
-            log = self.get_logger().info if res.valid else self.get_logger().warning
-            log(f"pose_valid={res.valid} ({status})")
+            # One severity per call site: rclpy raises if the same line switches info <-> warning.
+            if res.valid:
+                self.get_logger().info(f"pose_valid=True ({status})")
+            else:
+                self.get_logger().warning(f"pose_valid=False ({status})")
 
 
 def main(args: list[str] | None = None) -> None:

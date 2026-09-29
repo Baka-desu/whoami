@@ -25,10 +25,12 @@ def _profile(**over) -> ValidityProfile:
         localization_max_age_s=0.5,
         odom_max_age_s=0.5,
         camera_max_age_s=0.5,
+        depth_max_age_s=0.5,
         slam_max_age_s=2.0,
         max_future_s=0.05,
         max_xy_variance_m2=1.0,
         max_yaw_variance_rad2=0.25,
+        min_depth_coverage=0.5,
         max_dead_reckon_m=8.0,
         max_dead_reckon_s=0.0,
         dead_reckon_in_mapping=False,
@@ -36,15 +38,19 @@ def _profile(**over) -> ValidityProfile:
         max_correction_jump_rad=0.35,
         correction_jump_hold_s=1.0,
         recover_hold_s=0.0,
+        odom_switch_hold_s=0.5,
         publish_rate_hz=20.0,
     )
     return dataclasses.replace(base, **over)
 
 
-def _feed(m: PoseValidityMonitor, t: int, *, x: float = 0.0, cam_ok: bool = True, visual: bool = False) -> None:
+def _feed(
+    m: PoseValidityMonitor, t: int, *, x: float = 0.0, cam_ok: bool = True, visual: bool = False, depth_ok: bool = True
+) -> None:
     m.on_tf(t)
     m.on_odom(t, x, 0.0, 0.01, 0.01, 0.01)
     m.on_camera_info(t, cam_ok)
+    m.on_depth(t, depth_ok)
     m.on_slam_info(t, visual)
 
 
@@ -66,6 +72,7 @@ def test_v1_startup_is_invalid_with_all_missing_reasons() -> None:
         Reason.TF_MISSING,
         Reason.ODOM_MISSING,
         Reason.CAMERA_MISSING,
+        Reason.DEPTH_MISSING,
         Reason.SLAM_MISSING,
     }
 
@@ -86,6 +93,7 @@ def test_v2_mapping_all_fresh_is_valid() -> None:
         ("tf", Reason.TF_STALE),
         ("odom", Reason.ODOM_STALE),
         ("camera", Reason.CAMERA_STALE),
+        ("depth", Reason.DEPTH_STALE),
     ],
 )
 def test_v3_stale_input_invalidates(stale: str, reason: Reason) -> None:
@@ -98,6 +106,8 @@ def test_v3_stale_input_invalidates(stale: str, reason: Reason) -> None:
         m.on_odom(t1, 0.0, 0.0, 0.01, 0.01, 0.01)
     if stale != "camera":
         m.on_camera_info(t1, True)
+    if stale != "depth":
+        m.on_depth(t1, True)
     m.on_slam_info(t1, False)
     res = m.evaluate(t1)
     assert res.valid is False
@@ -117,11 +127,13 @@ def test_v5_slam_uses_its_own_longer_budget() -> None:
     m.on_tf(t1)
     m.on_odom(t1, 0.0, 0.0, 0.01, 0.01, 0.01)
     m.on_camera_info(t1, True)
+    m.on_depth(t1, True)
     assert m.evaluate(t1).valid is True  # slam 1.5 s old < 2.0 s
     t2 = _T0 + int(2.5 * _NS)
     m.on_tf(t2)
     m.on_odom(t2, 0.0, 0.0, 0.01, 0.01, 0.01)
     m.on_camera_info(t2, True)
+    m.on_depth(t2, True)
     res = m.evaluate(t2)
     assert res.valid is False and Reason.SLAM_STALE in res.reasons
 
@@ -349,4 +361,57 @@ def test_v25_profile_zero_age_rejected(tmp_path: Path) -> None:
     p = tmp_path / "v.yaml"
     p.write_text(text, encoding="utf-8")
     with pytest.raises(ValueError, match="odom_max_age_s"):
+        load_validity_profile(p)
+
+
+# --- RGB-D input (DA3 depth) + odom source switching ---------------------------------------
+
+
+def test_v26_depth_contract_violation_invalidates() -> None:
+    m = _mapping()
+    _feed(m, _T0, depth_ok=False)  # wrong encoding / frame / size / low coverage
+    res = m.evaluate(_T0)
+    assert res.valid is False and res.reasons == (Reason.DEPTH_INVALID,)
+
+
+def test_v27_depth_recovers_after_good_frame() -> None:
+    m = _mapping()
+    _feed(m, _T0, depth_ok=False)
+    assert m.evaluate(_T0).valid is False
+    t1 = _T0 + int(0.1 * _NS)
+    _feed(m, t1)
+    assert m.evaluate(t1).valid is True
+
+
+def test_v28_odom_source_switch_holds_briefly() -> None:
+    m = _mapping()
+    _feed(m, _T0)
+    assert m.evaluate(_T0).valid is True
+    m.on_odom_source_switch(_T0)
+    res = m.evaluate(_T0 + int(0.2 * _NS))
+    assert res.valid is False and Reason.ODOM_SOURCE_SWITCH in res.reasons
+    t1 = _T0 + int(0.6 * _NS)  # past odom_switch_hold_s (0.5)
+    _feed(m, t1)
+    assert m.evaluate(t1).valid is True
+
+
+def test_v29_switch_hold_zero_disables() -> None:
+    m = _mapping(odom_switch_hold_s=0.0)
+    _feed(m, _T0)
+    m.on_odom_source_switch(_T0)
+    assert m.evaluate(_T0).valid is True
+
+
+def test_v30_product_profile_depth_settings() -> None:
+    prof = load_validity_profile(_PRODUCT)
+    assert 0.0 < prof.min_depth_coverage <= 1.0
+    assert prof.depth_max_age_s > 0.0
+
+
+def test_v31_coverage_above_one_rejected(tmp_path: Path) -> None:
+    text = _PRODUCT.read_text(encoding="utf-8")
+    old = next(line for line in text.splitlines() if line.startswith("min_depth_coverage:"))
+    p = tmp_path / "v.yaml"
+    p.write_text(text.replace(old, "min_depth_coverage: 1.5"), encoding="utf-8")
+    with pytest.raises(ValueError, match="min_depth_coverage"):
         load_validity_profile(p)

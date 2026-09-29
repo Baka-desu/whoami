@@ -1,10 +1,11 @@
 """Record estimate (TF map->base_link) vs ground truth, write CSVs + drift report on exit.
 
-Subscribes : ground_truth  nav_msgs/Odometry  (remap to Dev 5 sim ground-truth topic; TBD)
-Params     : out_dir, map_frame, base_frame, duration_s (0 = until Ctrl-C), max_dt_ms
+Subscribes : ground_truth  nav_msgs/Odometry  (remap to Dev 5 sim ground truth, /ground_truth/odom)
+Params     : out_dir, map_frame, base_frame, duration_s (0 = until Ctrl-C), max_dt_ms,
+             with_scale (similarity alignment: exposes DA3 metric-scale drift; default rigid)
 Outputs    : <out_dir>/est.csv, gt.csv, report.json   (same format as tools/drift_report)
 
-    ros2 run ugv_localization drift_eval --ros-args -r ground_truth:=/model/ugv/odometry \
+    ros2 run ugv_localization drift_eval --ros-args -r ground_truth:=/ground_truth/odom \
         -p use_sim_time:=true -p out_dir:=eval_out/run1
 """
 
@@ -37,6 +38,7 @@ class DriftEval(Node):
         self._base = self.declare_parameter("base_frame", "base_link").value
         self._duration_ns = int(self.declare_parameter("duration_s", 0.0).value * 1e9)
         self._max_dt_ns = int(self.declare_parameter("max_dt_ms", 20.0).value * 1e6)
+        self._with_scale = bool(self.declare_parameter("with_scale", False).value)
         self._buf = Buffer()
         self._listener = TransformListener(self._buf, self)
         self._gt: list[tuple[int, float, float, float]] = []
@@ -89,11 +91,13 @@ class DriftEval(Node):
                 [r[0] for r in self._gt],
                 np.asarray([r[1:] for r in self._gt]).reshape(-1, 3),
                 max_dt_ns=self._max_dt_ns,
+                with_scale=self._with_scale,
             )
         except ValueError as exc:
             self.get_logger().error(f"no report: {exc} (est={len(est)}, gt={len(self._gt)})")
             return
         report = {
+            "with_scale": self._with_scale,
             "matched": rep.matched,
             "gt_path_length_m": rep.gt_path_length_m,
             "ate_rmse_m": rep.ate_rmse_m,

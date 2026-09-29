@@ -7,6 +7,7 @@ import math
 
 from ugv_localization.camera import CalibrationError, CameraCalibration, calibration_from_camera_info, validate_intrinsics
 from ugv_localization.common.checks import NS_PER_S, yaw_from_quaternion
+from ugv_localization.depth import DepthFrame, depth_coverage, depth_values
 from ugv_localization.odom import OdomSample
 
 
@@ -86,3 +87,29 @@ def transform_to_xy_yaw(transform: object) -> tuple[float, float, float]:
     t = transform.translation  # type: ignore[attr-defined]
     q = transform.rotation  # type: ignore[attr-defined]
     return float(t.x), float(t.y), yaw_from_quaternion(float(q.x), float(q.y), float(q.z), float(q.w))
+
+
+def depth_frame_from_image_msg(msg: object, stride: int) -> DepthFrame:
+    """sensor_msgs/Image → DepthFrame. Coverage is measured on every stride-th pixel; a frame
+    that is not 32FC1 is never decoded (coverage 0.0) — the gate rejects it on encoding."""
+    encoding = str(msg.encoding)  # type: ignore[attr-defined]
+    width, height = int(msg.width), int(msg.height)  # type: ignore[attr-defined]
+    coverage = 0.0
+    if encoding == "32FC1":
+        values = depth_values(
+            bytes(msg.data),  # type: ignore[attr-defined]
+            width=width,
+            height=height,
+            step=int(msg.step),  # type: ignore[attr-defined]
+            is_bigendian=bool(msg.is_bigendian),  # type: ignore[attr-defined]
+            stride=stride,
+        )
+        coverage = depth_coverage(values)
+    return DepthFrame(
+        stamp_ns=stamp_to_ns(msg.header.stamp),  # type: ignore[attr-defined]
+        frame_id=str(msg.header.frame_id),  # type: ignore[attr-defined]
+        encoding=encoding,
+        width=width,
+        height=height,
+        coverage=coverage,
+    )

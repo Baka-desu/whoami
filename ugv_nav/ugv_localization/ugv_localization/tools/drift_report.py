@@ -36,7 +36,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--out", required=True)
     ap.add_argument("--max-dt-ms", type=float, default=20.0)
     ap.add_argument("--segments", type=float, nargs="+", default=[5.0, 10.0, 20.0])
-    ap.add_argument("--with-scale", action="store_true", help="similarity alignment (mono-only runs)")
+    ap.add_argument("--with-scale", action="store_true", help="similarity alignment: isolates scale drift (DA3 metric scale vs truth)")
     args = ap.parse_args(argv)
 
     est_t, est = read_csv(args.est)

@@ -1,7 +1,8 @@
 """Camera calibration in ROS camera_info_manager YAML format.
 
 Refuses uncalibrated / fake intrinsics (all-zero K, principal point outside the image).
-Mono RTAB-Map with a lying K produces confident wrong geometry, so we fail closed.
+A lying K produces confident wrong geometry twice over: DA3 converts depth to meters with the
+focal length (Dev 1 depth/geometry.py), and RTAB-Map back-projects that depth with K. Fail closed.
 """
 
 from __future__ import annotations

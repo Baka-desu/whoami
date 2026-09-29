@@ -21,15 +21,16 @@ setup(
     zip_safe=True,
     maintainer="jeswin-christie",
     maintainer_email="dev@neogenmedia.com",
-    description="Dev 2 localization: RTAB-Map mono + wheel odom, TF chain, pose validity.",
+    description="Dev 2 localization: RTAB-Map RGB-D (mono + DA3 depth), switchable odom, TF chain, pose validity.",
     license="Proprietary",
     extras_require={"test": ["pytest"]},  # colcon picks pytest from here (tests_require is gone)
     entry_points={
         "console_scripts": [
-            "odom_tf_bridge = ugv_localization.nodes.odom_tf_bridge:main",
+            "odom_selector = ugv_localization.nodes.odom_selector:main",
             "pose_validity_node = ugv_localization.nodes.pose_validity_node:main",
             "tf_rate_check = ugv_localization.nodes.tf_rate_check:main",
             "drift_eval = ugv_localization.nodes.drift_eval:main",
+            "depth_eval = ugv_localization.nodes.depth_eval:main",
             "mode_cli = ugv_localization.nodes.mode_cli:main",
             "camera_info_to_yaml = ugv_localization.nodes.camera_info_to_yaml:main",
             "drift_report = ugv_localization.tools.drift_report:main",
