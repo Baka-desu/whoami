@@ -52,6 +52,13 @@ if(BUILD_TESTING)
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
     TIMEOUT 120
   )
+  # Closed-loop A->B scenarios with a TEST-ONLY fake base and synthetic maps
+  # (test/closed_loop/). Benchmark CSV goes to the build directory.
+  ament_add_ros_isolated_pytest_test(test_closed_loop test/test_closed_loop.py
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    ENV UGV_CLOSED_LOOP_CSV=${CMAKE_CURRENT_BINARY_DIR}/closed_loop_benchmark.csv
+    TIMEOUT 900
+  )
 endif()
 
 ament_package()

@@ -16,13 +16,14 @@ Dev 3 costmap params ─► local_costmap  (in controller_server) ─► RPP ◄
 | File | Dev 4 task |
 |---|---|
 | `config/planner_server.yaml` | 1 Smac2D (`allow_unknown: false`, bounded plan time) |
-| `config/controller_server.yaml` | 2 RPP (adaptive lookahead, curvature + cost regulation, collision detection, rotate-to-heading) · 3 fresh-costmap wait · 5 unstamped `Twist` |
+| `config/controller_server.yaml` | 2 RPP with Dynamic Window (velocity + acceleration limits enforced), adaptive lookahead, curvature + cost regulation, collision detection, rotate-to-heading · 3 fresh-costmap wait · 5 unstamped `Twist` |
 | `behavior_trees/navigate_to_pose_ugv.xml` | 3 replan at 2 Hz if path > 2 s old / goal updated / `ValidatePath` fails on the path ahead (unknown counts as obstacle) · 4 spin / wait / backup |
 | `config/behavior_server.yaml` | 4 recovery plugins (spin, backup, wait) |
 | `config/bt_navigator.yaml` | 4 `/navigate_to_pose` |
 | `launch/navigation.launch.py` | all; 5 remaps every Nav2 `cmd_vel` to `/cmd_vel_nav2` |
 | `scripts/nav_goal_testbench`, `ugv_navigation/testbench_core.py` | 6 CLI / goal benchmark |
 | `test/` | static contract tests, testbench unit tests, live graph boundary test |
+| `test/closed_loop/`, `test/test_closed_loop.py` | 2 · 3 · 6 closed-loop A→B scenarios + benchmark CSV (TEST-ONLY fake base and maps) |
 
 ## Design decisions
 
@@ -40,6 +41,27 @@ Dev 3 costmap params ─► local_costmap  (in controller_server) ─► RPP ◄
   `path_handler_plugins`) and will not load on Jazzy Nav2. The static tests check
   every name against the installed Nav2, so run them on Lyrical.
 
+## Closed-loop benchmark
+
+`test_closed_loop` drives the real launch file against a TEST-ONLY kinematic base
+(integrates `/cmd_vel_nav2`, publishes `/odom` + `odom→base_link`; stands in for Dev 2
+and Dev 5) and synthetic maps (stand in for Dev 3). For each scenario it asserts goal
+reached, footprint never on lethal or unknown cells, candidate twists inside the RPP
+limits, the mid-run hazard avoided, and no `/cmd_vel` publisher. Results are written to
+`build/ugv_navigation/closed_loop_benchmark.csv`. Lyrical, placeholder robot limits
+(0.4 m/s, 0.8 rad/s), 4/4 repeated runs identical:
+
+| Scenario | Time | Path | Min clearance | Recoveries |
+|---|---|---|---|---|
+| open | 10.3 s | 3.76 m | – | 0 |
+| wall_gap (0.8 m opening) | 15.1 s | 4.74 m | 0.37 m to lethal | 0 |
+| corridor (1.2 m) | 10.3 s | 3.75 m | 0.63 m to lethal | 0 |
+| unknown_block | 16.0 s | 5.12 m | 0.50 m to unknown | 0 |
+| dynamic_obstacle (appears at x ≥ 0.8 m) | 14.9 s | 4.74 m | 0.47 m to lethal | 0 |
+
+This proves the planning/control logic, not the robot: no perception, localization
+drift, Dev 3 costmaps, Dev 5 safety gate or real dynamics. Retune on the platform.
+
 ## Values to confirm with other devs
 
 | Key | Owner | Why |
@@ -47,6 +69,8 @@ Dev 3 costmap params ─► local_costmap  (in controller_server) ─► RPP ◄
 | `[ROBOT LIMIT]` values in `controller_server.yaml` and `behavior_server.yaml` (speeds, accelerations) | Dev 5 platform | Conservative placeholders. Override per robot with `robot_params_file:=config/robots/<robot>/<file>.yaml` |
 | `FollowPath.inflation_cost_scaling_factor` (3.0) | Dev 3 | Must equal the local inflation layer's `cost_scaling_factor` |
 | Global inflation layer `inflation_radius` | Dev 3 | Smac2D needs it to be **at least half the robot's largest cross-section**, otherwise its collision checking degrades and it logs *"inflation is not set sufficiently"* |
+| Inflation layer `inflate_around_unknown: true` (both costmaps) | Dev 3 | Architecture §8.1 "unknown = never free — inflate". Without it paths hug unknown space; in the closed-loop `unknown_block` run the robot cut a corner, ended with its centre in unknown cells and Smac2D (`allow_unknown: false`) aborted with *"Start occupied"*. With it, the robot keeps ≥ 0.5 m from unknown |
+| Feeding Dev 3's grid to Nav2 | Dev 3 | Proposal, proven in the closed-loop fixture: publish an `OccupancyGrid` (0 free, 100 lethal, -1 unknown, 1..99 scaled) and read it in both costmaps with `nav2_costmap_2d::StaticLayer` (`map_topic`, `track_unknown_space: true`) + inflation. Works with the rolling `odom` local costmap. Nav2 itself publishes `/global_costmap/costmap` and `/local_costmap/costmap`, so Dev 3 needs a different topic name |
 | Costmap `update_frequency` / `publish_frequency` | Dev 3 | Sets how fast hazards reach Smac2D/RPP. Local costmap ≥ 5 Hz is recommended |
 
 ## External prerequisites (not launched here)
@@ -85,6 +109,11 @@ ros2 run ugv_navigation nav_goal_testbench check
 
 # A->B goals (map frame, x,y[,yaw]) + benchmark table
 ros2 run ugv_navigation nav_goal_testbench goal 3.0,0.0 3.0,2.0,1.57 --csv runs.csv
+
+# Closed loop without Dev 2/3/5 (TEST-ONLY fake base + synthetic map, from the repo root):
+#   open | wall_gap | corridor | unknown_block | dynamic_obstacle
+ros2 launch src/ugv_navigation/test/closed_loop/closed_loop.launch.py scenario:=wall_gap
+ros2 run ugv_navigation nav_goal_testbench goal 4.0,0.0
 
 # Raw CLI equivalents
 ros2 action send_goal /navigate_to_pose nav2_msgs/action/NavigateToPose \
