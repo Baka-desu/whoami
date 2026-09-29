@@ -1,4 +1,4 @@
-"""Startup compile of the DA3 IR. Absent IR means T08 stays off."""
+"""Startup load of DA3. Absent IR and safetensors means T08 stays off."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 
 from ugv_perception.adapter.output import AdapterError
-from ugv_perception.backend.openvino_gpu import OpenVinoGpuTensorBackend
+from ugv_perception.backend.device import pick_tensor_backend
 from ugv_perception.depth.geometry import (
     backproject,
     focal_model,
@@ -20,7 +20,7 @@ from ugv_perception.depth.geometry import (
 
 
 class DepthChannel:
-    def __init__(self, backend: OpenVinoGpuTensorBackend) -> None:
+    def __init__(self, backend: object) -> None:
         self._backend = backend
 
     def maps(self, rgb: np.ndarray, k: tuple[float, ...] | np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -38,7 +38,7 @@ class DepthChannel:
             raise AdapterError("preprocess size disagrees with K_model")
         outputs = self._backend.run_all(blob)
         if len(outputs) < 2:
-            raise AdapterError("DA3 IR must return depth_raw and sky")
+            raise AdapterError("DA3 must return depth_raw and sky")
         raw = np.squeeze(outputs[0])
         sky = np.squeeze(outputs[1])
         depth_m = meters_from_raw(raw, focal_model(k_m))
@@ -51,8 +51,8 @@ class DepthChannel:
 
 def build_depth_channel(root: Path) -> DepthChannel | None:
     xml = root / "weights" / "da3metric-large.xml"
-    if not xml.is_file():
+    folder = root / "weights" / "da3metric-large"
+    backend = pick_tensor_backend(ir_xml=xml, safetensors_dir=folder, kind="da3")
+    if backend is None:
         return None
-    backend = OpenVinoGpuTensorBackend()
-    backend.load(str(xml), input_hw=None)
     return DepthChannel(backend)
