@@ -2,4 +2,3 @@
 
 ignore where it says we are using ros 2 jazzy we are actually using lyrical luth
 
-ignore interfaces.md for now
