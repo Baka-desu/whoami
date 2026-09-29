@@ -26,7 +26,7 @@ T02 consume Image+CameraInfo  decode + ros_bridge **shipped**; outdoor stream st
 T03 remap engine           YAML, no model
 T04 confidence gates       YAML, no model
 T05 freshness / degraded   time + flags, no model
-T12 backend seam           OpenVINO GPU on Arc B580; CUDA PyTorch later (low VRAM)
+T12 backend seam           OpenVINO GPU on Arc B580; CUDA PyTorch when Intel GPU is missing
 T06 YOLOE adapter          selectable masks; live outdoor adapter is RUGD SegFormer (T12)
 T07 port node              compose + publish canonical mask + degraded
 T10 contract tests         T01–T07 wired: encoding, {0,1,2}, stamp, frame, degraded
@@ -39,7 +39,19 @@ T09 tutorial ONNX          eval scaffold only, not product
 **On disk:** RUGD SegFormer-B5 OpenVINO IR (`weights/rugd-segformer.xml`, 25 RUGD classes, Arc `device=GPU`) is the live adapter. YOLOE-26s IR remains at `weights/yoloe-26s-seg.xml`. **No DummySource.** Outdoor product `infer` still needs a Dev 5 Image+CameraInfo stream.  
 T10 uses header/label fixtures. T11 policy (latest-only queue + starve watchdog) **shipped**; live p95 waits on Dev 5. Outdoor camera is Dev 5.
 
-Runtime: Intel Arc B580 **now** (OpenVINO 2026.4.0, `device=GPU`). ROS 2 **Lyrical** on this RHEL 10 box. Later NVIDIA, less VRAM (CUDA + PyTorch). See [HARDWARE.md](HARDWARE.md).
+Runtime: Intel Arc B580 **now** (OpenVINO 2026.4.0, `device=GPU`, CPU fallback). ROS 2 **Lyrical** on this RHEL 10 box. NVIDIA: CUDA + PyTorch on the same HuggingFace checkpoints, no OpenVINO. See [HARDWARE.md](HARDWARE.md).
+
+**Weights (gitignored).** Intel: HuggingFace download, then export IR, then run.
+
+```bash
+cd turing
+bash scripts/fetch_rugd_segformer.sh
+.venv/bin/python scripts/export_rugd_segformer_openvino.py
+bash scripts/fetch_da3metric_large.sh
+.venv/bin/python scripts/export_da3metric_openvino.py --height 336 --width 504
+```
+
+NVIDIA: HuggingFace download only (`weights/rugd-segformer/` and `weights/da3metric-large/`), plus PyTorch with CUDA. Skip the export. The node picks CUDA when OpenVINO reports no Intel `GPU`.
 
 ### T07 port node (explicit)
 
