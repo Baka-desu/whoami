@@ -205,6 +205,7 @@ input:disabled { opacity: 0.5; }
 .scale i.depth { height: 6px; background: linear-gradient(90deg, #d9902d, #170f04); }
 
 @media (max-width: 1000px) {
-  .app { grid-template: 48px auto minmax(320px, 60vh) auto / 1fr; grid-template-areas: 'top' 'source' 'view' 'inspect'; height: auto; min-height: 100vh; }
+  .app { grid-template: 48px minmax(320px, 60vh) auto auto / 1fr; grid-template-areas: 'top' 'view' 'source' 'inspect'; height: auto; min-height: 100vh; }
+  .viewport { border-bottom: 1px solid var(--line); }
   .source, .inspector { border: 0; border-bottom: 1px solid var(--line); overflow: visible; }
 }

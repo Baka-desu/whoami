@@ -21,13 +21,14 @@ export function useFreshness(a: Analysis | null): Freshness | null {
     if (!a?.meta.streaming) return
     const id = window.setInterval(() => setNow(Date.now()), TICK_MS)
     return () => window.clearInterval(id)
-  }, [a?.meta.streaming, a?.meta.stamp])
+  }, [a?.meta.streaming, a?.meta.receivedAt, a?.meta.stamp])
 
   if (!a) return null
   if (!a.meta.streaming) {
     return { ageMs: a.ageMs, stale: false, degraded: a.degraded, ok: !a.degraded, label: a.degraded ? 'DEGRADED' : 'CAPTURED' }
   }
-  const ageMs = now - a.meta.stamp
+  const baseTime = a.meta.receivedAt ?? a.meta.stamp
+  const ageMs = Math.max(0, now - baseTime)
   const stale = ageMs > PERCEPTION_MAX_AGE_MS
   const degraded = a.degraded
   return {
