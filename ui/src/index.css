@@ -162,7 +162,7 @@ input:disabled { opacity: 0.5; }
 
 .banner, .assumed {
   position: absolute;
-  top: 28px;
+  top: 88px; /* below navhud */
   left: 28px;
   padding: 5px 10px;
   font-size: 11px;
@@ -171,7 +171,29 @@ input:disabled { opacity: 0.5; }
 }
 .banner.stale { background: var(--red); color: #000; }
 .banner.degraded { background: #000; color: var(--red); border: 1px solid var(--red); }
-.assumed { top: 28px; left: auto; right: 28px; background: rgba(0, 0, 0, 0.78); color: #d9a33d; border: 1px solid #4a3410; font-weight: 500; }
+.assumed { top: 88px; left: auto; right: 28px; background: rgba(0, 0, 0, 0.78); color: #d9a33d; border: 1px solid #4a3410; font-weight: 500; }
+
+/* nav HUD: turn-by-turn style instruction bar, Google-Maps-top-bar-like, derived entirely from
+   the already-computed local path (analysis/perception.ts). Always the topmost thing shown. */
+.navhud {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 20px;
+  background: #0a0a0a;
+  border-bottom: 2px solid var(--red);
+}
+.navhud-icon { font-size: 30px; line-height: 1; color: var(--red); width: 34px; text-align: center; flex: none; }
+.navhud-text { display: grid; gap: 2px; min-width: 0; }
+.navhud-text b { font-size: 15px; letter-spacing: 0.04em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.navhud-text i { font-style: normal; font-size: 11px; color: var(--dim); letter-spacing: 0.08em; }
+.navhud.alert { background: var(--red); border-bottom-color: #000; }
+.navhud.alert .navhud-icon, .navhud.alert .navhud-text i, .navhud.alert .navhud-text b { color: #000; }
 
 /* inspector */
 .topdown-wrap { position: relative; }
@@ -208,7 +230,9 @@ input:disabled { opacity: 0.5; }
 .scale i.depth { height: 6px; background: linear-gradient(90deg, #d9902d, #170f04); }
 
 @media (max-width: 1000px) {
-  .app { grid-template: auto auto minmax(320px, 60vh) auto / 1fr; grid-template-areas: 'top' 'source' 'view' 'inspect'; height: auto; min-height: 100vh; }
+  /* viewport (the actual detection/analysis view) comes right after the topbar, so it's what you
+     see first on a phone - source controls and the inspector's detail panels scroll below it. */
+  .app { grid-template: auto minmax(320px, 60vh) auto auto / 1fr; grid-template-areas: 'top' 'view' 'source' 'inspect'; height: auto; min-height: 100vh; }
   .source, .inspector { border: 0; border-bottom: 1px solid var(--line); overflow: visible; }
   .topbar { flex-wrap: wrap; row-gap: 8px; padding: 10px 16px; }
 }
@@ -230,9 +254,12 @@ input:disabled { opacity: 0.5; }
   .viewport::before { top: 4px; left: 4px; }
   .viewport::after { right: 4px; bottom: 4px; }
   .legend { left: 16px; bottom: 16px; right: 16px; }
-  .banner, .assumed { top: 16px; font-size: 10px; }
+  .banner, .assumed { top: 64px; font-size: 10px; } /* below navhud */
   .banner { left: 16px; }
   .assumed { right: 16px; }
+  .navhud { padding: 10px 16px; gap: 10px; }
+  .navhud-icon { font-size: 24px; width: 28px; }
+  .navhud-text b { font-size: 13px; }
 }
 
 /* Touch devices: no blue tap-flash, no 300ms tap delay */

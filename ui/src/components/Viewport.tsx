@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react'
 import type { Freshness } from '../analysis/freshness'
 import { CLASS_NAMES, CLASS_RGB, GH, GW, PERCEPTION_MAX_AGE_MS, type Analysis, type Layers } from '../types'
+import { NavHud } from './NavHud'
 
 const layerCanvas = document.createElement('canvas')
 layerCanvas.width = GW
@@ -87,6 +88,7 @@ export function Viewport({ frame, analysis, layers, freshness: fr }: Props) {
     <main className="viewport">
       {frame ? (
         <>
+          <NavHud analysis={analysis} />
           <canvas ref={ref} />
           {fr && !fr.ok && (
             <div className={`banner ${fr.stale ? 'stale' : 'degraded'}`}>
