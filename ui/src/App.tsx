@@ -7,7 +7,7 @@ import { SourcePanel } from './components/SourcePanel'
 import { TopBar } from './components/TopBar'
 import { Viewport } from './components/Viewport'
 import { openCamera } from './source/camera'
-import { connectRos, type RosOptions, type SendGoal } from './source/rosbridge'
+import { connectRos, type CameraCalibration, type RosOptions, type SendGoal } from './source/rosbridge'
 import {
   assumedIntrinsics, type Analysis, type FrameMeta, type Intrinsics, type Layers, type SourceKind, type Status,
 } from './types'
@@ -32,7 +32,7 @@ export default function App() {
     infoTopic: '/camera_info',
   })
   const lastFrameAt = useRef(0)
-  const rosInfo = useRef<Intrinsics | null>(null)
+  const rosInfo = useRef<CameraCalibration | null>(null)
   const goalSender = useRef<SendGoal | null>(null)
   const [rosConnected, setRosConnected] = useState(false)
   const [goalStatus, setGoalStatus] = useState('')
@@ -56,8 +56,9 @@ export default function App() {
   }, [])
 
   const ingest = useCallback(async (bmp: ImageBitmap, src: SourceKind, stamp: number, frameId: string, streaming: boolean, K?: Intrinsics | null) => {
+    const receivedAt = Date.now()
     const meta: FrameMeta = {
-      source: src, frameId, stamp, width: bmp.width, height: bmp.height,
+      source: src, frameId, stamp, receivedAt, width: bmp.width, height: bmp.height,
       K: K ?? assumedIntrinsics(bmp.width, bmp.height), kAssumed: !K, streaming,
     }
     const now = performance.now()
@@ -158,13 +159,34 @@ export default function App() {
   useEffect(() => {
     if (!rosOn) return
     const disconnect = connectRos(rosCfg, {
-      onInfo: (K) => { rosInfo.current = K },
+      onInfo: (calib) => { rosInfo.current = calib },
       onFrame: (bmp, stamp, frameId) => {
         // real inference takes far longer than a rosbridge frame interval; drop frames that
         // arrive while one is still being analysed rather than piling up requests
         if (rosBusy.current) { bmp.close(); return }
         rosBusy.current = true
-        ingest(bmp, 'ros2', stamp, frameId, true, rosInfo.current).finally(() => { rosBusy.current = false })
+
+        let resolvedK: Intrinsics | null = null
+        const calib = rosInfo.current
+        if (calib) {
+          const normFrameId = frameId.replace(/^\//, '')
+          const normCalibId = calib.frameId.replace(/^\//, '')
+          if (!normCalibId || normFrameId === normCalibId) {
+            if (calib.width > 0 && calib.height > 0) {
+              const scaleX = bmp.width / calib.width
+              const scaleY = bmp.height / calib.height
+              resolvedK = {
+                fx: calib.K.fx * scaleX,
+                fy: calib.K.fy * scaleY,
+                cx: calib.K.cx * scaleX,
+                cy: calib.K.cy * scaleY,
+              }
+            } else {
+              resolvedK = calib.K
+            }
+          }
+        }
+        ingest(bmp, 'ros2', stamp, frameId, true, resolvedK).finally(() => { rosBusy.current = false })
         setStatus('live')
       },
       onStatus: (text, ok) => {
@@ -183,6 +205,7 @@ export default function App() {
   const toggleRos = (on: boolean) => {
     setRosOn(on)
     if (!on) {
+      rosInfo.current = null
       setNote('')
       setGoalStatus('')
       setStatus(afterStop)

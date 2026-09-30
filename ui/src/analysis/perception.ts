@@ -157,7 +157,7 @@ export function buildAnalysis(
     max: ground[ground.length - 1],
   }
 
-  const ageMs = Date.now() - meta.stamp
+  const ageMs = Math.max(0, Date.now() - (meta.receivedAt ?? meta.stamp))
   const reasons: string[] = []
   let degraded: boolean
   if (port) {

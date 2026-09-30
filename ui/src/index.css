@@ -233,6 +233,7 @@ input:disabled { opacity: 0.5; }
   /* viewport (the actual detection/analysis view) comes right after the topbar, so it's what you
      see first on a phone - source controls and the inspector's detail panels scroll below it. */
   .app { grid-template: auto minmax(320px, 60vh) auto auto / 1fr; grid-template-areas: 'top' 'view' 'source' 'inspect'; height: auto; min-height: 100vh; }
+  .viewport { border-bottom: 1px solid var(--line); }
   .source, .inspector { border: 0; border-bottom: 1px solid var(--line); overflow: visible; }
   .topbar { flex-wrap: wrap; row-gap: 8px; padding: 10px 16px; }
 }
