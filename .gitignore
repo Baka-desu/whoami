@@ -9,3 +9,5 @@ turing/testimage3.jpg
 turing/eval_pictured_rocks_trail.jpg
 turing/ti4.avif
 .arena/
+__pycache__/
+.pytest_cache/
