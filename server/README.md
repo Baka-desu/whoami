@@ -60,6 +60,12 @@ a live rosbridge server.
 
 ## Setup
 
+Built and run on this machine with **Python 3.14** on Windows. `depth-anything-3`'s own package
+declares `requires-python <=3.13`, but nothing this server actually imports from it needs anything
+3.14 removed (see the `--ignore-requires-python` note below) — 3.14 is not a requirement, just what
+was tested; 3.10-3.13 should work unmodified since they satisfy that cap without the flag.
+
+Windows:
 ```
 python -m venv .venv
 .venv\Scripts\pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126
@@ -73,9 +79,23 @@ git clone https://github.com/ByteDance-Seed/depth-anything-3 <somewhere>
 .venv\Scripts\pip install --no-deps --ignore-requires-python -e <somewhere>
 ```
 
+Linux / WSL (the eventual ROS 2 Lyrical host — untested here, no Linux box on this machine):
+```
+python -m venv .venv
+.venv/bin/pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126
+.venv/bin/pip install -r requirements.txt
+.venv/bin/pip install -e ../turing
+
+bash ../turing/scripts/fetch_rugd_segformer.sh
+bash ../turing/scripts/fetch_da3metric_large.sh
+
+git clone https://github.com/ByteDance-Seed/depth-anything-3 <somewhere>
+.venv/bin/pip install --no-deps --ignore-requires-python -e <somewhere>
+```
+
 Pick the CUDA index that matches your driver (`nvidia-smi`); `cu126` is what this machine used
 with driver CUDA 13.3 — newer drivers are backward compatible with older CUDA runtime builds. A
-plain `pip install torch` on Windows gives you a CPU-only build.
+plain `pip install torch` gives you a CPU-only build on either platform.
 
 `--ignore-requires-python` skips depth-anything-3's 3.13 cap (nothing actually used here needs
 anything Python 3.14 removed); `--no-deps` skips its heavy requirements.txt, since

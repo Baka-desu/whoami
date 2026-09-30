@@ -6,13 +6,26 @@ interface Props {
   connected: boolean
   status: string
   onSend: (x: number, y: number, yawRad: number) => void
+  // Gates sending on Dev 2's pose-valid heartbeat and the shared freshness clock, not just the
+  // socket being open (archV1.md §9/§11: no Nav2 use of the reference pose without a valid one).
+  canSend: boolean
+  blockedReason: string
 }
 
-// V1 "localized goal" (architecture addendum): a destination relative to the start pose, e.g.
-// "50 m at 20 deg east of north" - no GPS, the destination need not be visible beforehand. Bearing
-// is standard compass convention (0=N, 90=E, clockwise) converted to the map frame's ENU axes
-// (x=East, y=North, REP-103); the robot is pointed along the travel direction on arrival.
-export function GoalPanel({ connected, status, onSend }: Props) {
+// V1 "localized goal" (archV1.md): a destination relative to the start pose, e.g. "50 m at 20 deg
+// east of north" - no GPS, the destination need not be visible beforehand. Bearing is standard
+// compass convention (0=N, 90=E, clockwise) converted to the map frame's ENU axes (x=East,
+// y=North, REP-103); the robot is pointed along the travel direction on arrival.
+//
+// Known gap vs archV1.md §5.1/§9: the {range,bearing}->map-frame conversion is owned by Dev 2,
+// who freezes a reference pose in `map` at mission start and does the conversion there - Dev 2
+// does not consume the mask and does not call Nav2. There is no rosbridge topic/service in
+// interfaces.md yet for the UI to hand a raw {range,bearing} mission to that conversion, so this
+// panel does the conversion itself and sends a PoseStamped goal directly. That is a UI-side
+// stand-in, not the archV1.md-conformant path; canSend/blockedReason (Dev 2's /ugv/pose_valid +
+// the shared freshness clock) is the safety net this panel *can* enforce without inventing a new
+// cross-team contract.
+export function GoalPanel({ connected, status, onSend, canSend, blockedReason }: Props) {
   const [mode, setMode] = useState<Mode>('bearing')
   const [distance, setDistance] = useState('50')
   const [bearing, setBearing] = useState('20')
@@ -68,13 +81,14 @@ export function GoalPanel({ connected, status, onSend }: Props) {
 
       <button
         className="btn primary"
-        disabled={!connected || !valid}
+        disabled={!connected || !valid || !canSend}
         onClick={() => onSend(goalX, goalY, yawRad)}
         style={{ marginTop: 10, width: '100%' }}
       >
         SEND GOAL
       </button>
       {!connected && <p className="dim">Connect to ROS 2 first — this calls /navigate_to_pose on that connection.</p>}
+      {connected && blockedReason && <p className="dim">Blocked: {blockedReason} — sending a goal now could drive on an unsafe reference pose.</p>}
       {status && <p className="dim">{status}</p>}
     </section>
   )

@@ -36,6 +36,9 @@ export default function App() {
   const goalSender = useRef<SendGoal | null>(null)
   const [rosConnected, setRosConnected] = useState(false)
   const [goalStatus, setGoalStatus] = useState('')
+  // Dev 2's localization heartbeat (interfaces.md): false at startup and on any failure. A
+  // localized goal must never be sent while this is false (archV1.md §9/§11).
+  const [poseValid, setPoseValid] = useState(false)
   const freshness = useFreshness(analysis)
   const [backendOnline, setBackendOnline] = useState(false)
   // ingest must stay a stable callback (the live-camera effect depends on it), so the backend's
@@ -196,8 +199,9 @@ export default function App() {
       },
       onReady: (send) => { goalSender.current = send },
       onGoalUpdate: setGoalStatus,
+      onPoseValid: setPoseValid,
     })
-    return () => { goalSender.current = null; setRosConnected(false); disconnect() }
+    return () => { goalSender.current = null; setRosConnected(false); setPoseValid(false); disconnect() }
     // rosCfg is locked while connected
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rosOn, ingest])
@@ -212,8 +216,13 @@ export default function App() {
     }
   }
 
+  // A mission goal must not be sent while perception is stale/degraded or Dev 2 reports an
+  // invalid pose (archV1.md §9/§11: no Nav2 use of the reference pose without a valid one).
+  const goalBlockedReason = !rosConnected ? '' : !poseValid ? 'pose not valid yet' : freshness && !freshness.ok ? freshness.label.toLowerCase() : ''
+  const canSendGoal = rosConnected && !goalBlockedReason
+
   const sendGoal = (x: number, y: number, yawRad: number) => {
-    if (!goalSender.current) return
+    if (!goalSender.current || !canSendGoal) return
     setGoalStatus('goal sent, waiting for feedback...')
     goalSender.current({ x, y, yawRad, frameId: 'map' })
   }
@@ -227,6 +236,7 @@ export default function App() {
         live={live} onLive={setLiveCamera} onPhoto={takePhoto} onUpload={upload}
         rosCfg={rosCfg} onRosCfg={setRosCfg} rosOn={rosOn} onRosOn={toggleRos}
         rosConnected={rosConnected} goalStatus={goalStatus} onSendGoal={sendGoal}
+        canSendGoal={canSendGoal} goalBlockedReason={goalBlockedReason}
       />
       <Viewport frame={frame} analysis={analysis} layers={layers} freshness={freshness} />
       <Inspector analysis={analysis} freshness={freshness} />

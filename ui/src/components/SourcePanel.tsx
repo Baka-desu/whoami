@@ -19,6 +19,8 @@ interface Props {
   rosConnected: boolean
   goalStatus: string
   onSendGoal: (x: number, y: number, yawRad: number) => void
+  canSendGoal: boolean
+  goalBlockedReason: string
 }
 
 const TABS: [SourceKind, string][] = [['upload', 'UPLOAD'], ['camera', 'CAMERA'], ['ros2', 'ROS 2']]
@@ -93,7 +95,10 @@ export function SourcePanel(p: Props) {
       </section>
 
       {p.source === 'ros2' && (
-        <GoalPanel connected={p.rosConnected} status={p.goalStatus} onSend={p.onSendGoal} />
+        <GoalPanel
+          connected={p.rosConnected} status={p.goalStatus} onSend={p.onSendGoal}
+          canSend={p.canSendGoal} blockedReason={p.goalBlockedReason}
+        />
       )}
 
       <section className="section">

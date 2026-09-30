@@ -194,6 +194,8 @@ input:disabled { opacity: 0.5; }
 .navhud-text i { font-style: normal; font-size: 11px; color: var(--dim); letter-spacing: 0.08em; }
 .navhud.alert { background: var(--red); border-bottom-color: #000; }
 .navhud.alert .navhud-icon, .navhud.alert .navhud-text i, .navhud.alert .navhud-text b { color: #000; }
+.navhud-tag { margin-left: auto; font-size: 9px; letter-spacing: 0.1em; color: var(--dim); flex: none; }
+.navhud.alert .navhud-tag { color: #000; opacity: 0.65; }
 
 /* inspector */
 .topdown-wrap { position: relative; }
@@ -261,6 +263,7 @@ input:disabled { opacity: 0.5; }
   .navhud { padding: 10px 16px; gap: 10px; }
   .navhud-icon { font-size: 24px; width: 28px; }
   .navhud-text b { font-size: 13px; }
+  .navhud-tag { display: none; }
 }
 
 /* Touch devices: no blue tap-flash, no 300ms tap delay */

@@ -48,6 +48,9 @@ export function NavHud({ analysis }: { analysis: Analysis | null }) {
         <b>{i.text}</b>
         <i>{i.sub}</i>
       </span>
+      {/* Not Nav2 turn-by-turn guidance - a local path preview over the same grid the ground
+          map draws (see the module docstring above). Labelled so it can't be read as more. */}
+      <span className="navhud-tag">LOCAL PATH PREVIEW</span>
     </div>
   )
 }

@@ -9,6 +9,10 @@ export interface RosOptions {
   infoTopic: string
 }
 
+// Fixed by architecture.md/interfaces.md (Dev 2's contract), not a per-robot setting like the
+// image/CameraInfo topics: Dev 2 publishes this at 20 Hz, false at startup and on any failure.
+const POSE_VALID_TOPIC = '/ugv/pose_valid'
+
 export interface GoalPose {
   x: number
   y: number
@@ -34,6 +38,10 @@ export interface RosCallbacks {
   onReady?: (sendGoal: SendGoal) => void
   // Action feedback/result for a sent goal, if the connected rosbridge/Nav2 reports it.
   onGoalUpdate?: (text: string) => void
+  // Dev 2's localization health heartbeat (architecture.md §10.1 / interfaces.md). A localized
+  // goal must not be sent while this is false or missing - archV1.md §9/§11 requires a valid
+  // reference pose before the conversion to a map-frame goal means anything.
+  onPoseValid?: (valid: boolean) => void
 }
 
 function isValidK(k: unknown): k is number[] {
@@ -86,6 +94,7 @@ export function connectRos(opts: RosOptions, cb: RosCallbacks): () => void {
         throttle_rate: 200, queue_length: 1,
       }))
       ws?.send(JSON.stringify({ op: 'subscribe', topic: opts.infoTopic, type: 'sensor_msgs/msg/CameraInfo' }))
+      ws?.send(JSON.stringify({ op: 'subscribe', topic: POSE_VALID_TOPIC, type: 'std_msgs/msg/Bool' }))
       cb.onReady?.((pose) => ws && sendNavigateToPoseGoal(ws, pose))
     }
 
@@ -119,7 +128,10 @@ export function connectRos(opts: RosOptions, cb: RosCallbacks): () => void {
       }
       if (m.op !== 'publish') return
 
-      if (m.topic === opts.infoTopic) {
+      if (m.topic === POSE_VALID_TOPIC) {
+        const msg = m.msg
+        if (msg && typeof msg === 'object' && typeof msg.data === 'boolean') cb.onPoseValid?.(msg.data)
+      } else if (m.topic === opts.infoTopic) {
         const msg = m.msg
         if (!msg || typeof msg !== 'object') return
         const width = typeof msg.width === 'number' && Number.isFinite(msg.width) ? msg.width : 0

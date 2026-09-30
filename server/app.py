@@ -55,13 +55,14 @@ def analyze(
     image = Image.open(io.BytesIO(file.file.read())).convert("RGB")
     k = np.array([[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]], dtype=np.float64)
 
-    mask, confidence, valid, degraded, seg_ms = models.run_segmentation(image, OUT_W, OUT_H, streaming=streaming)
+    # confidence is computed by the real port (gating already applied) but no UI client reads
+    # it yet, so it isn't serialized - avoids an unused ~GW*GH*4-byte payload every request.
+    mask, _confidence, valid, degraded, seg_ms = models.run_segmentation(image, OUT_W, OUT_H, streaming=streaming)
     depth, depth_ms = models.run_depth(image, OUT_W, OUT_H, k)
 
     return {
         "width": OUT_W, "height": OUT_H,
         "mask_b64": base64.b64encode(mask.tobytes()).decode("ascii"),
-        "confidence_b64": base64.b64encode(confidence.tobytes()).decode("ascii"),
         "depth_b64": base64.b64encode(depth.tobytes()).decode("ascii"),
         "valid": valid, "degraded": degraded,
         "seg_model": SEG_MODEL, "depth_model": DEPTH_MODEL,
