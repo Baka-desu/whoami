@@ -5,27 +5,28 @@ type Mode = 'bearing' | 'coords'
 interface Props {
   connected: boolean
   status: string
-  onSend: (x: number, y: number, yawRad: number) => void
+  // fwd/left in metres in the start pose's frame (x forward, y left, REP-103), relYaw relative to its heading
+  onSend: (fwd: number, left: number, relYawRad: number) => void
   // Gates sending on Dev 2's pose-valid heartbeat and the shared freshness clock, not just the
   // socket being open (archV1.md §9/§11: no Nav2 use of the reference pose without a valid one).
   canSend: boolean
   blockedReason: string
+  hasStart: boolean
+  canSetStart: boolean
+  onSetStart: () => void
 }
 
-// V1 "localized goal" (archV1.md): a destination relative to the start pose, e.g. "50 m at 20 deg
-// east of north" - no GPS, the destination need not be visible beforehand. Bearing is standard
-// compass convention (0=N, 90=E, clockwise) converted to the map frame's ENU axes (x=East,
-// y=North, REP-103); the robot is pointed along the travel direction on arrival.
+// V1 "localized goal" (archV1.md §9): a destination relative to a mission reference pose, e.g.
+// "50 m at 20 deg from the starting pose" - no GPS, the destination need not be visible
+// beforehand. The reference pose is frozen from Dev 2's live map->base_link TF (SET START, only
+// while /ugv/pose_valid is true); the goal is then converted into a single `map`-frame
+// PoseStamped and sent to Nav2's /navigate_to_pose. Bearing is clockwise from the start heading;
+// coordinates are x forward / y left in the start pose's frame.
 //
-// Known gap vs archV1.md §5.1/§9: the {range,bearing}->map-frame conversion is owned by Dev 2,
-// who freezes a reference pose in `map` at mission start and does the conversion there - Dev 2
-// does not consume the mask and does not call Nav2. There is no rosbridge topic/service in
-// interfaces.md yet for the UI to hand a raw {range,bearing} mission to that conversion, so this
-// panel does the conversion itself and sends a PoseStamped goal directly. That is a UI-side
-// stand-in, not the archV1.md-conformant path; canSend/blockedReason (Dev 2's /ugv/pose_valid +
-// the shared freshness clock) is the safety net this panel *can* enforce without inventing a new
-// cross-team contract.
-export function GoalPanel({ connected, status, onSend, canSend, blockedReason }: Props) {
+// Dev 2 exposes no mission service (interfaces.md), so the freeze + conversion happen in this UI,
+// using only Dev 2's published outputs (/tf, /ugv/pose_valid). If Dev 2 later adds a reference-pose
+// service, replace setStart/convert in App.tsx with a call to it.
+export function GoalPanel({ connected, status, onSend, canSend, blockedReason, hasStart, canSetStart, onSetStart }: Props) {
   const [mode, setMode] = useState<Mode>('bearing')
   const [distance, setDistance] = useState('50')
   const [bearing, setBearing] = useState('20')
@@ -35,21 +36,28 @@ export function GoalPanel({ connected, status, onSend, canSend, blockedReason }:
   const d = Number(distance), b = Number(bearing), gx = Number(x), gy = Number(y)
   const valid = mode === 'bearing' ? Number.isFinite(d) && d > 0 && Number.isFinite(b) : Number.isFinite(gx) && Number.isFinite(gy)
 
-  let goalX = 0, goalY = 0, yawRad = 0
+  let fwd = 0, left = 0, relYaw = 0
   if (mode === 'bearing' && valid) {
-    const rad = ((90 - b) * Math.PI) / 180 // compass bearing -> ENU angle from +X (East)
-    goalX = d * Math.cos(rad)
-    goalY = d * Math.sin(rad)
-    yawRad = rad
+    const rad = (b * Math.PI) / 180 // clockwise from start heading
+    fwd = d * Math.cos(rad)
+    left = -d * Math.sin(rad)
+    relYaw = -rad
   } else if (valid) {
-    goalX = gx
-    goalY = gy
-    yawRad = Math.atan2(gy, gx)
+    fwd = gx
+    left = gy
+    relYaw = Math.atan2(gy, gx)
   }
 
   return (
     <section className="section">
       <h3>Goal</h3>
+      <button className="btn" disabled={!canSetStart} onClick={onSetStart} style={{ width: '100%', marginBottom: 12 }}>
+        {hasStart ? 'RESET START POSE' : 'SET START POSE'}
+      </button>
+      <p className="dim" style={{ marginTop: 0, marginBottom: 12 }}>
+        {hasStart ? 'Start pose frozen in map frame.' : 'Freeze the reference pose first (needs a valid pose).'}
+      </p>
+
       <div className="tabs">
         <button className={mode === 'bearing' ? 'on' : ''} onClick={() => setMode('bearing')}>DISTANCE + BEARING</button>
         <button className={mode === 'coords' ? 'on' : ''} onClick={() => setMode('coords')}>LOCAL X / Y</button>
@@ -60,34 +68,35 @@ export function GoalPanel({ connected, status, onSend, canSend, blockedReason }:
           <label>Distance from start (m)
             <input inputMode="decimal" value={distance} onChange={(e) => setDistance(e.target.value)} />
           </label>
-          <label>Bearing (° from North, clockwise — 90 = East)
+          <label>Bearing (° clockwise from start heading)
             <input inputMode="decimal" value={bearing} onChange={(e) => setBearing(e.target.value)} />
           </label>
         </div>
       ) : (
         <div className="stack">
-          <label>X, east of start (m)
+          <label>X, forward of start (m)
             <input inputMode="decimal" value={x} onChange={(e) => setX(e.target.value)} />
           </label>
-          <label>Y, north of start (m)
+          <label>Y, left of start (m)
             <input inputMode="decimal" value={y} onChange={(e) => setY(e.target.value)} />
           </label>
         </div>
       )}
 
       <p className="dim">
-        {valid ? `→ map frame x=${goalX.toFixed(1)} m, y=${goalY.toFixed(1)} m` : 'enter a valid distance/bearing or x/y'}
+        {valid ? `→ start frame: ${fwd.toFixed(1)} m forward, ${left.toFixed(1)} m left` : 'enter a valid distance/bearing or x/y'}
       </p>
 
       <button
         className="btn primary"
         disabled={!connected || !valid || !canSend}
-        onClick={() => onSend(goalX, goalY, yawRad)}
+        onClick={() => onSend(fwd, left, relYaw)}
         style={{ marginTop: 10, width: '100%' }}
       >
         SEND GOAL
       </button>
       {!connected && <p className="dim">Connect to ROS 2 first — this calls /navigate_to_pose on that connection.</p>}
+      {connected && !hasStart && <p className="dim">Set the start pose before sending a goal.</p>}
       {connected && blockedReason && <p className="dim">Blocked: {blockedReason} — sending a goal now could drive on an unsafe reference pose.</p>}
       {status && <p className="dim">{status}</p>}
     </section>

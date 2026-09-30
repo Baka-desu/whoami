@@ -13,6 +13,31 @@ export interface RosOptions {
 // image/CameraInfo topics: Dev 2 publishes this at 20 Hz, false at startup and on any failure.
 const POSE_VALID_TOPIC = '/ugv/pose_valid'
 
+export interface Pose2D {
+  x: number
+  y: number
+  yaw: number
+  receivedAt: number
+}
+
+interface Tf2D { x: number; y: number; yaw: number }
+
+const normFrame = (f: unknown) => (typeof f === 'string' ? f.replace(/^\//, '') : '')
+
+function parseTf(t: any): Tf2D | null {
+  const tr = t?.transform?.translation
+  const q = t?.transform?.rotation
+  if (!tr || !q) return null
+  const v = [tr.x, tr.y, q.x, q.y, q.z, q.w]
+  if (!v.every((n) => typeof n === 'number' && Number.isFinite(n))) return null
+  return { x: tr.x, y: tr.y, yaw: Math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z)) }
+}
+
+function composeTf(a: Tf2D, b: Tf2D): Tf2D {
+  const c = Math.cos(a.yaw), s = Math.sin(a.yaw)
+  return { x: a.x + c * b.x - s * b.y, y: a.y + s * b.x + c * b.y, yaw: a.yaw + b.yaw }
+}
+
 export interface GoalPose {
   x: number
   y: number
@@ -42,6 +67,9 @@ export interface RosCallbacks {
   // goal must not be sent while this is false or missing - archV1.md §9/§11 requires a valid
   // reference pose before the conversion to a map-frame goal means anything.
   onPoseValid?: (valid: boolean) => void
+  // map -> base_link, composed from Dev 2's /tf (map->odom from RTAB-Map, odom->base_link from
+  // the odom selector). Used to freeze the mission reference pose (archV1.md §9).
+  onBasePose?: (pose: Pose2D) => void
 }
 
 function isValidK(k: unknown): k is number[] {
@@ -61,6 +89,8 @@ export function connectRos(opts: RosOptions, cb: RosCallbacks): () => void {
   let reconnectTimer: number | undefined
   let reconnectAttempts = 0
 
+  let mapOdom: Tf2D | null = null
+  let odomBase: Tf2D | null = null
   let latestProcessedStamp = -Infinity
   let latestDispatchedSeq = 0
   let msgSeq = 0
@@ -95,6 +125,7 @@ export function connectRos(opts: RosOptions, cb: RosCallbacks): () => void {
       }))
       ws?.send(JSON.stringify({ op: 'subscribe', topic: opts.infoTopic, type: 'sensor_msgs/msg/CameraInfo' }))
       ws?.send(JSON.stringify({ op: 'subscribe', topic: POSE_VALID_TOPIC, type: 'std_msgs/msg/Bool' }))
+      ws?.send(JSON.stringify({ op: 'subscribe', topic: '/tf', type: 'tf2_msgs/msg/TFMessage', throttle_rate: 100 }))
       cb.onReady?.((pose) => ws && sendNavigateToPoseGoal(ws, pose))
     }
 
@@ -128,7 +159,18 @@ export function connectRos(opts: RosOptions, cb: RosCallbacks): () => void {
       }
       if (m.op !== 'publish') return
 
-      if (m.topic === POSE_VALID_TOPIC) {
+      if (m.topic === '/tf') {
+        const list = Array.isArray(m.msg?.transforms) ? m.msg.transforms : []
+        for (const t of list) {
+          const parent = normFrame(t?.header?.frame_id)
+          const child = normFrame(t?.child_frame_id)
+          const tf = parseTf(t)
+          if (!tf) continue
+          if (parent === 'map' && child === 'odom') mapOdom = tf
+          else if (parent === 'odom' && child === 'base_link') odomBase = tf
+        }
+        if (mapOdom && odomBase) cb.onBasePose?.({ ...composeTf(mapOdom, odomBase), receivedAt: Date.now() })
+      } else if (m.topic === POSE_VALID_TOPIC) {
         const msg = m.msg
         if (msg && typeof msg === 'object' && typeof msg.data === 'boolean') cb.onPoseValid?.(msg.data)
       } else if (m.topic === opts.infoTopic) {

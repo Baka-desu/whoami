@@ -7,7 +7,7 @@ import { SourcePanel } from './components/SourcePanel'
 import { TopBar } from './components/TopBar'
 import { Viewport } from './components/Viewport'
 import { openCamera } from './source/camera'
-import { connectRos, type CameraCalibration, type RosOptions, type SendGoal } from './source/rosbridge'
+import { connectRos, type CameraCalibration, type Pose2D, type RosOptions, type SendGoal } from './source/rosbridge'
 import {
   assumedIntrinsics, type Analysis, type FrameMeta, type Intrinsics, type Layers, type SourceKind, type Status,
 } from './types'
@@ -39,6 +39,10 @@ export default function App() {
   // Dev 2's localization heartbeat (interfaces.md): false at startup and on any failure. A
   // localized goal must never be sent while this is false (archV1.md §9/§11).
   const [poseValid, setPoseValid] = useState(false)
+  // Mission reference pose in `map` (archV1.md §9): frozen from Dev 2's TF when the operator sets
+  // the start; goals are expressed relative to it, never to wherever the robot is later.
+  const basePose = useRef<Pose2D | null>(null)
+  const [startPose, setStartPose] = useState<Pose2D | null>(null)
   const freshness = useFreshness(analysis)
   const [backendOnline, setBackendOnline] = useState(false)
   // ingest must stay a stable callback (the live-camera effect depends on it), so the backend's
@@ -200,8 +204,13 @@ export default function App() {
       onReady: (send) => { goalSender.current = send },
       onGoalUpdate: setGoalStatus,
       onPoseValid: setPoseValid,
+      onBasePose: (p) => { basePose.current = p },
     })
-    return () => { goalSender.current = null; setRosConnected(false); setPoseValid(false); disconnect() }
+    return () => {
+      goalSender.current = null; basePose.current = null
+      setRosConnected(false); setPoseValid(false); setStartPose(null)
+      disconnect()
+    }
     // rosCfg is locked while connected
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rosOn, ingest])
@@ -221,10 +230,28 @@ export default function App() {
   const goalBlockedReason = !rosConnected ? '' : !poseValid ? 'pose not valid yet' : freshness && !freshness.ok ? freshness.label.toLowerCase() : ''
   const canSendGoal = rosConnected && !goalBlockedReason
 
-  const sendGoal = (x: number, y: number, yawRad: number) => {
-    if (!goalSender.current || !canSendGoal) return
+  const POSE_MAX_AGE_MS = 1000
+
+  const setStart = () => {
+    const p = basePose.current
+    if (!poseValid) return setGoalStatus('cannot set start: pose not valid')
+    if (!p || Date.now() - p.receivedAt > POSE_MAX_AGE_MS) return setGoalStatus('cannot set start: no fresh map->base_link TF')
+    setStartPose(p)
+    setGoalStatus('')
+  }
+
+  // fwd/left are metres in the start pose's frame (x forward, y left); relYaw is relative to its heading.
+  const sendGoal = (fwd: number, left: number, relYaw: number) => {
+    const ref = startPose
+    if (!goalSender.current || !canSendGoal || !ref) return
+    const c = Math.cos(ref.yaw), s = Math.sin(ref.yaw)
     setGoalStatus('goal sent, waiting for feedback...')
-    goalSender.current({ x, y, yawRad, frameId: 'map' })
+    goalSender.current({
+      x: ref.x + c * fwd - s * left,
+      y: ref.y + s * fwd + c * left,
+      yawRad: ref.yaw + relYaw,
+      frameId: 'map',
+    })
   }
 
   return (
@@ -236,7 +263,8 @@ export default function App() {
         live={live} onLive={setLiveCamera} onPhoto={takePhoto} onUpload={upload}
         rosCfg={rosCfg} onRosCfg={setRosCfg} rosOn={rosOn} onRosOn={toggleRos}
         rosConnected={rosConnected} goalStatus={goalStatus} onSendGoal={sendGoal}
-        canSendGoal={canSendGoal} goalBlockedReason={goalBlockedReason}
+        canSendGoal={canSendGoal && !!startPose} goalBlockedReason={goalBlockedReason}
+        hasStart={!!startPose} canSetStart={rosConnected && poseValid} onSetStart={setStart}
       />
       <Viewport frame={frame} analysis={analysis} layers={layers} freshness={freshness} />
       <Inspector analysis={analysis} freshness={freshness} />
