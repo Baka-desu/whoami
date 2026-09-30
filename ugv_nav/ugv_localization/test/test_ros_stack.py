@@ -6,7 +6,7 @@ exact-stamp sync, TF ownership) — not RTAB-Map accuracy. Inputs mimic the team
          /wheel/odom (no TF), /tf_static base_link -> camera_optical
   Dev 1  /perception/depth_cloud PointCloud2 (x/y/z float32 m, unorganized, sky dropped, back-projected
          with the raw K; source image stamp + optical frame) — exactly turing node/cloud.py's format.
-         depth_input:=image variant: a 32FC1 depth image (sim ground-truth depth camera path).
+         depth_input:=image (default): Dev 1 af7ebbf /perception/depth/image, 32FC1 m, NaN holes, RGB stamp.
 Skipped unless ROS 2 + rtabmap_ros + an installed ugv_localization are available (colcon test).
 The scene is a static random texture at 3 m: synthetic test input, not a product calibration.
 """
@@ -36,7 +36,7 @@ from nav_msgs.msg import OccupancyGrid, Odometry  # noqa: E402
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data  # noqa: E402
 from rtabmap_msgs.msg import Info, RGBDImage  # noqa: E402
 from sensor_msgs.msg import CameraInfo, Image, PointCloud2, PointField  # noqa: E402
-from std_msgs.msg import Bool, String  # noqa: E402
+from std_msgs.msg import Bool, Float64, String  # noqa: E402
 from tf2_msgs.msg import TFMessage  # noqa: E402
 
 _W, _H, _FRAME = 320, 240, "camera_optical"
@@ -77,14 +77,13 @@ class Stack:
                 "ros2", "launch", "ugv_localization", "localization.launch.py",
                 "mode:=mapping", "fresh_db:=true", f"odom_source:={odom_source}", "profile:=live_cam",
                 f"database_path:={tmp / 'rtabmap.db'}", f"depth_input:={depth_input}",
-                "depth_topic:=/camera/depth/image_raw",
             ],
             env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, start_new_session=True,
         )
         n = self.node
         self.pub_img = n.create_publisher(Image, "/camera/image_raw", _BEST_EFFORT)
         self.pub_info = n.create_publisher(CameraInfo, "/camera/camera_info", _BEST_EFFORT)
-        self.pub_depth = n.create_publisher(Image, "/camera/depth/image_raw", 5)
+        self.pub_depth = n.create_publisher(Image, "/perception/depth/image", 10)  # Dev 1 af7ebbf: reliable, 10
         self.pub_cloud = n.create_publisher(PointCloud2, "/perception/depth_cloud", 10)  # Dev 1: reliable, depth 10
         self.pub_wheel = n.create_publisher(Odometry, "/wheel/odom", 20)
         static = n.create_publisher(TFMessage, "/tf_static", _LATCHED)
@@ -94,7 +93,7 @@ class Stack:
         t.transform.translation.z = 0.5
         t.transform.rotation.x, t.transform.rotation.y, t.transform.rotation.z, t.transform.rotation.w = -0.5, 0.5, -0.5, 0.5
         static.publish(TFMessage(transforms=[t]))
-        self.seen: dict[str, list] = {k: [] for k in ("rgbd", "info", "odom", "vo", "map", "valid", "status", "source", "tf")}
+        self.seen: dict[str, list] = {k: [] for k in ("rgbd", "info", "odom", "vo", "map", "valid", "status", "source", "tf", "dist", "basis")}
         n.create_subscription(RGBDImage, "/rtabmap/rgbd_image", self.seen["rgbd"].append, qos_profile_sensor_data)
         n.create_subscription(Info, "/rtabmap/info", self.seen["info"].append, 10)
         n.create_subscription(Odometry, "/odom", self.seen["odom"].append, 20)
@@ -103,6 +102,8 @@ class Stack:
         n.create_subscription(Bool, "/ugv/pose_valid", lambda m: self.seen["valid"].append(m.data), 50)
         n.create_subscription(String, "/ugv/localization_status", lambda m: self.seen["status"].append(m.data), 10)
         n.create_subscription(String, "/ugv/localization/odom_source", lambda m: self.seen["source"].append(m.data), _LATCHED)
+        n.create_subscription(Float64, "/ugv/localization/distance_travelled", lambda m: self.seen["dist"].append(m.data), 20)
+        n.create_subscription(String, "/ugv/localization/distance_basis", lambda m: self.seen["basis"].append(m.data), _LATCHED)
         n.create_subscription(
             TFMessage, "/tf", lambda m: self.seen["tf"].extend((x.header.frame_id, x.child_frame_id) for x in m.transforms), 100
         )
@@ -169,7 +170,8 @@ class Stack:
 
 @pytest.fixture
 def stack(tmp_path: Path, request):
-    s = Stack(tmp_path, "auto", request.param)
+    odom_source, depth_input = request.param if isinstance(request.param, tuple) else ("auto", request.param)
+    s = Stack(tmp_path, odom_source, depth_input)
     yield s
     log = s.close()
     (tmp_path / "launch.log").write_text(log, encoding="utf-8")
@@ -208,3 +210,24 @@ def test_x1_full_stack_endpoints_auto(stack: Stack) -> None:
     # Dev 1 depth stops → fail closed
     assert stack.run(10.0, wheel=False, depth=False, until=lambda: not seen["valid"][-1] and any(
         "depth_stale" in s for s in seen["status"][-3:])), seen["status"][-5:]
+
+
+@pytest.mark.parametrize("stack", [("visual", "image")], indirect=True)
+def test_x2_visual_only_no_wheel_sensor(stack: Stack) -> None:
+    """No /wheel/odom ever: camera + DA3 depth alone must give odom, the full TF chain and a valid pose."""
+    seen = stack.seen
+    ok = stack.run(
+        60.0,
+        wheel=False,
+        until=lambda: seen["vo"] and seen["odom"] and ("odom", "base_link") in seen["tf"]
+        and ("map", "odom") in seen["tf"] and seen["map"] and seen["valid"] and seen["valid"][-1],
+    )
+    assert seen["source"] and set(seen["source"]) == {"visual"}, seen["source"]
+    assert seen["odom"] and seen["odom"][-1].header.frame_id == "odom", "no /odom from visual odometry"
+    assert ("odom", "base_link") in seen["tf"] and ("map", "odom") in seen["tf"], set(seen["tf"])
+    assert ok, f"pose never valid without wheel odom; statuses={seen['status']}"
+    # distance_tracker is wired to the real /odom: heartbeat up; parked robot → nothing counted, label says so
+    assert seen["dist"] and max(seen["dist"]) == 0.0, seen["dist"][-5:]
+    assert seen["basis"] == ["none"], seen["basis"]
+    # visual odometry is the only source: losing depth stops odometry → fail closed
+    assert stack.run(10.0, wheel=False, depth=False, until=lambda: not seen["valid"][-1]), seen["status"][-5:]

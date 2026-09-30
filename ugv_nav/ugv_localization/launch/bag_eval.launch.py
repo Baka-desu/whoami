@@ -5,8 +5,8 @@
 The bag must NOT contain /tf odom->base_link or map->odom (we regenerate them), nor /clock
 (`ros2 bag play --clock` publishes it; a recorded /clock would fight it). Record with
 scripts/record_eval_bag.sh, which keeps only /tf_static for sensor extrinsics.
-Replay DA3 (depth_input:=cloud, default) or the sim ground-truth depth camera
-(depth_input:=image depth_topic:=<gt depth topic>) from the same bag.
+Replay DA3 depth (default: depth_input:=image on /perception/depth/image), the DA3 cloud
+(depth_input:=cloud) or the sim ground-truth depth camera (depth_topic:=<gt depth topic>).
 """
 
 from __future__ import annotations
@@ -47,14 +47,14 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("bag", description="path to rosbag2 directory"),
             DeclareLaunchArgument("rate", default_value="1.0"),
             DeclareLaunchArgument("mode", default_value="mapping"),
-            DeclareLaunchArgument("odom_source", default_value="auto", description="auto | wheel | visual"),
+            DeclareLaunchArgument("odom_source", default_value="visual", description="visual | auto | wheel"),
             DeclareLaunchArgument("database_path", default_value="~/.ros/ugv/eval_rtabmap.db"),
             DeclareLaunchArgument("fresh_db", default_value="true"),
             DeclareLaunchArgument("image_topic", default_value="/camera/image_raw"),
             DeclareLaunchArgument("camera_info_topic", default_value="/camera/camera_info"),
-            DeclareLaunchArgument("depth_input", default_value="cloud", description="cloud | image"),
+            DeclareLaunchArgument("depth_input", default_value="image", description="image | cloud"),
             DeclareLaunchArgument("depth_cloud_topic", default_value="/perception/depth_cloud"),
-            DeclareLaunchArgument("depth_topic", default_value="/camera/depth/image_raw"),
+            DeclareLaunchArgument("depth_topic", default_value="/perception/depth/image"),
             DeclareLaunchArgument("wheel_odom_topic", default_value="/wheel/odom"),
             localization,
             # Give nodes time to subscribe before the first message is played.

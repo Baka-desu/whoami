@@ -28,7 +28,7 @@ from nav_msgs.msg import Odometry  # noqa: E402
 from rclpy.qos import DurabilityPolicy, QoSProfile  # noqa: E402
 from rtabmap_msgs.msg import Info  # noqa: E402
 from sensor_msgs.msg import CameraInfo, Image  # noqa: E402
-from std_msgs.msg import Bool, String  # noqa: E402
+from std_msgs.msg import Bool, Float64, String  # noqa: E402
 from std_srvs.srv import Empty  # noqa: E402
 from tf2_msgs.msg import TFMessage  # noqa: E402
 
@@ -382,3 +382,38 @@ def test_n12_camera_info_to_yaml_refuses_fake_k_and_overwrite(h: Harness, tmp_pa
     assert h.spin(10.0, until=lambda: p2.poll() is not None)
     assert p2.returncode == 1 and "--force" in _output(p2)
     assert yaml.safe_load(out.read_text(encoding="utf-8")) == "existing"
+
+
+# ------------------------------------------------------------------------------ distance_tracker
+def test_n13_distance_tracker_counts_labels_and_resets(h: Harness) -> None:
+    proc = h.start(
+        "ugv_localization.nodes.distance_tracker",
+        "--ros-args", "-p", f"profile_path:={_CFG / 'distance.yaml'}", "-r", "odom:=/odom",  # launch remap
+    )
+    total: list[float] = []
+    basis: list[str] = []
+    h.node.create_subscription(Float64, "/ugv/localization/distance_travelled", lambda m: total.append(m.data), 20)
+    h.node.create_subscription(String, "/ugv/localization/distance_basis", lambda m: basis.append(m.data), _LATCHED)
+    h.node.create_publisher(String, "/ugv/localization/odom_source", _LATCHED).publish(String(data="visual"))
+    odom = h.node.create_publisher(Odometry, "/odom", 20)
+    assert h.spin(15.0, until=lambda: bool(total) and basis == ["none"])  # up, heartbeat, nothing counted
+    assert total[-1] == 0.0
+
+    x = [0.0]
+
+    def drive() -> None:  # 5 cm per 50 ms = 1 m/s along x, real stamps
+        x[0] += 0.05
+        odom.publish(_odom(h, "odom", x[0]))
+
+    assert h.spin(20.0, each=drive, until=lambda: total and total[-1] >= 1.0), total[-3:]
+    assert basis[-1] == "visual_odometry_estimate"
+    assert total[-1] <= x[0] + 1e-6  # never more than driven
+
+    reset = h.node.create_client(Empty, "/ugv/localization/reset_distance")
+    assert reset.wait_for_service(timeout_sec=5.0)
+    fut = reset.call_async(Empty.Request())
+    assert h.spin(5.0, until=fut.done)
+    n = len(total)
+    assert h.spin(5.0, until=lambda: len(total) > n and total[-1] == 0.0), total[-3:]
+    assert basis[-1] == "none"
+    assert proc.poll() is None, _output(proc)

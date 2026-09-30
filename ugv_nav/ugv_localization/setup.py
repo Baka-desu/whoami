@@ -28,6 +28,7 @@ setup(
         "console_scripts": [
             "odom_selector = ugv_localization.nodes.odom_selector:main",
             "pose_validity_node = ugv_localization.nodes.pose_validity_node:main",
+            "distance_tracker = ugv_localization.nodes.distance_tracker:main",
             "tf_rate_check = ugv_localization.nodes.tf_rate_check:main",
             "drift_eval = ugv_localization.nodes.drift_eval:main",
             "depth_eval = ugv_localization.nodes.depth_eval:main",

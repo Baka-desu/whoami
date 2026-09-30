@@ -11,12 +11,12 @@ Dev 2 does **not** own the camera (Dev 5), does **not** run the depth network (D
 perception mask (§5), and does **not** plan (Dev 4).
 
 Sensor (2026-09-28, D7): **one mono camera; depth comes from Depth Anything 3 Metric Large**, run by Dev 1 and
-published as a point cloud, which Dev 2 converts back to a depth image. RTAB-Map runs in **RGB-D mode** on camera
-RGB + DA3 depth. Odometry is switchable (D5b).
+published as a 32FC1 depth image (`/perception/depth/image`; the point cloud is a fallback). RTAB-Map runs in
+**RGB-D mode** on camera RGB + DA3 depth. Odometry is switchable (D5b).
 
 ```
 Dev 5 camera ── Image + CameraInfo ─────────────┬──────────────────────────────┐
-Dev 1 DA3   ── /perception/depth_cloud ─► cloud_to_depth ── /rtabmap/depth/image ─┤
+Dev 1 DA3   ── /perception/depth/image (32FC1) ─┤   (fallback: /perception/depth_cloud ─► cloud_to_depth)
                                                 ▼                              │
                   rgbd_sync ── /rtabmap/rgbd_image (exact stamps)              │
                       │                     │                                  │
@@ -28,10 +28,13 @@ Dev 5 /wheel/odom ──► odom_selector ── odom->base_link TF + /odom     
                            │ /ugv/localization/odom_source                     │
                            ▼                                                   ▼
                       pose_validity_node ── /ugv/pose_valid (20 Hz heartbeat, fail closed) → Dev 5
+                      distance_tracker ──── /ugv/localization/distance_travelled (+ distance_basis label)
 ```
 
-`odom_source:=auto` (default) uses wheel odom while it is alive and falls back to visual odometry when it is not;
-`wheel` and `visual` force one source. The selector re-anchors on every switch, so `odom` never jumps.
+`odom_source:=visual` (default since 2026-09-29 — there is no wheel sensor yet) takes odometry from the camera alone
+(RTAB-Map `rgbd_odometry` on RGB + DA3 depth); **no wheel odometry is needed**. `auto` uses wheel odom when it exists and
+falls back to visual; `wheel` forces wheel. The selector re-anchors on every switch, so `odom` never jumps.
+Don't feed simulated wheel odom alongside real images: the two motions won't agree.
 
 ## Laws
 
@@ -56,13 +59,14 @@ Dev 5 /wheel/odom ──► odom_selector ── odom->base_link TF + /odom     
 | L6 | TF rate/jitter check | `tfcheck/`, `nodes/tf_rate_check.py` | **runs** (odom->base_link); map->odom needs camera |
 | L7 | Bag harness | `launch/bag_eval.launch.py`, `scripts/record_eval_bag.sh` | written (records DA3 + GT depth, no `/clock`); needs a recorded bag |
 | L8 | Drift + depth metrics | `drift/`, `depth/metrics.py`, `tools/drift_report.py`, `nodes/drift_eval.py`, `nodes/depth_eval.py` | kernels **tested**; nodes need GT + map->odom / GT depth |
+| L5b | Distance travelled (odometry estimate) | `odom/distance.py`, `nodes/distance_tracker.py`, `config/distance.yaml` | kernel **tested**; node **tested over ROS** (count, label, reset) |
 | L9 | Sensor honesty numbers | [SENSOR_HONESTY.md](SENSOR_HONESTY.md) | protocol written; **no numbers until sim runs** |
 
-Blockers: **Dev 1** DA3 weights exported (the cloud publisher exists but only starts when the IR is present),
+Blockers: **Dev 1** DA3 weights exported + `af7ebbf` (depth image) merged — publishers only start when the IR is present,
 **Dev 5** sim camera + GT depth camera + `/wheel/odom` + ground truth.
-Until DA3 publishes, bring up on the sim ground-truth depth camera: `depth_input:=image depth_topic:=<sim depth topic>`.
+Until DA3 publishes, bring up on the sim ground-truth depth camera: `depth_topic:=<sim depth topic>`.
 
-Tests: 225 under `colcon test` — kernels, every node over ROS (`test_ros_nodes.py`), and the full launch with real RTAB-Map on synthetic sensors (`test_ros_stack.py`). See ENVIRONMENT.md.
+Tests: 244 under `colcon test` — kernels, every node over ROS (`test_ros_nodes.py`), and the full launch with real RTAB-Map on synthetic sensors (`test_ros_stack.py`). See ENVIRONMENT.md.
 
 ## Run the tests (no ROS needed)
 
@@ -84,6 +88,8 @@ ros2 launch ugv_localization localization.launch.py mode:=localize profile:=sim 
 ros2 topic echo /ugv/pose_valid
 ros2 topic echo /ugv/localization_status
 ros2 topic echo /ugv/localization/odom_source
+ros2 topic echo /ugv/localization/distance_travelled   # estimate; see distance_basis
+ros2 service call /ugv/localization/reset_distance std_srvs/srv/Empty
 ros2 run ugv_localization tf_rate_check --ros-args -p use_sim_time:=true
 ros2 run tf2_ros tf2_echo map base_link
 ```
