@@ -11,10 +11,10 @@
 | D3 | Test data | **Dev 5 Gazebo sim camera = main focus**; real-world later. Sim also provides a GT depth camera for DA3 accuracy + bring-up | User. Sim/bag = eval profiles (§4), not product proof |
 | D4 | Layout | **Architecture §7**: `ugv_nav/ugv_localization/`, `ugv_nav/config/cameras/`, `ugv_nav/docs/` | User |
 | D5 | Metric scale | ~~Wheel odometry from Dev 5~~ → superseded by D5b | User 2026-09-23 |
-| D5b | Odometry | **Switchable `odom_source:=auto|wheel|visual`** (default `auto`): wheel odom (Dev 5) when available, else RTAB-Map `rgbd_odometry` on RGB + DA3 depth. `odom_selector` re-anchors on every switch so `odom` never jumps | User 2026-09-28 |
+| D5b | Odometry | **Switchable `odom_source:=visual|auto|wheel`** — default **`visual`** since 2026-09-29 (no wheel sensor; simulated wheel odom + real images would disagree). Previously default `auto`: wheel odom (Dev 5) when available, else RTAB-Map `rgbd_odometry` on RGB + DA3 depth. `odom_selector` re-anchors on every switch so `odom` never jumps | User 2026-09-28 |
 | D6 | TF ownership | **Dev 2 owns full `map->odom->base_link`**. Only `odom_selector` publishes `odom->base_link`; `rgbd_odometry` runs `publish_tf:=false`; Dev 5 publishes `/wheel/odom` topic only (no TF) | User. Architecture silent → dev.md §3 contract applies |
 | D7 | SLAM mode | **RGB-D only.** RTAB-Map subscribes to one `rgbd_sync` RGBDImage (camera RGB + DA3 depth, exact stamps). `rtabmap_mono.yaml` deleted; **no mono fallback** — without depth Dev 2 holds (`depth_missing`) | User 2026-09-28 |
-| D8 | Depth source | **Dev 1 publishes the DA3 point cloud** `/perception/depth_cloud` (already in his code); Dev 2 converts it to a depth image with `rtabmap_util/pointcloud_to_depthimage` (`depth_input:=cloud`, default). Exact because Dev 1 back-projects with the raw K at camera resolution and stamps with the source image stamp. Dev 2 never runs DA3. Contract: `ugv_nav/docs/localization/interfaces.md` "Depth input" | User 2026-09-29 (supersedes 2026-09-28 "Dev 1 publishes a depth image") |
+| D8 | Depth source | **Dev 1 publishes a DA3 depth image** `/perception/depth/image` (32FC1 m, NaN holes, RGB stamp + frame + size; Dev 1 `af7ebbf`) → launch default `depth_input:=image`. Fallback `depth_input:=cloud`: `/perception/depth_cloud` converted by `rtabmap_util/pointcloud_to_depthimage`. Dev 2 never runs DA3. Contract: `ugv_nav/docs/localization/interfaces.md` "Depth input" | User 2026-09-29 |
 
 ## What architecture.md says (and doesn't)
 - §2/§6: brain = "RTAB-Map VO/SLAM" — now true in RGB-D mode (DA3 depth).
@@ -24,7 +24,7 @@
 - Kill list: "mono = recommended outdoor RTAB-Map", "ORB-SLAM3 bake-off".
 
 ## Consequences
-- Dev 1's cloud only exists once the DA3 weights are fetched + exported (publisher is in his code; the IR is not in the repo).
+- Dev 1's depth image / cloud only exist once `af7ebbf` is merged and the DA3 weights are fetched + exported (the IR is not in the repo).
 - Dev 5: `/wheel/odom` with covariance + `publish_odom_tf=false`; sim GT depth camera co-located with the RGB camera; textured world; GT pose.
 - RTAB-Map produces an occupancy `/map` again (from DA3 depth) — **optional** for Dev 3.
 - `odom_source:=visual` → `odom->base_link` rate = DA3 rate; may violate the ≥ 15 Hz TF contract (CONFLICTS C9). Measure, don't fake.

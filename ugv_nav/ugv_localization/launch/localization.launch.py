@@ -1,21 +1,23 @@
 """Dev 2 localization stack: RGB + DA3 depth → RTAB-Map RGB-D, switchable odometry, pose validity.
 
     ros2 launch ugv_localization localization.launch.py mode:=mapping profile:=sim
-    ros2 launch ugv_localization localization.launch.py mode:=localize profile:=sim odom_source:=wheel
-    ros2 launch ugv_localization localization.launch.py mode:=mapping fresh_db:=true odom_source:=visual
+    ros2 launch ugv_localization localization.launch.py mode:=localize profile:=sim odom_source:=auto
+    ros2 launch ugv_localization localization.launch.py mode:=mapping fresh_db:=true   # visual odometry only
 
 Nodes:
-  cloud_to_depth Dev 1 DA3 cloud + CameraInfo → /rtabmap/depth/image      (depth_input:=cloud, default)
+  cloud_to_depth Dev 1 DA3 cloud + CameraInfo → /rtabmap/depth/image      (depth_input:=cloud, fallback only)
   rgbd_sync      camera RGB + depth image + CameraInfo → /rtabmap/rgbd_image (exact stamps)
   rgbd_odometry  visual odometry on rgbd_image → /rtabmap/odom_visual   (odom_source auto|visual)
   odom_selector  wheel | visual | auto → /odom + TF odom->base_link     (the only publisher)
   rtabmap        RGB-D SLAM → TF map->odom, /map (occupancy from depth), /rtabmap/info
   pose_validity  /ugv/pose_valid heartbeat
+  distance_tracker /ugv/localization/distance_travelled (odometry estimate) + distance_basis label
 
 TF chain owned here (mindmap D6). Camera driver + /wheel/odom come from Dev 5 bringup; DA3 depth
-comes from Dev 1 perception as a point cloud (interfaces.md "Depth input"). This file never starts
-either. depth_input:=image skips the conversion and takes a depth image on depth_topic directly
-(sim ground-truth depth camera for bring-up / DA3 benchmarking).
+comes from Dev 1 perception as a 32FC1 depth image on /perception/depth/image (depth_input:=image,
+default; interfaces.md "Depth input"). depth_input:=cloud instead converts Dev 1's
+/perception/depth_cloud. For the sim ground-truth depth camera: depth_topic:=<its topic>.
+This file never starts the camera or DA3.
 """
 
 from __future__ import annotations
@@ -190,6 +192,14 @@ def _setup(context, *args, **kwargs):
                 ("rtabmap/info", "/rtabmap/info"),
             ],
         ),
+        Node(
+            package="ugv_localization",
+            executable="distance_tracker",
+            name="distance_tracker",
+            output="screen",
+            parameters=[{**common, "profile_path": os.path.join(cfg, "distance.yaml")}],
+            remappings=[("odom", "/odom")],
+        ),
     ]
     return actions
 
@@ -200,8 +210,8 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("mode", default_value="mapping", description="mapping | localize"),
             DeclareLaunchArgument(
                 "odom_source",
-                default_value="auto",
-                description="auto (wheel when alive, else visual) | wheel | visual",
+                default_value="visual",
+                description="visual (camera + DA3 depth only, default: no wheel sensor yet) | auto (wheel when alive, else visual) | wheel",
             ),
             DeclareLaunchArgument("database_path", default_value="~/.ros/ugv/rtabmap.db"),
             DeclareLaunchArgument("fresh_db", default_value="false", description="mapping only: delete db at start"),
@@ -212,14 +222,14 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("camera_info_topic", default_value="/camera/camera_info"),
             DeclareLaunchArgument(
                 "depth_input",
-                default_value="cloud",
-                description="cloud (Dev 1 DA3 PointCloud2, converted here) | image (32FC1 depth image)",
+                default_value="image",
+                description="image (32FC1 depth image, default) | cloud (Dev 1 DA3 PointCloud2, converted here)",
             ),
             DeclareLaunchArgument("depth_cloud_topic", default_value="/perception/depth_cloud"),
             DeclareLaunchArgument(
                 "depth_topic",
-                default_value="/camera/depth/image_raw",
-                description="depth_input:=image only — e.g. the sim ground-truth depth camera",
+                default_value="/perception/depth/image",
+                description="depth_input:=image: Dev 1 DA3 depth (default) or the sim ground-truth depth camera",
             ),
             DeclareLaunchArgument("wheel_odom_topic", default_value="/wheel/odom"),
             OpaqueFunction(function=_setup),
