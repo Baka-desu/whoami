@@ -1,6 +1,7 @@
 import { useRef, useState, type DragEvent } from 'react'
 import type { RosOptions } from '../source/rosbridge'
 import type { Layers, SourceKind } from '../types'
+import { GoalPanel } from './GoalPanel'
 
 interface Props {
   source: SourceKind
@@ -15,6 +16,9 @@ interface Props {
   onRosCfg: (c: RosOptions) => void
   rosOn: boolean
   onRosOn: (on: boolean) => void
+  rosConnected: boolean
+  goalStatus: string
+  onSendGoal: (x: number, y: number, yawRad: number) => void
 }
 
 const TABS: [SourceKind, string][] = [['upload', 'UPLOAD'], ['camera', 'CAMERA'], ['ros2', 'ROS 2']]
@@ -87,6 +91,10 @@ export function SourcePanel(p: Props) {
           </div>
         )}
       </section>
+
+      {p.source === 'ros2' && (
+        <GoalPanel connected={p.rosConnected} status={p.goalStatus} onSend={p.onSendGoal} />
+      )}
 
       <section className="section">
         <h3>Layers</h3>

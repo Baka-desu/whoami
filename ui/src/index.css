@@ -109,6 +109,9 @@ button, input { font: inherit; color: inherit; }
 .btn:hover { border-color: var(--red); color: var(--red); }
 .btn.primary { background: var(--red); border-color: var(--red); color: #000; font-weight: 700; }
 .btn.primary:hover { background: #ff5252; color: #000; }
+.btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.btn:disabled:hover { border-color: #3a3a3a; color: inherit; background: inherit; }
+.btn.primary:disabled:hover { background: var(--red); }
 
 label { display: grid; gap: 4px; font-size: 11px; color: var(--dim); }
 input:not([type='checkbox']) {

@@ -7,7 +7,7 @@ import { SourcePanel } from './components/SourcePanel'
 import { TopBar } from './components/TopBar'
 import { Viewport } from './components/Viewport'
 import { openCamera } from './source/camera'
-import { connectRos, type RosOptions } from './source/rosbridge'
+import { connectRos, type RosOptions, type SendGoal } from './source/rosbridge'
 import {
   assumedIntrinsics, type Analysis, type FrameMeta, type Intrinsics, type Layers, type SourceKind, type Status,
 } from './types'
@@ -33,6 +33,9 @@ export default function App() {
   })
   const lastFrameAt = useRef(0)
   const rosInfo = useRef<Intrinsics | null>(null)
+  const goalSender = useRef<SendGoal | null>(null)
+  const [rosConnected, setRosConnected] = useState(false)
+  const [goalStatus, setGoalStatus] = useState('')
   const freshness = useFreshness(analysis)
   const [backendOnline, setBackendOnline] = useState(false)
   // ingest must stay a stable callback (the live-camera effect depends on it), so the backend's
@@ -154,7 +157,7 @@ export default function App() {
   const rosBusy = useRef(false)
   useEffect(() => {
     if (!rosOn) return
-    return connectRos(rosCfg, {
+    const disconnect = connectRos(rosCfg, {
       onInfo: (K) => { rosInfo.current = K },
       onFrame: (bmp, stamp, frameId) => {
         // real inference takes far longer than a rosbridge frame interval; drop frames that
@@ -166,9 +169,13 @@ export default function App() {
       },
       onStatus: (text, ok) => {
         setNote(text)
-        if (!ok) setStatus('error')
+        setRosConnected(ok)
+        if (!ok) { setStatus('error'); goalSender.current = null }
       },
+      onReady: (send) => { goalSender.current = send },
+      onGoalUpdate: setGoalStatus,
     })
+    return () => { goalSender.current = null; setRosConnected(false); disconnect() }
     // rosCfg is locked while connected
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rosOn, ingest])
@@ -177,8 +184,15 @@ export default function App() {
     setRosOn(on)
     if (!on) {
       setNote('')
+      setGoalStatus('')
       setStatus(afterStop)
     }
+  }
+
+  const sendGoal = (x: number, y: number, yawRad: number) => {
+    if (!goalSender.current) return
+    setGoalStatus('goal sent, waiting for feedback...')
+    goalSender.current({ x, y, yawRad, frameId: 'map' })
   }
 
   return (
@@ -189,6 +203,7 @@ export default function App() {
         layers={layers} onLayers={setLayers}
         live={live} onLive={setLiveCamera} onPhoto={takePhoto} onUpload={upload}
         rosCfg={rosCfg} onRosCfg={setRosCfg} rosOn={rosOn} onRosOn={toggleRos}
+        rosConnected={rosConnected} goalStatus={goalStatus} onSendGoal={sendGoal}
       />
       <Viewport frame={frame} analysis={analysis} layers={layers} freshness={freshness} />
       <Inspector analysis={analysis} freshness={freshness} />
