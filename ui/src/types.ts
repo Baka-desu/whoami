@@ -29,6 +29,7 @@ export interface FrameMeta {
   source: SourceKind
   frameId: string
   stamp: number // ms epoch, image time
+  receivedAt?: number // ms epoch when received in browser (Date.now())
   width: number
   height: number
   K: Intrinsics // image pixels

@@ -52,7 +52,7 @@ export function analyze(frame: CanvasImageSource, meta: FrameMeta): Analysis {
     max: ground[ground.length - 1],
   }
 
-  const ageMs = Date.now() - meta.stamp
+  const ageMs = Math.max(0, Date.now() - (meta.receivedAt ?? meta.stamp))
   const reasons: string[] = []
   if (ageMs > PERCEPTION_MAX_AGE_MS) reasons.push('MASK STALE')
   if (classPct[1] < 3) reasons.push('NO TRAVERSABLE GROUND')
