@@ -69,7 +69,7 @@ T04 gate YAML (`config/perception/yoloe.yaml`) is **not** the backend file. Back
 | `turing/src/ugv_perception/backend/factory.py` | `build_backend(backend_id, weights_path, prompts)`; lazy import |
 | `turing/src/ugv_perception/backend/instances.py` | engine arrays → `tuple[Instance, ...]` (CPU, testable) |
 | `turing/src/ugv_perception/backend/openvino_gpu.py` | `OpenVinoGpuBackend`; `id = "openvino_gpu"` |
-| `turing/src/ugv_perception/backend/cuda_pytorch.py` | `CudaPytorchBackend`; `id = "cuda_pytorch"`; **raise** if selected on this Arc box |
+| `turing/src/ugv_perception/backend/cuda_pytorch.py` | `CudaPytorchBackend` YOLOE stub raises; `CudaPytorchTensorBackend` is live RUGD/DA3 on CUDA |
 | `turing/src/ugv_perception/tests/test_backend_seam.py` | B1–B14; **no** OpenVINO required |
 
 Do **not** edit `compose/`, `pack.py`, `tick.py`, T04 YAML, or `architecture.md`.  
@@ -185,9 +185,22 @@ Port `scale` stays **1.0** because T06 `pack` then sees HW = rgb HW. Interpolati
 
 ---
 
-## 5. CUDA PyTorch (later NVIDIA)
+## 5. CUDA PyTorch (NVIDIA)
 
-Class exists so the factory string is real. On **this Arc box**, `build_backend("cuda_pytorch", ...)` **raises** (wrong machine). Do not silently run CPU PyTorch. Implement `run()` later when that GPU exists; same `Instance` contract.
+YOLOE `CudaPytorchBackend` / `build_backend("cuda_pytorch", ...)` stays unwired and **raises**. Live outdoor is RUGD + DA3.
+
+`CudaPytorchTensorBackend` loads HuggingFace safetensors on CUDA:
+
+- kind `rugd`: SegFormer-B5 logits
+- kind `da3`: `depth_raw` + `sky` (same head as the IR export). Missing or unexpected checkpoint keys raise `AdapterError`.
+
+`pick_tensor_backend` order:
+
+1. Intel OpenVINO `GPU` / `GPU.*` and the IR exists
+2. CUDA and `model.safetensors` exists
+3. OpenVINO IR on CPU (Intel last resort)
+
+Do not silently run CPU PyTorch. CUDA import/load/run failures raise `AdapterError`. An IR is not a CUDA weight; safetensors are not an OpenVINO IR.
 
 ---
 
@@ -205,10 +218,11 @@ Class exists so the factory string is real. On **this Arc box**, `build_backend(
 | B8 | mask `bool`, 2-D, `shape == rgb.shape[:2]` after the single resize recipe (nearest bool / bilinear+0.5 float) |
 | B9 | empty engine output → `()` |
 | B10 | engine fail → raise; no all-traversable / all-unknown fake instances |
-| B11 | `device` is GPU; no CPU fallback in OpenVINO impl |
+| B11 | YOLOE `OpenVinoGpuBackend`: `device` is GPU; no CPU fallback in that class |
 | B12 | T12 does not import `compose`, `remap`, `confidence`, `freshness`, `pack` |
-| B13 | `build_backend("cuda_pytorch", ...)` raises on this Intel box |
+| B13 | `build_backend("cuda_pytorch", ...)` raises (YOLOE unwired; live path is RUGD) |
 | B14 | Seam tests pass **without** OpenVINO installed |
+| B15 | Live RUGD/DA3: Intel GPU IR, then CUDA safetensors, then OpenVINO CPU IR |
 
 GPU `run()` on real IR: **YOLOE-26s** `weights/yoloe-26s-seg.xml` is on disk. Engine smoke on a uint8 tensor is allowed; that is not outdoor product proof.
 
@@ -241,7 +255,7 @@ B1–B14 are **seam/contract tests** (factory, `instances_from_engine`, import g
 | B6–B8 | `instances_from_engine` happy path + id 0 rejected + score `1.1` raises + uint8 mask raises + bool mask 2×2 → rgb 4×4 via nearest + float mask bilinear then `>= 0.5` |
 | B7 | `np.float32(0.9)` in → Python `float` out |
 | B9 | empty → `()` |
-| B13 | cuda_pytorch factory raises here |
+| B13 | cuda_pytorch factory raises (YOLOE unwired) |
 | B14 | pytest without `openvino` package still collects/passes this file |
 
 Not part of B1–B14: compiled GPU/IR `run()` + YOLO-seg decode tests.

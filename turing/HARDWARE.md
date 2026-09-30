@@ -29,8 +29,21 @@ Someone implementing T12 must pick **one** backend class, not both in one proces
 ## Pin (this project)
 
 - **OpenVINO 2026.4.0** (current stable as of 2026-09-16: `pip install openvino==2026.4.0`).
-- Compile / load IR for **GPU**. Do not default to CPU to “make it run.”
+- Live RUGD/DA3: Intel OpenVINO `GPU` IR first, then CUDA safetensors, then OpenVINO CPU IR (`architecture.md` §6). YOLOE `OpenVinoGpuBackend` stays GPU-only.
 - Do not require `intel-extension-for-pytorch` for the product OpenVINO path.
+
+## Which files on which machine
+
+| Machine | Files | Engine |
+|---|---|---|
+| Intel Arc GPU | `*.xml` + `*.bin` | OpenVINO `GPU` |
+| NVIDIA GPU, no Intel GPU | HuggingFace `model.safetensors` folders | CUDA PyTorch |
+| Intel CPU only | `*.xml` + `*.bin` | OpenVINO CPU |
+| NVIDIA GPU + Intel CPU, safetensors present | safetensors | CUDA (xml unused) |
+| NVIDIA GPU + Intel CPU, IR only | `*.xml` + `*.bin` | OpenVINO (NVIDIA plugin if present, else CPU). CUDA needs the HuggingFace folders. |
+| Intel GPU + NVIDIA GPU | `*.xml` + `*.bin` | Intel OpenVINO GPU |
+
+An OpenVINO export does not run on CUDA. A safetensors folder does not load in OpenVINO. Same net, two packages.
 
 ## Machines
 
@@ -52,7 +65,7 @@ B580 is the development card, not the floor. Assume the NVIDIA has **less** VRAM
 
 - One frame in flight (latest-only queue; T11).
 - YOLOE and Depth Anything **sequential on the same frame** if both run.
-- Default adapter weights: **RUGD SegFormer-B5** OpenVINO IR (`rugd-segformer.xml`). YOLOE-26s stays on disk, not live. NVIDIA boxes use the same gitignored IRs (download locally; GitHub does not store `.xml`/`.bin`).
+- Default adapter weights: **RUGD SegFormer-B5**. Intel: OpenVINO IR (`rugd-segformer.xml`) plus DA3 IR (`da3metric-large.xml`), GPU then CPU. NVIDIA: HuggingFace safetensors under `weights/rugd-segformer/` and `weights/da3metric-large/`, CUDA PyTorch, no OpenVINO. GitHub stores neither. YOLOE-26s stays on disk, not live.
 - No extra GPU copies; no keeping RGB + mask + depth + two models resident if it blows the small card.
 - INT8 / extra compression is later, not a dummy-mask shortcut.
 

@@ -126,10 +126,12 @@ class PerceptionAdapterNode(Node):
         self._pub_cinfo = self.create_publisher(CameraInfo, "/segmentation/camera_info", 10)
         self._depth = depth
         self._pub_cloud = None
+        self._pub_depth = None
         if depth is not None:
             from sensor_msgs.msg import PointCloud2
 
             self._pub_cloud = self.create_publisher(PointCloud2, "/perception/depth_cloud", 10)
+            self._pub_depth = self.create_publisher(Image, "/perception/depth/image", 10)
         period_s = float(self._fresh.perception_max_age) / 2.0
         self._watchdog = threading.Thread(
             target=self._watchdog_loop,
@@ -204,15 +206,18 @@ class PerceptionAdapterNode(Node):
             return
         try:
             from ugv_perception.ingest.decode import decode_frame
-            from ugv_perception.node.cloud import points_to_cloud
+            from ugv_perception.node.cloud import depth_to_image, points_to_cloud
 
             frame = decode_frame(self._last_image, self._last_info)
-            points = self._depth.points(frame.rgb, self._last_info.k)
-            if points is None or self._pub_cloud is None:
-                return
-            self._pub_cloud.publish(
-                points_to_cloud(points, frame.stamp_ns, frame.frame_id)
-            )
+            depth_m, points = self._depth.maps(frame.rgb, self._last_info.k)
+            if self._pub_depth is not None:
+                self._pub_depth.publish(
+                    depth_to_image(depth_m, frame.stamp_ns, frame.frame_id)
+                )
+            if points is not None and self._pub_cloud is not None:
+                self._pub_cloud.publish(
+                    points_to_cloud(points, frame.stamp_ns, frame.frame_id)
+                )
         except Exception:
             return
 
