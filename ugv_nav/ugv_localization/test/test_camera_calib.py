@@ -150,10 +150,11 @@ def test_c13_camera_info_with_zero_k_refused() -> None:
         )
 
 
-def test_c14_empty_distortion_allowed_for_ideal_sim_camera() -> None:
-    # Gazebo cameras often publish D=[] with plumb_bob. Treat as zero distortion, not an error.
+def test_c14_empty_distortion_allowed_for_ideal_camera() -> None:
+    # Some drivers publish D=[] with plumb_bob for an ideal/undistorted lens. Treat as zero
+    # distortion, not an error.
     cal = calibration_from_camera_info(
-        camera_name="sim",
+        camera_name="ideal",
         width=640,
         height=480,
         distortion_model="plumb_bob",

@@ -11,11 +11,14 @@ publishers alike (verified end-to-end with a best-effort camera, `test/test_ros_
 | `/camera/image_raw` (**TBD**) | `sensor_msgs/Image` | Dev 5 | stamp = exposure time; `frame_id` = optical frame (`camera_optical_frame`) |
 | `/camera/camera_info` (**TBD**) | `sensor_msgs/CameraInfo` | Dev 5 | **one per image, identical stamp** + frame (rgbd_sync pairs RGB + depth + CameraInfo by exact stamp; a latched-once CameraInfo never pairs — Dev 1's transient-local subscriber accepts either); real K (zero K → `camera_info_invalid`) |
 | `/perception/depth_cloud` | `sensor_msgs/PointCloud2` | **Dev 1** (DA3) | see **Depth input** below (exists in Dev 1's code) |
-| `/wheel/odom` (**TBD**) | `nav_msgs/Odometry` | Dev 5 diff-drive (sim plugin / motor driver) | `frame_id=odom`, `child_frame_id=base_link`, pose covariance filled, ≥ 15 Hz, **no TF**. Optional with `odom_source:=visual` |
+| `/wheel/odom` (**TBD**) | `nav_msgs/Odometry` | Dev 5 diff-drive motor driver | `frame_id=odom`, `child_frame_id=base_link`, pose covariance filled, ≥ 15 Hz, **no TF**. Optional with `odom_source:=visual` |
 | `/tf_static` `base_link->camera_link->camera_optical_frame` | TF | Dev 5 URDF / robot_state_publisher | camera extrinsics (rgbd_odometry + RTAB-Map need them) |
-| `/clock` | `rosgraph_msgs/Clock` | Dev 5 sim / `ros2 bag play --clock` | `profile:=sim|bag` → `use_sim_time`. Never recorded into eval bags |
-| `/ground_truth/odom` (**TBD**, eval only) | `nav_msgs/Odometry` | Dev 5 sim | drift benchmark only; never used by the product path |
-| `/camera/depth/image_raw` (**TBD**, eval/bring-up only) | `sensor_msgs/Image` 32FC1 | Dev 5 sim depth camera | same pose, size and `frame_id` as the RGB camera; DA3 accuracy benchmark + bring-up before DA3 is live |
+| `/clock` | `rosgraph_msgs/Clock` | `ros2 bag play --clock` | `profile:=bag` → `use_sim_time`. Never recorded into eval bags. No sim/Gazebo profile (owner direction, 2026-09-30) |
+
+No `sim`/Gazebo profile: real hardware only. `/ground_truth/odom` and a sim depth camera for DA3
+accuracy benchmarking (both previously **TBD**, eval-only rows here) are dropped with it — a real
+ground-truth method for drift/accuracy benchmarking on real hardware is a separate, not-yet-made
+decision.
 
 ## Depth input (Dev 1 point cloud — what his code publishes today)
 
@@ -41,7 +44,8 @@ Contract, checked against `turing/src/ugv_perception` on `main` / `dev1-turing-p
 The converted image (`/rtabmap/depth/image`, 32FC1 m) is what `rgbd_sync`, `pose_validity` and `depth_eval` see.
 Dev 2 checks it at runtime (`depth/gate.py`): wrong encoding / frame / size, future stamp or coverage below
 `min_depth_coverage` → `/ugv/pose_valid=false` (`depth_invalid`); nothing for `depth_max_age_s` → `depth_stale`.
-`depth_input:=image depth_topic:=<topic>` bypasses the conversion (sim ground-truth depth camera, DA3 benchmark).
+`depth_input:=image depth_topic:=<topic>` bypasses the conversion, for any source that already
+publishes a depth image directly instead of Dev 1's point cloud.
 
 ## Outputs (Dev 2 publishes)
 
@@ -68,13 +72,17 @@ Dev 2 checks it at runtime (`depth/gate.py`): wrong encoding / frame / size, fut
 3. Share DA3 latency / fps — sets `sync_queue_size`, `depth_max_age_s`, and whether visual odom meets 15 Hz.
 4. Optional: publish depth even when a mask is skipped (today depth only follows a published mask).
 
-**Dev 5 (platform/sim)**
-1. Confirm camera / wheel-odom / ground-truth topic names and optical `frame_id`. Publish CameraInfo **with every image, same stamp**.
-2. Diff-drive: publish `/wheel/odom` with covariance, `publish_odom_tf=false` (Gazebo `DiffDrive` plugin: do not bridge its TF; motor driver: don't broadcast).
-3. Sim: a **ground-truth depth camera** co-located with the RGB camera (same intrinsics / size / frame) — DA3 benchmark and bring-up.
-4. Sim world: textured (feature-rich ground, walls, objects) — visual odometry and loop closure need features.
-5. Sim ground-truth pose topic for drift benchmarks.
-6. Safety mux: treat missing `/ugv/pose_valid` messages (> watchdog timeout) the same as `false`.
+**Dev 5 (platform)**
+
+No sim/Gazebo profile: real hardware only (owner direction, 2026-09-30). Items 3-5 below (a
+Gazebo ground-truth depth camera, a textured sim world, a sim ground-truth pose topic for drift
+benchmarks) are dropped along with it — they only existed to support Gazebo bring-up. Drift/DA3
+accuracy benchmarking against ground truth on real hardware needs its own method (survey, RTK,
+etc.); that's a separate decision, not made here.
+
+1. Confirm camera / wheel-odom topic names and optical `frame_id`. Publish CameraInfo **with every image, same stamp**.
+2. Diff-drive: publish `/wheel/odom` with covariance, `publish_odom_tf=false` (motor driver: don't broadcast TF).
+3. Safety mux: treat missing `/ugv/pose_valid` messages (> watchdog timeout) the same as `false`.
 
 **Dev 3 (costmaps)**
 1. `/map` from Dev 2 is **optional** and only as good as DA3 depth; don't make the global costmap depend on it.

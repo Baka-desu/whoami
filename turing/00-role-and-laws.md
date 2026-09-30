@@ -87,12 +87,13 @@ Depth Anything is **not** a second perception port. It exists so VoxelLayer can 
 
 ## Runtime profiles (what we actually run)
 
+No `sim`/Gazebo profile: real hardware only (owner direction, 2026-09-30).
+
 | Profile | Dev 1 source | Product? |
 |---|---|---|
-| `live_cam` | calibrated outdoor camera | **yes — default** |
+| `live_cam` | calibrated outdoor camera | **yes — default and only deploy profile** |
 | `bag` | recorded **outdoor** bag from that camera | eval |
 | `rugd` | RUGD images (real outdoor dataset) | eval only, if we opt in |
-| `sim` | Gazebo camera | Dev 5 integration; **not** how we qualify perception |
 
 ## Kill list that applies to us
 

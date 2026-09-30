@@ -1,10 +1,10 @@
 """Capture ONE real CameraInfo and write it to config/cameras/<name>.yaml.
 
 The only sanctioned way to create a camera YAML besides `camera_calibration` output:
-from an actual driver / Gazebo sensor, never typed by hand. Refuses zero / fake K.
+from an actual driver, never typed by hand. Refuses zero / fake K.
 
     ros2 run ugv_localization camera_info_to_yaml --topic /camera/camera_info \
-        --name sim_front_mono --out ugv_nav/config/cameras/sim_front_mono.yaml
+        --name front_mono --out ugv_nav/config/cameras/front_mono.yaml
 """
 
 from __future__ import annotations
