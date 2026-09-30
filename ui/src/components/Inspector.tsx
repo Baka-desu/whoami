@@ -1,6 +1,8 @@
 import type { ReactNode } from 'react'
 import type { Freshness } from '../analysis/freshness'
 import { PERCEPTION_MAX_AGE_MS, CLASS_NAMES, CLASS_RGB, type Analysis } from '../types'
+import type { RobotSnapshot } from '../source/robot'
+import { RobotPanel } from './RobotPanel'
 import { TopDownMap } from './TopDownMap'
 
 function Section({ title, children }: { title: string; children: ReactNode }) {
@@ -21,10 +23,19 @@ function Row({ k, v, tone }: { k: string; v: ReactNode; tone?: 'trip' | 'warn' }
   )
 }
 
-export function Inspector({ analysis: a, freshness: fr }: { analysis: Analysis | null; freshness: Freshness | null }) {
+interface Props {
+  analysis: Analysis | null
+  freshness: Freshness | null
+  robot: RobotSnapshot | null
+  estop: boolean
+}
+
+export function Inspector({ analysis: a, freshness: fr, robot, estop }: Props) {
+  const robotPanel = robot && <RobotPanel robot={robot} estop={estop} />
   if (!a || !fr) {
     return (
       <aside className="panel inspector">
+        {robotPanel}
         <Section title="Analysis">
           <p className="dim">No analysis available. Add a photo or start a source; results appear once a perception backend is connected.</p>
         </Section>
@@ -35,6 +46,7 @@ export function Inspector({ analysis: a, freshness: fr }: { analysis: Analysis |
 
   return (
     <aside className="panel inspector">
+      {robotPanel}
       <Section title="Ground map">
         <TopDownMap analysis={a} freshness={fr} />
         <div className="mini-legend">

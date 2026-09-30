@@ -6,12 +6,15 @@ import { SourcePanel } from './components/SourcePanel'
 import { TopBar } from './components/TopBar'
 import { Viewport } from './components/Viewport'
 import { openCamera } from './source/camera'
-import { connectRos, type CameraCalibration, type RosOptions } from './source/rosbridge'
+import { connectRos, type CameraCalibration, type RosApi, type RosOptions } from './source/rosbridge'
+import { basePoseInMap, fresh, type Pose2D, type RobotSnapshot, type RobotState } from './source/robot'
 import {
   assumedIntrinsics, type Analysis, type FrameMeta, type Intrinsics, type Layers, type SourceKind, type Status,
 } from './types'
 
 const FRAME_INTERVAL_MS = 250
+const ROBOT_SNAPSHOT_MS = 250 // topics arrive at up to 20 Hz; re-render at 4 Hz
+const START_POSE_MAX_AGE_MS = 1000
 
 // Swap for Dev 1's REST analyzer when it exists; nothing else in the UI changes.
 const analyzer: Analyzer = unavailableAnalyzer
@@ -35,6 +38,16 @@ export default function App() {
   const rosInfo = useRef<CameraCalibration | null>(null)
   const freshness = useFreshness(analysis)
   const ingestSeq = useRef(0)
+  const rosApi = useRef<RosApi | null>(null)
+  const robotRef = useRef<RobotState>({})
+  const [robot, setRobot] = useState<RobotSnapshot | null>(null)
+  const [rosConnected, setRosConnected] = useState(false)
+  const [goalStatus, setGoalStatus] = useState('')
+  const [estop, setEstop] = useState(false)
+  const estopRef = useRef(false)
+  // Mission reference pose in `map` (archV1.md §9), frozen from Dev 2's TF when the operator sets
+  // the start; goals are expressed relative to it, never to wherever the robot is later.
+  const [startPose, setStartPose] = useState<Pose2D | null>(null)
 
   const ingest = useCallback(async (bmp: ImageBitmap, src: SourceKind, stamp: number, frameId: string, streaming: boolean, K?: Intrinsics | null) => {
     const receivedAt = Date.now()
@@ -135,7 +148,7 @@ export default function App() {
 
   useEffect(() => {
     if (!rosOn) return
-    return connectRos(rosCfg, {
+    const disconnect = connectRos(rosCfg, {
       onInfo: (calib) => { rosInfo.current = calib },
       onFrame: (bmp, stamp, frameId) => {
         let resolvedK: Intrinsics | null = null
@@ -163,9 +176,24 @@ export default function App() {
       },
       onStatus: (text, ok) => {
         setNote(text)
-        if (!ok) setStatus('error')
+        setRosConnected(ok)
+        if (!ok) { setStatus('error'); rosApi.current = null }
       },
+      onReady: (api) => {
+        rosApi.current = api
+        if (estopRef.current) api.setEstop(true) // an asserted e-stop survives a reconnect
+      },
+      onGoalUpdate: setGoalStatus,
+      onState: (patch) => { Object.assign(robotRef.current, patch) },
     })
+    const snapshotTimer = window.setInterval(() => setRobot({ ...robotRef.current, now: Date.now() }), ROBOT_SNAPSHOT_MS)
+    return () => {
+      window.clearInterval(snapshotTimer)
+      rosApi.current = null
+      robotRef.current = {}
+      setRobot(null); setRosConnected(false); setStartPose(null)
+      disconnect()
+    }
     // rosCfg is locked while connected
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rosOn, ingest])
@@ -175,8 +203,53 @@ export default function App() {
     if (!on) {
       rosInfo.current = null
       setNote('')
+      setGoalStatus('')
       setStatus(afterStop)
     }
+  }
+
+  // Goal gate (UI convenience only - Dev 5's safety authority is the real one): never send while
+  // the pose is invalid, Nav2 is not heartbeating, perception is degraded, or e-stop is asserted.
+  const now = robot?.now ?? 0
+  const poseValid = robot ? fresh(robot.poseValid, now) : undefined
+  const nav2Up = robot ? fresh(robot.nav2Heartbeat, now) : undefined
+  const perceptionDegraded = robot ? fresh(robot.perceptionDegraded, now) : undefined
+  const goalBlockedReason = !rosConnected ? ''
+    : estop ? 'e-stop asserted'
+    : poseValid !== true ? 'pose not valid'
+    : nav2Up !== true ? 'Nav2 not active'
+    : perceptionDegraded ? 'perception degraded'
+    : freshness && !freshness.ok ? freshness.label.toLowerCase()
+    : ''
+  const canSendGoal = rosConnected && !goalBlockedReason && !!startPose
+
+  const setStart = () => {
+    const p = robot ? basePoseInMap(robot, Date.now()) : null
+    if (poseValid !== true) return setGoalStatus('cannot set start: pose not valid')
+    if (!p || Date.now() - p.receivedAt > START_POSE_MAX_AGE_MS) return setGoalStatus('cannot set start: no fresh map->base_link TF')
+    setStartPose(p)
+    setGoalStatus('')
+  }
+
+  // fwd/left are metres in the start pose's frame (x forward, y left); relYaw is relative to its heading.
+  const sendGoal = (fwd: number, left: number, relYaw: number) => {
+    const ref = startPose
+    if (!rosApi.current || !canSendGoal || !ref) return
+    const c = Math.cos(ref.yaw), s = Math.sin(ref.yaw)
+    setGoalStatus('goal sent, waiting for feedback...')
+    rosApi.current.sendGoal({
+      x: ref.x + c * fwd - s * left,
+      y: ref.y + s * fwd + c * left,
+      yawRad: ref.yaw + relYaw,
+      frameId: 'map',
+    })
+  }
+
+  const toggleEstop = (asserted: boolean) => {
+    if (!rosApi.current) return
+    rosApi.current.setEstop(asserted)
+    estopRef.current = asserted
+    setEstop(asserted)
   }
 
   return (
@@ -187,9 +260,14 @@ export default function App() {
         layers={layers} onLayers={setLayers}
         live={live} onLive={setLiveCamera} onPhoto={takePhoto} onUpload={upload}
         rosCfg={rosCfg} onRosCfg={setRosCfg} rosOn={rosOn} onRosOn={toggleRos}
+        rosConnected={rosConnected} goalStatus={goalStatus}
+        onSendGoal={sendGoal} onCancelGoal={() => rosApi.current?.cancelGoal()}
+        canSendGoal={canSendGoal} goalBlockedReason={goalBlockedReason}
+        hasStart={!!startPose} canSetStart={rosConnected && poseValid === true} onSetStart={setStart}
+        estop={estop} onEstop={toggleEstop}
       />
       <Viewport frame={frame} analysis={analysis} layers={layers} freshness={freshness} />
-      <Inspector analysis={analysis} freshness={freshness} />
+      <Inspector analysis={analysis} freshness={freshness} robot={robot} estop={estop} />
     </div>
   )
 }
