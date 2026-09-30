@@ -1,0 +1,113 @@
+#!/usr/bin/env python3
+"""Nav2 liveness heartbeat for Dev 5's watchdog (architecture §12).
+
+Publishes /ugv/nav2_heartbeat (std_msgs/Bool) every tick: true only if every Nav2
+server answered lifecycle get_state with 'active' within `max_age` seconds. False at
+startup, while any server is inactive, crashed or not answering (fail closed).
+Dev 5 holds on false AND on message age (this node dying stops the topic).
+
+/ugv/nav2_status (std_msgs/String, latched) carries the reason, published on change.
+Same shape as Dev 2's /ugv/pose_valid + /ugv/localization_status.
+"""
+
+import sys
+
+from lifecycle_msgs.srv import GetState
+import rclpy
+from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile
+from std_msgs.msg import Bool, String
+
+from ugv_navigation.heartbeat_core import (
+    DEFAULT_SERVERS, HEARTBEAT_TOPIC, HeartbeatMonitor, STATUS_TOPIC)
+
+
+class Nav2Heartbeat(Node):
+
+    def __init__(self):
+        super().__init__('nav2_heartbeat')
+        servers = tuple(self.declare_parameter('servers', list(DEFAULT_SERVERS)).value)
+        rate_hz = self.declare_parameter('rate_hz', 20.0).value
+        # A get_state reply takes <= ~12 ms (measured, composed or not). Replies can be
+        # dropped (e.g. right after activation, while DDS still matches the service
+        # endpoints), so an unanswered request is abandoned after request_timeout and
+        # re-sent on the next poll: one lost reply never makes a healthy server stale.
+        poll_hz = self.poll_hz = self.declare_parameter('poll_hz', 10.0).value
+        max_age = self.declare_parameter('max_age', 0.5).value
+        self.monitor = HeartbeatMonitor(servers=servers, max_age_s=max_age)
+        self.clients_ = {s: self.create_client(GetState, f'/{s}/get_state') for s in servers}
+        # server -> (future, sent_s); a request older than request_timeout is dropped.
+        self.pending = {}
+        self.request_timeout = self.declare_parameter('request_timeout', 0.2).value
+        self.last_status = None
+        # If this process itself was not scheduled for a while (CPU contention), its
+        # timers run before the queued replies: judging reply age right then would blame
+        # Nav2 for our own pause. After a late tick, skip the age check until one fresh
+        # poll round could complete; explicit non-active replies still fail at once.
+        self.tick_period = 1.0 / rate_hz
+        self.last_tick = None
+        self.age_check_from = 0.0
+        self.pub = self.create_publisher(Bool, HEARTBEAT_TOPIC, 10)
+        self.status_pub = self.create_publisher(
+            String, STATUS_TOPIC,
+            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
+        self.create_timer(1.0 / poll_hz, self.poll)
+        self.create_timer(1.0 / rate_hz, self.tick)
+
+    def now_s(self):
+        return self.get_clock().now().nanoseconds * 1e-9
+
+    def poll(self):
+        now = self.now_s()
+        for server, client in self.clients_.items():
+            # One outstanding request per server. A hung server goes stale (fail closed);
+            # its request is dropped after request_timeout so a recovered server counts.
+            if server in self.pending:
+                future, sent = self.pending[server]
+                if now - sent <= self.request_timeout:
+                    continue
+                client.remove_pending_request(future)
+                del self.pending[server]
+            if not client.service_is_ready():
+                continue
+            future = client.call_async(GetState.Request())
+            self.pending[server] = (future, now)
+            future.add_done_callback(lambda f, s=server: self.on_state(s, f))
+
+    def on_state(self, server, future):
+        self.pending.pop(server, None)
+        if future.cancelled() or future.exception() is not None:
+            return
+        self.monitor.record(server, future.result().current_state.label, self.now_s())
+
+    def tick(self):
+        now = self.now_s()
+        if self.last_tick is not None and now - self.last_tick > 2.5 * self.tick_period:
+            self.age_check_from = now + self.request_timeout + 1.0 / self.poll_hz
+        self.last_tick = now
+        healthy, reason = self.monitor.evaluate(now, check_age=now >= self.age_check_from)
+        self.pub.publish(Bool(data=healthy))
+        if reason != self.last_status:
+            self.last_status = reason
+            self.status_pub.publish(String(data=reason))
+            # Separate call sites: rclpy rejects one call site switching severity.
+            if healthy:
+                self.get_logger().info(f'nav2 heartbeat OK: {reason}')
+            else:
+                self.get_logger().warning(f'nav2 heartbeat FAIL: {reason}')
+
+
+def main():
+    rclpy.init(args=sys.argv)
+    node = Nav2Heartbeat()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.try_shutdown()
+
+
+if __name__ == '__main__':
+    main()

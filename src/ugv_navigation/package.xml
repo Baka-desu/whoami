@@ -1,0 +1,54 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>ugv_navigation</name>
+  <version>0.0.0</version>
+  <description>
+    UGV Nav2 stack. Dev 4 (Autonomy &amp; Motion Core): Smac2D planner, Regulated Pure Pursuit,
+    NavigateToPose behavior tree + recoveries, candidate twist on /cmd_vel_nav2, goal testbench.
+    Costmap layers / footprint (Dev 3) are loaded from an external params file.
+  </description>
+  <maintainer email="sivnandnanduz@gmail.com">sivuiii</maintainer>
+  <!-- Same as ugv_localization (Dev 2); no LICENSE file in the repo. -->
+  <license>Proprietary</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <buildtool_depend>ament_cmake_python</buildtool_depend>
+
+  <!-- Dev 4 runtime: standard Nav2 servers and plugins only -->
+  <exec_depend>nav2_planner</exec_depend>
+  <exec_depend>nav2_smac_planner</exec_depend>
+  <exec_depend>nav2_controller</exec_depend>
+  <exec_depend>nav2_regulated_pure_pursuit_controller</exec_depend>
+  <exec_depend>nav2_behaviors</exec_depend>
+  <exec_depend>nav2_bt_navigator</exec_depend>
+  <exec_depend>nav2_behavior_tree</exec_depend>
+  <exec_depend>nav2_lifecycle_manager</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>rclcpp_components</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
+
+  <!-- Testbench -->
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>nav2_msgs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>lifecycle_msgs</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+  <test_depend>ament_cmake_pytest</test_depend>
+  <test_depend>ament_cmake_ros</test_depend>
+  <test_depend>python3-pytest</test_depend>
+  <test_depend>python3-yaml</test_depend>
+  <test_depend>tf2_ros</test_depend>
+  <!-- closed-loop harness (test/closed_loop/) -->
+  <test_depend>tf2_ros_py</test_depend>
+  <test_depend>nav_msgs</test_depend>
+  <test_depend>nav2_costmap_2d</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
