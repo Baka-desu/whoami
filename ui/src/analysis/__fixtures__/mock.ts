@@ -1,5 +1,6 @@
-// MOCK perception. Same output shape the real pipeline will produce (Dev 1: RUGD SegFormer +
-// Depth Anything 3), so swapping it in later only replaces this file.
+// TEST FIXTURE ONLY - never import this from production code (App, components, analyzer.ts).
+// A fake perception result with the Analysis shape, for tests. A test in analysis.test.ts fails
+// if any non-test module imports it.
 //   mask  : colour distance from the ground patch straight ahead -> {0,1,2}
 //   depth : flat-ground model from camera height + intrinsics
 //   grid  : ground-plane costmap sampled back out of the mask (hazard wins, unknown != free)
@@ -7,7 +8,7 @@
 import {
   CAM_H, CELL_M, GH, GW, PERCEPTION_MAX_AGE_MS, TH, TW, Z_MIN,
   type Analysis, type FrameMeta,
-} from '../types'
+} from '../../types'
 
 const HORIZON = Math.round(GH * 0.42)
 const FAR_M = 30

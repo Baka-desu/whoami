@@ -51,7 +51,7 @@ export interface Analysis {
   latencyMs: number
   degraded: boolean
   reasons: string[]
-  mock: true
+  mock?: boolean // only ever set by the test-only fixture
 }
 
 export interface Layers {

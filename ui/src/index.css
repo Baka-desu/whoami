@@ -38,7 +38,7 @@ button, input { font: inherit; color: inherit; }
 }
 .brand { font-weight: 700; letter-spacing: 0.22em; }
 .brand span { margin-left: 12px; font-weight: 400; letter-spacing: 0.08em; color: var(--dim); }
-.mock {
+.analyzer-off {
   padding: 2px 8px;
   border: 1px solid var(--red-dim);
   color: var(--red);

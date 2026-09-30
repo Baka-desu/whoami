@@ -108,6 +108,7 @@ export function Viewport({ frame, analysis, layers, freshness: fr }: Props) {
       {frame ? (
         <>
           <canvas ref={ref} />
+          {!analysis && <div className="banner degraded">NO ANALYSIS · analyzer unavailable</div>}
           {fr && !fr.ok && (
             <div className={`banner ${fr.stale ? 'stale' : 'degraded'}`}>
               {fr.stale ? `STALE · ${fr.ageMs} / ${PERCEPTION_MAX_AGE_MS} ms` : 'PERCEPTION DEGRADED'}

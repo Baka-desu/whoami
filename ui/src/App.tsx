@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { analyze } from './analysis/mock'
+import { unavailableAnalyzer, type Analyzer } from './analysis/analyzer'
 import { useFreshness } from './analysis/freshness'
 import { Inspector } from './components/Inspector'
 import { SourcePanel } from './components/SourcePanel'
@@ -12,6 +12,9 @@ import {
 } from './types'
 
 const FRAME_INTERVAL_MS = 250
+
+// Swap for Dev 1's REST analyzer when it exists; nothing else in the UI changes.
+const analyzer: Analyzer = unavailableAnalyzer
 
 export default function App() {
   const [source, setSource] = useState<SourceKind>('upload')
@@ -31,8 +34,9 @@ export default function App() {
   const lastFrameAt = useRef(0)
   const rosInfo = useRef<CameraCalibration | null>(null)
   const freshness = useFreshness(analysis)
+  const ingestSeq = useRef(0)
 
-  const ingest = useCallback((bmp: ImageBitmap, src: SourceKind, stamp: number, frameId: string, streaming: boolean, K?: Intrinsics | null) => {
+  const ingest = useCallback(async (bmp: ImageBitmap, src: SourceKind, stamp: number, frameId: string, streaming: boolean, K?: Intrinsics | null) => {
     const receivedAt = Date.now()
     const meta: FrameMeta = {
       source: src, frameId, stamp, receivedAt, width: bmp.width, height: bmp.height,
@@ -43,7 +47,14 @@ export default function App() {
     lastFrameAt.current = now
     setFps((f) => (dt > 0 && dt < 2000 ? f * 0.7 + (1000 / dt) * 0.3 : 0))
     setFrame(bmp)
-    setAnalysis(analyze(bmp, meta))
+    const seq = ++ingestSeq.current
+    let result: Analysis | null = null
+    try {
+      result = await analyzer.analyze(bmp, meta)
+    } catch {
+      result = null
+    }
+    if (seq === ingestSeq.current) setAnalysis(result) // a newer frame already took over
   }, [])
 
   useEffect(() => () => frame?.close(), [frame])
@@ -62,7 +73,7 @@ export default function App() {
     stopLive()
     setNote('')
     try {
-      ingest(await createImageBitmap(file), 'upload', Date.now(), file.name, false)
+      await ingest(await createImageBitmap(file), 'upload', Date.now(), file.name, false)
       setStatus('still')
     } catch {
       setStatus('error')
@@ -80,7 +91,7 @@ export default function App() {
     try {
       const cam = await openCamera()
       await new Promise((r) => setTimeout(r, 500)) // let exposure settle
-      ingest(await createImageBitmap(cam.video), 'camera', Date.now(), 'camera', false)
+      await ingest(await createImageBitmap(cam.video), 'camera', Date.now(), 'camera', false)
       cam.stop()
       setStatus('still')
       setNote('')
@@ -105,7 +116,7 @@ export default function App() {
         if (busy) return
         busy = true
         try {
-          ingest(await createImageBitmap(cam.video), 'camera', Date.now(), 'camera', true)
+          await ingest(await createImageBitmap(cam.video), 'camera', Date.now(), 'camera', true)
         } finally {
           busy = false
         }
@@ -147,7 +158,7 @@ export default function App() {
             }
           }
         }
-        ingest(bmp, 'ros2', stamp, frameId, true, resolvedK)
+        void ingest(bmp, 'ros2', stamp, frameId, true, resolvedK)
         setStatus('live')
       },
       onStatus: (text, ok) => {
@@ -170,7 +181,7 @@ export default function App() {
 
   return (
     <div className="app">
-      <TopBar status={status} fps={fps} note={note} />
+      <TopBar status={status} fps={fps} note={note} analyzerOnline={analyzer.available} />
       <SourcePanel
         source={source} onSource={pickSource}
         layers={layers} onLayers={setLayers}

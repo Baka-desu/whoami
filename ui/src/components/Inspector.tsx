@@ -26,7 +26,7 @@ export function Inspector({ analysis: a, freshness: fr }: { analysis: Analysis |
     return (
       <aside className="panel inspector">
         <Section title="Analysis">
-          <p className="dim">Waiting for a frame.</p>
+          <p className="dim">No analysis available. Add a photo or start a source; results appear once a perception backend is connected.</p>
         </Section>
       </aside>
     )
