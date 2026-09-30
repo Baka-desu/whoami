@@ -44,11 +44,13 @@ Precedence (highest wins):
 Nav2 may *compute* motion; it does **not** bypass the safety authority. One publisher owns the base `/cmd_vel` topic (or a documented mux with the order above).
 
 ## 4. Runtime profiles
+**No `sim`/Gazebo profile. This product runs on real hardware, outdoors, only — never simulated.**
+Owner direction 2026-09-30, superseding any earlier `sim` profile.
+
 | Profile | Purpose |
 |---|---|
-| **`live_cam` (default)** | Real outdoor deploy |
-| `sim` | Integration / CI |
-| `bag` / `rugd` | Offline outdoor checks |
+| **`live_cam` (default and only deploy profile)** | Real outdoor deploy |
+| `bag` / `rugd` | Offline outdoor checks (replaying real recorded data, not simulated) |
 
 Baylands / RUGD / tutorial ONNX = eval/scaffold only.
 

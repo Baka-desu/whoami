@@ -53,7 +53,7 @@ The difficulty hierarchy is calibrated so that **Dev 1 (AI & Vision) is higher i
 | **Dev 2** | **SLAM & Spatial Localization** | `ugv_localization/`<br>`config/cameras/` | **29h** | **High (4.5/5)** | RTAB-Map visual SLAM (stereo/RGB-D/mono), `mapping` vs `localize` database modes, continuous TF tree (`map->odom->base_link`), pose validity monitor node (`/ugv/pose_valid`). |
 | **Dev 3** | **Costmaps & Spatial Geometry** | `ugv_navigation/` (Costmap Subsystem), `config/robots/` | **29h** | **High (4.0/5)** | Semantic Costmap Layer (mask projection via CameraInfo & TF), VoxelLayer geometry integration, Geometry Lethal Precedence Engine (geometry lethal overrides traversable). |
 | **Dev 4** | **Planning & Trajectory Control** | `ugv_navigation/` (Autonomy & Motion Core) | **29h** | **Med-High (3.5/5)** | Nav2 Smac2D global path planner, Regulated Pure Pursuit (RPP) trajectory tracker, dynamic hazard reactivity, recovery behaviors, `/navigate_to_pose`, candidate twist `/cmd_vel_nav2`. |
-| **Dev 5** | **Safety Authority & Platform** | `ugv_safety/`<br>`ugv_robot_description/`<br>`ugv_bringup/`<br>`ugv_eval/` | **28h** | **Medium (3.0/5)** | 4-tier Command Priority Arbiter (sole base `/cmd_vel` authority), multi-topic timeout watchdog table, deceleration ramp, diff-drive URDF/xacro, **camera driver launch** (`Image` + `CameraInfo` for Dev 1 and Dev 2), dual footprint YAMLs, Gazebo sim world, launch profiles. |
+| **Dev 5** | **Safety Authority & Platform** | `ugv_safety/`<br>`ugv_robot_description/`<br>`ugv_bringup/`<br>`ugv_eval/` | **28h** | **Medium (3.0/5)** | 4-tier Command Priority Arbiter (sole base `/cmd_vel` authority), multi-topic timeout watchdog table, deceleration ramp, diff-drive URDF/xacro, **camera driver launch** (`Image` + `CameraInfo` for Dev 1 and Dev 2), dual footprint YAMLs, launch profiles (real hardware only, no Gazebo/sim). |
 
 ---
 
@@ -110,7 +110,7 @@ All 5 developers integrate against the topic contracts defined in `architecture.
 | `/ugv/pose_valid` | `std_msgs/msg/Bool` | **Dev 2** | **Dev 5** | Emits `false` if tracking lost, TF expires, or covariance explodes (§10.1). |
 | `/global_costmap/costmap`<br>`/local_costmap/costmap` | `nav_msgs/msg/OccupancyGrid` | **Dev 3** | **Dev 4** | 2D occupancy grid combining semantic layers and geometry precedence (§9). |
 | `/cmd_vel_nav2` | `geometry_msgs/msg/Twist` | **Dev 4** | **Dev 5** | Candidate velocity command from Nav2 controller. |
-| `/cmd_vel` | `geometry_msgs/msg/Twist` | **Dev 5** (Safety Arbiter) | **Base Wheels / Sim** | **Sole final authority commanding physical wheel actuators (§3.1)**. |
+| `/cmd_vel` | `geometry_msgs/msg/Twist` | **Dev 5** (Safety Arbiter) | **Base Wheels (real hardware only)** | **Sole final authority commanding physical wheel actuators (§3.1)**. |
 | `/ugv/e_stop` | `std_msgs/msg/Bool` | Dev 5 CLI / Operator | Dev 5 | Priority Level 1 hard software kill switch. |
 
 ---
@@ -266,7 +266,7 @@ ros2 topic echo /cmd_vel_nav2
 2. **System Health Watchdog Table (§12) (5h):** Build asynchronous timeout monitor tracking arrival timestamps against `safety_timeouts.yaml` for perception mask ($0.5\text{s}$), localization/TF ($0.5\text{s}$), and Nav2 heartbeat ($0.5\text{s}$).
 3. **Deceleration Profiler & Motor Driver Interface (§3.1) (5h):** Implement smooth rate-limited deceleration ramp on safety stop; write differential-drive hardware motor driver node commanding wheel actuators.
 4. **URDF/xacro Model & Dual Footprints (§7, §13 item 9) (4h):** Build differential-drive robot description with kinematics, camera extrinsics, and primary + secondary footprint YAMLs.
-5. **Outdoor Gazebo Simulation World & Launch Profiles (§4) (5h):** Build outdoor Gazebo world with terrain, dirt tracks, and obstacles; create master launch files for runtime profiles: `profile:=live_cam|sim|bag`. **`live_cam` launches the camera driver** and publishes `Image` + `CameraInfo` for Dev 1 and Dev 2 (architecture §5 dual fan-out). Dev 1/2 do not start the camera.
+5. **Launch Profiles (§4) (5h):** No Gazebo, no simulation — real hardware only (owner direction, 2026-09-30). Create master launch files for runtime profiles: `profile:=live_cam|bag`. **`live_cam` launches the camera driver** and publishes `Image` + `CameraInfo` for Dev 1 and Dev 2 (architecture §5 dual fan-out). Dev 1/2 do not start the camera.
 6. **E-Stop CLI Utility & Safety Test Suite (3h):** Build CLI tool to toggle E-stop, publish `/ugv/safety_status`, and verify immediate zero-twist clamp.
 
 #### Modularity & Flexibility:
@@ -285,6 +285,6 @@ ros2 topic pub /ugv/e_stop std_msgs/msg/Bool "{data: true}" --once
 ros2 topic pub /cmd_vel_nav2 geometry_msgs/msg/Twist "{linear: {x: 0.5}}" -r 10
 ros2 topic echo /cmd_vel
 
-# Launch outdoor simulation profile
-ros2 launch ugv_bringup bringup.launch.py profile:=sim
+# Launch the real outdoor camera driver (no sim/Gazebo profile - real hardware only)
+ros2 launch ugv_bringup bringup.launch.py profile:=live_cam
 ```
