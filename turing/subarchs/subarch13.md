@@ -1,6 +1,6 @@
 # Sub-architecture 13 — Transition: YOLOE → GA-Nav (terrain adapter)
 
-**Status:** decode + ontology **shipped** (scripted logits, no weights). PyTorch eval and OpenVINO export **not started** — you download the checkpoint. Default live adapter stays YOLOE.
+**Status:** decode + ontology **shipped** (scripted logits, no weights). PyTorch eval and OpenVINO export **not started** — you download the checkpoint. Default live adapter is RUGD SegFormer, not GA-Nav and not YOLOE.
 
 **Authority:** [`architecture.md`](../../architecture.md) §3, §6, §8 (port unchanged). [`HARDWARE.md`](../HARDWARE.md) OpenVINO GPU, Arc B580, later NVIDIA **less** VRAM.  
 **Does not replace:** T01–T05, T07, T10, T11. Those stay.  
@@ -18,7 +18,7 @@ If this file and `architecture.md` disagree on topics, encodings, `{0,1,2}`, or 
 | **ROS 2 Lyrical** | **Yes — our node, not theirs.** Upstream `ros_support/` is ROS 1 (2021). We do **not** run their node. `PerceptionAdapterNode` already injects `adapter=`. |
 | **Arc B580 + OpenVINO 2026.4.0 `device=GPU`** | **Product path only after ONNX→IR succeeds.** MixTransformer + group-wise attention is custom mmseg (2022). Export is a **gate**, not a promise. |
 | **≤10–12 GB VRAM** | **Expected to fit.** Peak memory and latency are **measured after** ONNX→IR→GPU compile. Do not freeze “&lt;2 GB” as a guarantee. If compile/run exceeds the box, **stop**. |
-| **PyTorch CUDA / XPU as product** | **No.** Eval/export only. Same HARDWARE rule as YOLOE. |
+| **PyTorch CUDA / XPU as product for GA-Nav** | **No.** Eval/export only. Live CUDA product is RUGD + DA3 (`CudaPytorchTensorBackend`), not GA-Nav. |
 
 **If OpenVINO export fails:** stop. Do not make PyTorch-on-Arc the live_cam path. Pick another segmenter that exports (e.g. SegFormer) or stay on YOLOE for objects.
 

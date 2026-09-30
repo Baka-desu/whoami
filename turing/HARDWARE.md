@@ -29,8 +29,21 @@ Someone implementing T12 must pick **one** backend class, not both in one proces
 ## Pin (this project)
 
 - **OpenVINO 2026.4.0** (current stable as of 2026-09-16: `pip install openvino==2026.4.0`).
-- Compile / load IR for **GPU**. Do not default to CPU to “make it run.”
+- Live RUGD/DA3: Intel OpenVINO `GPU` IR first, then CUDA safetensors, then OpenVINO CPU IR (`architecture.md` §6). YOLOE `OpenVinoGpuBackend` stays GPU-only.
 - Do not require `intel-extension-for-pytorch` for the product OpenVINO path.
+
+## Which files on which machine
+
+| Machine | Files | Engine |
+|---|---|---|
+| Intel Arc GPU | `*.xml` + `*.bin` | OpenVINO `GPU` |
+| NVIDIA GPU, no Intel GPU | HuggingFace `model.safetensors` folders | CUDA PyTorch |
+| Intel CPU only | `*.xml` + `*.bin` | OpenVINO CPU |
+| NVIDIA GPU + Intel CPU, safetensors present | safetensors | CUDA (xml unused) |
+| NVIDIA GPU + Intel CPU, IR only | `*.xml` + `*.bin` | OpenVINO (NVIDIA plugin if present, else CPU). CUDA needs the HuggingFace folders. |
+| Intel GPU + NVIDIA GPU | `*.xml` + `*.bin` | Intel OpenVINO GPU |
+
+An OpenVINO export does not run on CUDA. A safetensors folder does not load in OpenVINO. Same net, two packages.
 
 ## Machines
 
