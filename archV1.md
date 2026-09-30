@@ -55,18 +55,6 @@ Baylands / RUGD / tutorial ONNX = eval/scaffold only.
 ## 5. Context diagram (base + add-on)
 
 ```
-                         [Mission]
-                 {range, bearing} from start
-                            │
-                            ▼
-                 ┌────────────────────┐
-                 │ RTAB-Map           │
-                 │ reference pose     │
-                 │ in map frame       │
-                 │ + live TF / pose   │
-                 └─────────┬──────────┘
-                           │ map-frame PoseStamped
-                           ▼
                     [Vision sensor]
               recommended: stereo/RGB-D · minimum: mono
                            │
@@ -74,28 +62,28 @@ Baylands / RUGD / tutorial ONNX = eval/scaffold only.
               │ dual fan-out (parallel) │
               ▼                         ▼
    ┌────────────────────┐     ┌────────────────────┐
-   │ Adapters (sources) │     │ RTAB-Map           │
-   │ RUGD SegFormer-B5  │     │ pose + map         │
-   │ remap→canonical    │     │ mapping-while-go   │
-   │ normalize conf     │     │ (does NOT use mask)│
-   └─────────┬──────────┘     └─────────┬──────────┘
-             ▼                          │
+   │ Adapters (sources) │     │ RTAB-Map           │◄── [Mission]
+   │ RUGD SegFormer-B5  │     │ pose + map         │    {range, bearing}
+   │ remap→canonical    │     │ reference pose     │    from start
+   │ normalize conf     │     │ mapping-while-go   │
+   └─────────┬──────────┘     │ (does NOT use mask)│
+             ▼                └─────────┬──────────┘
   ┌─────────────────────┐               │
-  │  PERCEPTION PORT    │               │
-  │  {0,1,2} + conf     │               │
+  │  PERCEPTION PORT    │               │ live TF / pose_valid
+  │  {0,1,2} + conf     │               │ + map-frame PoseStamped goal
   │  stamp/frame/age    │               │
   └──────────┬──────────┘               │
              ▼                          │
   ┌────────────────────┐                │
-  │ Nav2 costmaps      │◄───────────────┘
+  │ Nav2 costmaps      │◄───────────────┤
   │ SemanticLayer +    │   grow as new terrain is seen
   │ optional VoxelLayer│◄── optional Depth Anything 3 Metric Large
-  └─────────┬──────────┘
-            ▼
-  ┌────────────────────┐
-  │ Nav2 Smac2D + RPP  │◄── map-frame goal (may start off-map)
-  │ replan as cost     │──► cmd candidate
-  │ maps fill          │
+  └─────────┬──────────┘                │
+            ▼                           │
+  ┌────────────────────┐                │
+  │ Nav2 Smac2D + RPP  │◄───────────────┘
+  │ replan as cost     │   map-frame goal (may start off-map)
+  │ maps fill          │──► cmd candidate
   └─────────┬──────────┘
             ▼
   ┌────────────────────┐
@@ -103,6 +91,8 @@ Baylands / RUGD / tutorial ONNX = eval/scaffold only.
   │ (final cmd gate)   │
   └────────────────────┘
 ```
+
+One RTAB-Map. Camera still dual-fans to adapters and RTAB-Map. Mission `{range, bearing}` enters RTAB-Map; the converted `map`-frame goal enters **Nav2 Smac2D + RPP**, not the camera.
 
 ### 5.1 Who owns the new boxes
 ```
@@ -190,9 +180,18 @@ Candidate twist remains `/cmd_vel_nav2`.
 
 ## 12. System health → safe stop
 
-Same timeout table as `architecture.md` §12. Any trip zeros `/cmd_vel`: camera, perception port, localization / VO-lost, TF, Nav2 heartbeat, e-stop.
+Same timeout table as `architecture.md` §12. Six watches; any trip zeros `/cmd_vel`:
 
-Localized-goal travel does not add a sixth watch and does not weaken the existing five.
+| Watch | Fail when | Action |
+|---|---|---|
+| Camera | no image / age > limit | hold |
+| Perception port | no valid fresh mask / degraded | hold |
+| Localization | invalid pose / VO-lost / TF missing | hold |
+| TF | required frames missing | hold |
+| Nav2 | crash / no controller heartbeat | hold |
+| E-stop | asserted | hold |
+
+Localized-goal travel does not add a seventh watch and does not weaken these six.
 
 ## 13. Definition of Done (this add, on top of `architecture.md` §13)
 1. Relative `{range, bearing}` from a recorded start pose becomes a `map`-frame goal  
