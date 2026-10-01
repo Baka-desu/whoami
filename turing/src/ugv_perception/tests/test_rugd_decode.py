@@ -8,7 +8,13 @@ import numpy as np
 
 from ugv_perception.adapter.frame import ImageFrame
 from ugv_perception.adapter.output import AdapterError
-from ugv_perception.adapter.rugd import CLASS_NAMES, decode_rugd_logits, preprocess_rgb
+from ugv_perception.adapter.rugd import (
+    CLASS_NAMES,
+    _resize_map,
+    _resize_maps,
+    decode_rugd_logits,
+    preprocess_rgb,
+)
 from ugv_perception.compose import compose_tick, load_compose_configs
 from ugv_perception.remap.load import load_remap
 
@@ -43,6 +49,15 @@ def test_decode_rejects_nan() -> None:
     except AdapterError:
         return
     raise AssertionError("NaN logits must raise")
+
+
+def test_resize_maps_matches_per_plane() -> None:
+    rng = np.random.default_rng(0)
+    src = rng.standard_normal((25, 8, 10)).astype(np.float32)
+    stacked = _resize_maps(src, 16, 20)
+    planes = np.stack([_resize_map(src[c], 16, 20) for c in range(25)], axis=0)
+    assert stacked.shape == (25, 16, 20)
+    np.testing.assert_allclose(stacked, planes, rtol=1e-5, atol=1e-5)
 
 
 def test_preprocess_nchw_shape() -> None:

@@ -100,19 +100,17 @@ def preprocess_rgb(
     if rgb.dtype != np.uint8 or rgb.ndim != 3 or rgb.shape[2] != 3:
         raise TypeError("rgb must be uint8 HWC")
     in_h, in_w = input_hw
-    resized = np.stack(
-        [_resize_map(rgb[:, :, c].astype(np.float32), in_h, in_w) for c in range(3)],
-        axis=2,
-    )
-    norm = (resized / 255.0 - np.asarray(mean, dtype=np.float32)) / np.asarray(
-        std, dtype=np.float32
-    )
-    return np.transpose(norm, (2, 0, 1))[None].astype(np.float32)
+    chw = np.transpose(rgb, (2, 0, 1)).astype(np.float32, copy=False)
+    resized = _resize_maps(chw, in_h, in_w)
+    mean_a = np.asarray(mean, dtype=np.float32)[:, None, None]
+    std_a = np.asarray(std, dtype=np.float32)[:, None, None]
+    norm = (resized / 255.0 - mean_a) / std_a
+    return norm[None].astype(np.float32)
 
 
 def decode_rugd_logits(logits: np.ndarray, frame: ImageFrame) -> RawSemOutput:
     """(1, 25, h, w) or (25, h, w) logits → argmax softmax on camera HW."""
-    a = np.asarray(logits, dtype=np.float64)
+    a = np.asarray(logits, dtype=np.float32)
     if a.ndim == 4 and a.shape[0] == 1:
         a = a[0]
     if a.ndim != 3 or a.shape[0] != N_CLASSES:
@@ -121,7 +119,7 @@ def decode_rugd_logits(logits: np.ndarray, frame: ImageFrame) -> RawSemOutput:
         raise AdapterError("RUGD logits are not finite")
     rh, rw = int(frame.rgb.shape[0]), int(frame.rgb.shape[1])
     if (a.shape[1], a.shape[2]) != (rh, rw):
-        a = np.stack([_resize_map(a[c], rh, rw) for c in range(N_CLASSES)], axis=0)
+        a = _resize_maps(a, rh, rw)
     shifted = a - a.max(axis=0, keepdims=True)
     exp = np.exp(np.clip(shifted, -80.0, 80.0))
     prob = exp / exp.sum(axis=0, keepdims=True)
@@ -168,22 +166,37 @@ class RugdSegformerAdapter:
 
 
 def _resize_map(src: np.ndarray, h: int, w: int) -> np.ndarray:
-    mh, mw = src.shape
-    src_f = src.astype(np.float64, copy=False)
+    return _resize_maps(src, h, w)
+
+
+def _resize_maps(src: np.ndarray, h: int, w: int) -> np.ndarray:
+    """Bilinear upsample. src is (H, W) or (C, H, W). One grid for all channels."""
+    squeeze = False
+    if src.ndim == 2:
+        src = src[None, ...]
+        squeeze = True
+    if src.ndim != 3:
+        raise ValueError("src must be (H, W) or (C, H, W)")
+    _c, mh, mw = src.shape
+    src_f = np.asarray(src, dtype=np.float32)
     if (mh, mw) == (h, w):
-        return src_f
-    ys = np.clip((np.arange(h) + 0.5) * mh / h - 0.5, 0.0, mh - 1)
-    xs = np.clip((np.arange(w) + 0.5) * mw / w - 0.5, 0.0, mw - 1)
-    yy, xx = np.meshgrid(ys, xs, indexing="ij")
-    y0 = np.floor(yy).astype(np.intp)
-    x0 = np.floor(xx).astype(np.intp)
+        return src_f[0] if squeeze else src_f
+    ys = np.clip((np.arange(h, dtype=np.float32) + 0.5) * (mh / h) - 0.5, 0.0, mh - 1)
+    xs = np.clip((np.arange(w, dtype=np.float32) + 0.5) * (mw / w) - 0.5, 0.0, mw - 1)
+    y0 = np.floor(ys).astype(np.intp)
+    x0 = np.floor(xs).astype(np.intp)
     y1 = np.minimum(y0 + 1, mh - 1)
     x1 = np.minimum(x0 + 1, mw - 1)
-    wy = yy - y0
-    wx = xx - x0
-    return (
-        src_f[y0, x0] * (1.0 - wy) * (1.0 - wx)
-        + src_f[y0, x1] * (1.0 - wy) * wx
-        + src_f[y1, x0] * wy * (1.0 - wx)
-        + src_f[y1, x1] * wy * wx
+    wy = (ys - y0.astype(np.float32))[:, None]
+    wx = (xs - x0.astype(np.float32))[None, :]
+    y0i = y0[:, None]
+    y1i = y1[:, None]
+    x0i = x0[None, :]
+    x1i = x1[None, :]
+    out = (
+        src_f[:, y0i, x0i] * (1.0 - wy) * (1.0 - wx)
+        + src_f[:, y0i, x1i] * (1.0 - wy) * wx
+        + src_f[:, y1i, x0i] * wy * (1.0 - wx)
+        + src_f[:, y1i, x1i] * wy * wx
     )
+    return out[0] if squeeze else out
