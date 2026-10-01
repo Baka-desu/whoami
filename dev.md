@@ -106,6 +106,7 @@ All 5 developers integrate against the topic contracts defined in `architecture.
 | Camera `Image` + `CameraInfo` | `sensor_msgs/msg/Image`<br>`sensor_msgs/msg/CameraInfo` | **Dev 5** (bringup / driver) | **Dev 1**, **Dev 2** | Shared vision sensor (architecture §5). Stamp = image time; `frame_id` matches `CameraInfo`. Dev 1 does **not** open V4L2. Intrinsics YAML: Dev 2 `config/cameras/`. |
 | `/segmentation/mask` | `sensor_msgs/msg/Image` | **Dev 1** | **Dev 3**, Dev 5 | Encoding `mono8`, pixels strictly in `{0: unknown, 1: traversable, 2: hazard}`. Header timestamp matches source frame. |
 | `/ugv/perception_degraded` | `std_msgs/msg/Bool` | **Dev 1** | **Dev 5** | Emits `true` if latency > `perception_max_age` or confidence gates trip. |
+| `/perception/depth_cloud` | `sensor_msgs/msg/PointCloud2` | **Dev 1** | **Dev 2**, Dev 3 | x/y/z in metres. Stamp = source image stamp, frame = camera optical frame, back-projected with the raw K at camera resolution. |
 | `TF (map->odom->base)` | `tf2_msgs/msg/TFMessage` | **Dev 2** | **Dev 3**, Dev 4, Dev 5 | Continuous tree, jitter $< 50\text{ ms}$, publish rate $\ge 15\text{ Hz}$. |
 | `/ugv/pose_valid` | `std_msgs/msg/Bool` | **Dev 2** | **Dev 5** | Emits `false` if tracking lost, TF expires, or covariance explodes (§10.1). |
 | `/global_costmap/costmap`<br>`/local_costmap/costmap` | `nav_msgs/msg/OccupancyGrid` | **Dev 3** | **Dev 4** | 2D occupancy grid combining semantic layers and geometry precedence (§9). |

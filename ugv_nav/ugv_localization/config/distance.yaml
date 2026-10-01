@@ -1,0 +1,13 @@
+# distance_tracker profile (Dev 2). Starting values, not architecture — tune in sim.
+# Every threshold is a float on purpose (0.5, not 1): intent must be explicit.
+
+# Jitter floor: motion counts only once the pose leaves this radius around the last counted
+# point. Visual odometry wobbles a few cm while parked; below this it never adds up.
+min_step_m: 0.05
+
+# Faster than this between two /odom samples = reset / relocalization artefact, not driving.
+# Well above any diff-drive UGV top speed; no robot max speed is pinned yet (Dev 4 / Dev 5).
+max_speed_mps: 3.0
+
+# /ugv/localization/distance_travelled is published at this rate (also while standing still).
+publish_rate_hz: 5.0

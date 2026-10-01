@@ -16,6 +16,7 @@ _PKG = Path(__file__).resolve().parents[1]
     [
         "ugv_localization.nodes.odom_selector",
         "ugv_localization.nodes.pose_validity_node",
+        "ugv_localization.nodes.distance_tracker",
         "ugv_localization.nodes.tf_rate_check",
         "ugv_localization.nodes.drift_eval",
         "ugv_localization.nodes.depth_eval",
@@ -89,7 +90,7 @@ def test_s4_launch_nodes_per_odom_source(odom_source: str, expect_vo: bool, dept
         }
     )
     execs = [a.node_executable for a in mod._setup(ctx) if isinstance(a, Node)]
-    expected = {"rgbd_sync", "odom_selector", "rtabmap", "pose_validity_node"}
+    expected = {"rgbd_sync", "odom_selector", "rtabmap", "pose_validity_node", "distance_tracker"}
     expected |= {"rgbd_odometry"} if expect_vo else set()
     expected |= {"pointcloud_to_depthimage"} if depth_input == "cloud" else set()
     assert set(execs) == expected
