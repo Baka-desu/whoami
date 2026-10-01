@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { lazy, Suspense, useEffect, useState } from 'react'
 import { CameraView } from './components/CameraView'
 import { CommandPanel } from './components/CommandPanel'
 import { Inspector } from './components/Inspector'
@@ -11,6 +11,21 @@ import { useCameraSource } from './source/useCameraSource'
 
 const CLOCK_MS = 250 // re-check telemetry freshness at 4 Hz so a dead stream reads NO SIGNAL promptly
 
+// three.js is large, so the map view is its own lazily loaded chunk: the camera view's first paint does not pay for it.
+const MapView = lazy(() => import('./components/MapView').then((m) => ({ default: m.MapView })))
+
+type View = 'camera' | 'map'
+const VIEWS: View[] = ['camera', 'map']
+const VIEW_KEY = 'ugv.console.view'
+
+const savedView = (): View => {
+  try {
+    return localStorage.getItem(VIEW_KEY) === 'map' ? 'map' : 'camera'
+  } catch {
+    return 'camera'
+  }
+}
+
 type Message = { text: string; reasons?: string[]; error: boolean } | null
 
 const fromError = (e: unknown): Message =>
@@ -18,8 +33,9 @@ const fromError = (e: unknown): Message =>
     ? { text: `${e.problem.title}${e.problem.detail ? `: ${e.problem.detail}` : ''}`, reasons: e.problem.reasons, error: true }
     : { text: String(e), error: true }
 
-// Operator console. The camera view (Dev 1's mask / depth / path over the live image, display only) is the main
-// page. Left sidebar: the operator's commands (e-stop §3.1, mapping|localize §10, map-frame goal §11) through Dev 5's
+// Operator console. The main area shows one of two views, picked in the top bar: the camera view (Dev 1's mask /
+// depth / path over the live image) or the 3D map view; both are display only, and only the shown one is mounted.
+// Left sidebar: the operator's commands (e-stop §3.1, mapping|localize §10, map-frame goal §11) through Dev 5's
 // gateway (/api/v1), and the camera source. Right sidebar: §12 health table, robot status, perception details.
 export default function App() {
   const [telemetry, setTelemetry] = useState<Telemetry | null>(null)
@@ -27,7 +43,13 @@ export default function App() {
   const [now, setNow] = useState(() => Date.now())
   const [estopBusy, setEstopBusy] = useState(false)
   const [message, setMessage] = useState<Message>(null)
+  const [view, setView] = useState<View>(savedView)
   const cam = useCameraSource()
+
+  const pickView = (v: View) => {
+    setView(v)
+    try { localStorage.setItem(VIEW_KEY, v) } catch { /* not persisted */ }
+  }
 
   useEffect(() => subscribeTelemetry(setTelemetry, setConnected), [])
   useEffect(() => {
@@ -69,6 +91,13 @@ export default function App() {
   return (
     <div className="app">
       <TopBar connected={connected} live={live} safetyOk={safety?.ok ?? null} />
+      <nav className="viewswitch" aria-label="Main view">
+        {VIEWS.map((v) => (
+          <button key={v} type="button" className={view === v ? 'on' : ''} aria-pressed={view === v} onClick={() => pickView(v)}>
+            {v}
+          </button>
+        ))}
+      </nav>
       <aside className="panel source">
         <CommandPanel
           live={live}
@@ -85,7 +114,13 @@ export default function App() {
         />
         <SourcePanel cam={cam} />
       </aside>
-      <CameraView cam={cam} />
+      {view === 'camera' ? (
+        <CameraView cam={cam} />
+      ) : (
+        <Suspense fallback={<section className="mapview" aria-busy="true" />}>
+          <MapView telemetry={telemetry} live={live} />
+        </Suspense>
+      )}
       <aside className="panel inspector">
         <SafetyBoard safety={safety} live={live} />
         <p className="inspector-hint">drag widgets to rearrange · alt + arrows on keyboard</p>
@@ -95,6 +130,7 @@ export default function App() {
           navigation={telemetry?.navigation}
           localization={telemetry?.localization}
           eStop={safety?.eStop}
+          map={telemetry?.map}
         />
         <Inspector analysis={cam.analysis} freshness={cam.freshness} />
       </aside>

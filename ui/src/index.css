@@ -379,3 +379,48 @@ code { font-size: 10px; color: var(--text); overflow-wrap: anywhere; }
 .board .watch b { font-size: 14px; }
 .sidegroup { margin-bottom: 16px; }
 .sidegroup-title { margin: 4px 2px 8px; font-size: 11px; font-weight: 500; letter-spacing: 0.22em; color: var(--dim); text-transform: uppercase; }
+
+/* camera | map switch (App.tsx), laid over the middle of the top bar in the top bar's own ink */
+.viewswitch { grid-area: top; justify-self: center; align-self: center; z-index: 1; display: flex; border: 1px solid var(--on-pale); }
+.viewswitch button { padding: 2px 12px; background: none; border: 0; color: var(--on-pale); font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase; opacity: 0.6; cursor: pointer; transition: opacity 0.18s var(--ease), background 0.18s var(--ease); }
+.viewswitch button + button { border-left: 1px solid var(--on-pale); }
+.viewswitch button:hover { opacity: 1; }
+.viewswitch button:focus-visible { outline-color: var(--on-pale); opacity: 1; }
+.viewswitch button.on { background: var(--on-pale); color: var(--pale); font-weight: 700; opacity: 1; }
+
+/* Map view (MapView.tsx): the 3D map with the depth and camera panels inset on its left edge, as in the owner's
+   reference picture. Everything is scoped under .mapview; the .viewport canvas rules above belong to the camera view
+   and reach neither the GL canvas (MapScene styles it inline) nor the panels' canvases. */
+.mapview { grid-area: view; display: grid; grid-template-rows: auto minmax(0, 1fr); min-height: 0; }
+.mapview .livefeed-layers { flex: 0 1 auto; flex-wrap: wrap; justify-content: flex-end; }
+.mapview .livefeed-layers select { font: inherit; font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; padding: 2px 6px; background: var(--bg); color: var(--text); border: 1px solid var(--line-strong); cursor: pointer; }
+.mapview .livefeed-layers button:disabled, .mapview .livefeed-layers select:disabled { opacity: 0.4; cursor: not-allowed; }
+.mapview-stage { position: relative; min-height: 0; overflow: hidden; background: var(--bg); }
+.mapview-gl { position: absolute; inset: 0; }
+.mapview-stage::before, .mapview-stage::after {
+  content: '';
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  border: 2px solid var(--accent);
+  pointer-events: none;
+  z-index: 2;
+}
+.mapview-stage::before { top: 8px; left: 8px; border-right: 0; border-bottom: 0; }
+.mapview-stage::after { right: 8px; bottom: 8px; border-left: 0; border-top: 0; }
+.mapview .banner { left: 50%; transform: translateX(-50%); white-space: nowrap; }
+.mapview-insets { position: absolute; top: 16px; left: 16px; z-index: 3; display: grid; gap: 10px; width: clamp(160px, 24%, 320px); max-height: calc(100% - 32px); overflow: hidden; }
+.mapview-inset { margin: 0; background: rgba(3, 16, 12, 0.88); border: 1px solid var(--line-strong); }
+.mapview-inset figcaption { padding: 3px 8px; font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--dim); border-bottom: 1px solid var(--line); }
+.mapview-inset canvas { display: block; width: 100%; height: auto; max-height: 34vh; object-fit: contain; }
+
+@media (max-width: 1000px) {
+  /* the top bar wraps here, so the switch gets a row of its own under it */
+  .app { grid-template: auto auto minmax(320px, 60vh) auto auto / 1fr; grid-template-areas: 'top' 'switch' 'view' 'source' 'inspect'; }
+  .viewswitch { grid-area: switch; justify-self: start; margin: 8px 16px; border-color: var(--line-strong); }
+  .viewswitch button { color: var(--dim); opacity: 1; }
+  .viewswitch button + button { border-left-color: var(--line-strong); }
+  .viewswitch button.on { background: var(--pale); color: var(--on-pale); }
+  .mapview { border-bottom: 1px solid var(--line-strong); }
+  .mapview-insets { width: clamp(120px, 30%, 220px); }
+}
