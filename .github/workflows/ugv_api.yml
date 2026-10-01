@@ -1,0 +1,24 @@
+name: ugv_api
+
+on:
+  pull_request:
+    paths: ['ugv_nav/ugv_api/**', '.github/workflows/ugv_api.yml']
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    container: ros:lyrical-ros-base
+    steps:
+      - uses: actions/checkout@v4
+      # dist-upgrade: the base image lags the apt repo (see src/ugv_navigation/docker/lyrical-nav2.Dockerfile)
+      - run: |
+          apt-get update && apt-get dist-upgrade -y && apt-get install -y --no-install-recommends \
+            ros-lyrical-nav2-msgs ros-lyrical-tf2-ros-py ros-lyrical-std-srvs \
+            python3-fastapi python3-uvicorn python3-pydantic python3-httpx python3-pytest \
+            python3-colcon-common-extensions
+      - shell: bash
+        run: |
+          source /opt/ros/lyrical/setup.bash
+          colcon build --base-paths ugv_nav/ugv_api --packages-select ugv_api
+          colcon test --base-paths ugv_nav/ugv_api --packages-select ugv_api --event-handlers console_direct+
+          colcon test-result --verbose

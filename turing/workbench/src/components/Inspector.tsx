@@ -1,8 +1,6 @@
 import type { ReactNode } from 'react'
 import type { Freshness } from '../analysis/freshness'
 import { PERCEPTION_MAX_AGE_MS, CLASS_NAMES, CLASS_RGB, type Analysis } from '../types'
-import type { RobotSnapshot } from '../source/robot'
-import { NavMapWidget, RobotWidget } from './RobotPanel'
 import { TopDownMap } from './TopDownMap'
 import DraggableWidgetGrid, { type WidgetItem, type WidgetSize } from './ui/draggable-widget-grid'
 
@@ -27,20 +25,18 @@ function Row({ k, v, tone }: { k: string; v: ReactNode; tone?: 'trip' | 'warn' }
 interface Props {
   analysis: Analysis | null
   freshness: Freshness | null
-  robot: RobotSnapshot | null
-  estop: boolean
 }
 
-type WidgetId = 'navmap' | 'robot' | 'analysis' | 'ground' | 'classes' | 'depth' | 'health' | 'source'
+type WidgetId = 'analysis' | 'ground' | 'classes' | 'depth' | 'health' | 'source'
 
 const SIZE: Record<WidgetId, WidgetSize> = {
-  navmap: 'lg', robot: 'lg', analysis: 'wide', ground: 'lg', classes: 'wide', depth: 'wide', health: 'wide', source: 'wide',
+  analysis: 'wide', ground: 'lg', classes: 'wide', depth: 'wide', health: 'wide', source: 'wide',
 }
 const LABEL: Record<WidgetId, string> = {
-  navmap: 'Navigation map', robot: 'Robot state', analysis: 'Analysis', ground: 'Ground map',
+  analysis: 'Analysis', ground: 'Ground map',
   classes: 'Classes', depth: 'Depth', health: 'Health', source: 'Source',
 }
-const ORDER_KEY = 'whoami.inspector.order'
+const ORDER_KEY = 'whoami.workbench.inspector.order'
 
 // The arrangement is a per-browser preference (not app state): saved order, filtered to the widgets
 // that exist right now.
@@ -61,15 +57,12 @@ function remember(items: WidgetItem[]) {
   } catch { /* storage unavailable: the order just won't persist */ }
 }
 
-export function Inspector({ analysis: a, freshness: fr, robot, estop }: Props) {
+export function Inspector({ analysis: a, freshness: fr }: Props) {
   const ids: WidgetId[] = []
-  if (robot) ids.push('navmap', 'robot')
   if (!a || !fr) ids.push('analysis')
   else ids.push('ground', 'classes', 'depth', 'health', 'source')
 
   const render = (id: WidgetId): ReactNode => {
-    if (id === 'navmap' && robot) return <NavMapWidget robot={robot} />
-    if (id === 'robot' && robot) return <RobotWidget robot={robot} estop={estop} />
     if (id === 'analysis') {
       return (
         <Section title="Analysis">

@@ -1,29 +1,21 @@
-import type { Status } from '../types'
-
-const LABEL: Record<Status, string> = { idle: 'IDLE', live: 'LIVE', still: 'STILL', error: 'ERROR' }
-
 interface Props {
-  status: Status
-  fps: number
-  note: string
-  analyzerOnline: boolean
+  connected: boolean // SSE connection open
+  live: boolean // telemetry fresh
+  safetyOk: boolean | null
 }
 
-export function TopBar({ status, fps, note, analyzerOnline }: Props) {
+export function TopBar({ connected, live, safetyOk }: Props) {
+  const status = !connected ? 'error' : live ? 'live' : 'idle'
+  const label = !connected ? 'GATEWAY OFFLINE' : live ? 'LIVE' : 'NO TELEMETRY'
   return (
     <header className="topbar">
-      <div className="brand">WHOAMI<span>/ perception workbench</span></div>
-      {!analyzerOnline && (
-        <div className="analyzer-off" title="No perception backend is connected, so frames are shown without a mask, depth or path">
-          NO ANALYZER
-        </div>
-      )}
+      <div className="brand">UGV<span>/ operator console</span></div>
+      {live && safetyOk === false && <div className="analyzer-off" title="A §12 watch has tripped">HOLD</div>}
       <a className="tb-link" href="#features">FEATURES ↓</a>
-      {note && <div className={`note ${status === 'error' ? 'err' : ''}`}>{note}</div>}
+      <div className="note">/api/v1</div>
       <div className={`pill ${status}`}>
         <i />
-        {LABEL[status]}
-        {status === 'live' && <em>{fps.toFixed(1)} fps</em>}
+        {label}
       </div>
     </header>
   )

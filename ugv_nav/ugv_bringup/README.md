@@ -38,4 +38,28 @@ ros2 run camera_calibration cameracalibrator --size 8x6 --square 0.025     --ros
 
 Calibrate at the resolution you will run at: K is only valid there.
 
-Not covered here: the full `profile:=live_cam|bag` bringup, URDF, motor driver.
+## Full stack: `bringup.launch.py profile:=live_cam`
+
+```
+ros2 launch ugv_bringup bringup.launch.py profile:=live_cam     calibration_file:=<camera yaml> device:=<V4L2 path or stream URL>     camera_x:=<m> camera_y:=<m> camera_z:=<m> camera_pitch_deg:=<deg>     perception_src:=<repo>/turing/src [mode:=mapping|localize] [robot:=primary]
+```
+
+Starts camera driver, robot description (`ugv_robot_description`: base_link -> camera_optical_frame from the
+measured mount, no defaults), Dev 1 perception, Dev 2 localization, Dev 3 semantic costmap (`ugv_costmap`),
+Dev 4 Nav2, the safety arbiter and the operator API. `sim` and `bag` are refused until they are wired.
+
+## live_cam on a Windows laptop (ROS in Docker)
+
+Docker on Windows cannot open a USB webcam, so the host serves it and the driver reads the stream.
+
+1. Host (Windows Python + opencv-python): `python ugv_nav/ugv_bringup/scripts/webcam_stream.py` serves
+   `http://<host>:8090/cam.mjpg` (newest frame only, no backlog). Stop it with Ctrl+C: it holds the camera.
+2. Image: `docker build -t ugv-live -f ugv_nav/ugv_bringup/docker/live.Dockerfile ugv_nav/ugv_bringup/docker`
+   (needs `ugv-lyrical-nav2` first, see that Dockerfile).
+3. Container with the GPU, the repo and WSLg (for the calibrator window):
+   ```
+   docker run -it --gpus all -p 8080:8080 -v <repo>:/repo        -v /run/desktop/mnt/host/wslg/.X11-unix:/tmp/.X11-unix -e DISPLAY=:0 ugv-live
+   ```
+   then build the workspace from `/repo` and use `device:=http://host.docker.internal:8090/cam.mjpg`.
+
+Not covered here: motor driver, wheel odometry, Gazebo `sim` profile.

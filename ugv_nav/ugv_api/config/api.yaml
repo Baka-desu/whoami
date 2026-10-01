@@ -1,0 +1,21 @@
+# Dev 5 operator gateway (ugv_api). REST /api/v1 + SSE.
+ugv_api:
+  ros__parameters:
+    host: 127.0.0.1          # robot-local by default; v1 has no authentication
+    port: 8080
+    telemetry_hz: 5.0        # SSE /api/v1/telemetry/stream update rate
+    cors_origins: [""]       # empty: same-origin only (the UI dev server proxies /api)
+    e_stop_republish_hz: 5.0 # re-publish /ugv/e_stop=true while asserted (latched)
+    camera_info_topic: /camera/camera_info
+    navigate_action: /navigate_to_pose
+    rtabmap_service_ns: /rtabmap/rtabmap   # same as ugv_localization mode_cli
+    map_frame: map
+    base_frame: base_link
+    # DISPLAY limits for the §12 table shown to the operator. The enforcing limits are Dev 5's
+    # safety arbiter (safety_timeouts.yaml, dev.md Dev 5 task 2): this gateway never stops the robot.
+    timeouts:
+      camera: 0.5
+      perception: 0.5
+      localization: 0.5
+      tf: 0.5
+      nav2: 0.5

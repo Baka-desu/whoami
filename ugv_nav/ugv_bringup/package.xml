@@ -14,6 +14,12 @@
   <exec_depend>rclpy</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>
   <exec_depend>ugv_localization</exec_depend>
+  <exec_depend>ugv_robot_description</exec_depend>
+  <exec_depend>ugv_costmap</exec_depend>
+  <exec_depend>ugv_navigation</exec_depend>
+  <exec_depend>ugv_safety</exec_depend>
+  <exec_depend>ugv_api</exec_depend>
+  <exec_depend>ament_index_python</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>python3-opencv</exec_depend>

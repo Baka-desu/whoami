@@ -91,6 +91,47 @@ class CudaPytorchTensorBackend:
             raise AdapterError("CUDA run failed") from exc
 
 
+    def run_decoded(
+        self, blob: NDArray[np.float32], out_hw: tuple[int, int]
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """RUGD on CUDA, decoded on the GPU: (labels int32, top-class probability float32) at out_hw.
+
+        Same maths as adapter.rugd.decode_rugd_logits, in float64: bilinear resize of the logits with
+        half-pixel centres and edge clamp (torch align_corners=False), argmax, and the top class's
+        softmax probability 1 / sum(exp(l - l_max)). Saves ~0.7 s of CPU per 640x480 frame.
+        """
+        if self._model is None or self._kind != "rugd":
+            raise AdapterError("run_decoded needs a loaded RUGD model")
+        if not isinstance(blob, np.ndarray) or blob.dtype != np.float32 or blob.ndim != 4:
+            raise TypeError("blob must be float32 NCHW")
+        try:
+            import torch
+            import torch.nn.functional as F
+        except ImportError as exc:
+            raise AdapterError("torch is not installed") from exc
+        try:
+            tensor = torch.from_numpy(blob).to("cuda")
+            with torch.inference_mode():
+                logits = self._model(pixel_values=tensor).logits
+                if not bool(torch.isfinite(logits).all()):
+                    raise AdapterError("RUGD logits are not finite")
+                a = logits.double()
+                if tuple(a.shape[-2:]) != tuple(out_hw):
+                    a = F.interpolate(a, size=tuple(out_hw), mode="bilinear", align_corners=False)
+                a = a[0]
+                top, labels = a.max(dim=0)
+                total = torch.exp(torch.clamp(a - top, -80.0, 80.0)).sum(dim=0)
+                scores = (1.0 / total).float()
+                return (
+                    labels.to(torch.int32).cpu().numpy(),
+                    scores.cpu().numpy(),
+                )
+        except AdapterError:
+            raise
+        except Exception as exc:
+            raise AdapterError("CUDA run failed") from exc
+
+
 def _load_rugd(path: Path) -> object:
     from transformers import SegformerForSemanticSegmentation
 
