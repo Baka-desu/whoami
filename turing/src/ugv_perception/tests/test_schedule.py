@@ -14,7 +14,7 @@ from ugv_perception.node.schedule import (
     DEFAULT_MASK_MAX_GAP_S,
     SegScheduler,
     carried_degraded,
-    mask_expired,
+    mask_stream_stalled,
     seg_due,
 )
 
@@ -139,39 +139,63 @@ def test_bad_arguments_are_rejected(kwargs) -> None:
         seg_due(**good)
 
 
-# --- the degraded value on a depth-only frame, and the age of a mask ------------------------------------
+# --- the degraded value on a depth-only frame, and the liveness of the mask stream --------------------------
+# "Published" times are the node's monotonic clock at the moment a mask went out. The age of the mask's image
+# stamp is NOT used: it is latency plus the time the mask is held before the next one replaces it, which
+# reaches 0.45 to 0.58 s in normal operation. Liveness asks only whether masks are still being produced.
 
 
-def test_a_mask_expires_only_when_one_was_published_and_it_is_older_than_the_max_age() -> None:
-    stamp = 10 * _NS
-    assert mask_expired(None, stamp, _MAX_AGE_S) is False  # nothing published, nothing to expire
-    assert mask_expired(stamp, stamp + ms(500), _MAX_AGE_S) is False  # exactly at the limit
-    assert mask_expired(stamp, stamp + ms(500) + 1, _MAX_AGE_S) is True
-    assert mask_expired(stamp, stamp - ms(5), _MAX_AGE_S) is False  # a stamp in the future is not old
+def test_the_stream_is_stalled_when_the_newest_mask_was_published_too_long_ago() -> None:
+    t = 10 * _NS
+    kw = {"first_image_ns": t - 5 * _NS, "max_age_s": _MAX_AGE_S}
+    assert mask_stream_stalled(last_published_ns=t, now_ns=t + ms(100), **kw) is False
+    assert mask_stream_stalled(last_published_ns=t, now_ns=t + ms(500), **kw) is False  # at the limit
+    assert mask_stream_stalled(last_published_ns=t, now_ns=t + ms(500) + 1, **kw) is True
+    assert mask_stream_stalled(last_published_ns=t, now_ns=t - ms(5), **kw) is False  # a clock step back
+
+
+def test_with_no_mask_yet_the_stream_is_stalled_only_after_the_limit_since_the_first_image() -> None:
+    t = 10 * _NS
+    kw = {"last_published_ns": None, "max_age_s": _MAX_AGE_S}
+    assert mask_stream_stalled(first_image_ns=None, now_ns=t, **kw) is False  # no image, nothing to wait for
+    assert mask_stream_stalled(first_image_ns=t, now_ns=t + ms(500), **kw) is False
+    assert mask_stream_stalled(first_image_ns=t, now_ns=t + ms(500) + 1, **kw) is True
 
 
 @pytest.mark.parametrize(
-    "last_decision,mask_age_ms,expected",
+    "last_decision,published_ago_ms,expected",
     [
         (False, 100, False),  # nothing wrong
+        (False, 500, False),  # exactly at the limit
         (True, 100, True),  # never less conservative than the last segmented decision
         (None, 100, True),  # no decision yet
-        (False, 501, True),  # the newest mask is older than perception_max_age
+        (False, 501, True),  # no mask published for longer than perception_max_age
         (False, None, True),  # no mask has ever been published
         (True, None, True),
     ],
 )
-def test_carried_degraded_value(last_decision, mask_age_ms, expected) -> None:
+def test_carried_degraded_value(last_decision, published_ago_ms, expected) -> None:
     now = 100 * _NS
-    stamp = None if mask_age_ms is None else now - ms(mask_age_ms)
+    published = None if published_ago_ms is None else now - ms(published_ago_ms)
     assert (
         carried_degraded(
             last_decision_degraded=last_decision,
-            last_mask_stamp_ns=stamp,
+            last_published_ns=published,
             now_ns=now,
             max_age_s=_MAX_AGE_S,
         )
         is expected
+    )
+
+
+def test_the_age_of_the_masks_image_is_not_a_liveness_signal() -> None:
+    # A mask published 66 ms ago from an image stamped 550 ms ago: normal operation, nothing is wrong.
+    now = 100 * _NS
+    assert (
+        carried_degraded(
+            last_decision_degraded=False, last_published_ns=now - ms(66), now_ns=now, max_age_s=_MAX_AGE_S
+        )
+        is False
     )
 
 
@@ -318,6 +342,7 @@ class Tick:
     end_ms: float
     segmented: bool
     flag_ms: float  # when the degraded flag goes out: after the mask, or at once on a depth-only tick
+    mask_ms: float | None = None  # when the mask goes out (after the segmentation), None on a depth-only tick
 
 
 def _simulate(
@@ -357,7 +382,8 @@ def _simulate(
             cost += seg_cost_ms
         end = start + cost
         sched.tick_done(ms(start), ms(end), depth_ns=ms(depth_cost_ms))
-        ticks.append(Tick(start, end, segment, start + (seg_cost_ms if segment else 0.0)))
+        out_at = start + seg_cost_ms
+        ticks.append(Tick(start, end, segment, out_at if segment else start, out_at if segment else None))
         free = end
     return ticks
 
@@ -440,3 +466,29 @@ def test_a_depth_tick_too_slow_to_fit_a_skip_means_every_frame_is_segmented() ->
     ticks = [t for t in _simulate(135, depth_cost_ms=130, seconds=30) if t.start_ms > 5_000]
     assert all(t.segmented for t in ticks)
     assert max(_seg_gaps(ticks)) <= 300 + 135
+
+
+def _publication_gaps(ticks: list[Tick]) -> list[float]:
+    times = [t.mask_ms for t in ticks if t.mask_ms is not None]
+    return [b - a for a, b in zip(times, times[1:])]
+
+
+@pytest.mark.parametrize("interval", _CANONICAL + (33, 100, 160, 300))
+def test_in_normal_alternation_the_mask_stream_never_looks_stalled(interval: int) -> None:
+    """Time between mask publications is all the liveness rules look at. Measured margin against the 0.5 s limit:
+    at least 100 ms for every camera interval (the worst, 397 ms, is the one wrong skip at a 200 ms camera while
+    its interval is still unknown; in steady state the worst is 300 ms)."""
+    ticks = _simulate(interval, seconds=60)
+    gaps = _publication_gaps(ticks)
+    assert max(gaps) <= 400, gaps
+    # What a watchdog sampling every 0.25 s would see, at any phase: the newest mask's time since publication.
+    published = [t.mask_ms for t in ticks if t.mask_ms is not None]
+    for phase_ms in (0, 50, 100, 150, 200):
+        for k in range(int(60_000 / 250)):
+            now_ms = phase_ms + 250.0 * k
+            if now_ms < published[0]:
+                continue
+            newest = published[bisect.bisect_right(published, now_ms) - 1]
+            assert not mask_stream_stalled(
+                last_published_ns=ms(newest), first_image_ns=0, now_ns=ms(now_ms), max_age_s=_MAX_AGE_S
+            ), (interval, phase_ms, now_ms, newest)

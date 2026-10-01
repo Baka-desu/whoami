@@ -92,29 +92,46 @@ def seg_due(
     return next_start - last_seg_ns > gap_ns
 
 
-def mask_expired(last_mask_stamp_ns: int | None, now_ns: int, max_age_s: float) -> bool:
-    """True when the newest published mask is older than `max_age_s`. No mask yet: nothing to expire."""
-    if last_mask_stamp_ns is None:
+def mask_stream_stalled(
+    *,
+    last_published_ns: int | None,
+    first_image_ns: int | None,
+    now_ns: int,
+    max_age_s: float,
+) -> bool:
+    """True when masks have stopped coming: none published for longer than `max_age_s`.
+
+    Liveness of the mask stream, on one monotonic clock: `last_published_ns` is when the newest mask went out.
+    With no mask yet, the wait counts from `first_image_ns`, the first image the node saw (None: nothing to wait
+    for). It is deliberately NOT the age of the newest mask's image stamp: that is latency plus the time the mask
+    is held until the next one replaces it, which reaches 0.45 to 0.58 s when everything is working. Freshness of a
+    mask (its latency) is checked for every segmented frame by freshness.evaluate; this asks only whether the
+    segmentation is still producing.
+    """
+    start = last_published_ns if last_published_ns is not None else first_image_ns
+    if start is None:
         return False
-    return (now_ns - last_mask_stamp_ns) / _NS > max_age_s
+    return (now_ns - start) / _NS > max_age_s
 
 
 def carried_degraded(
     *,
     last_decision_degraded: bool | None,
-    last_mask_stamp_ns: int | None,
+    last_published_ns: int | None,
     now_ns: int,
     max_age_s: float,
 ) -> bool:
     """The flag a depth-only frame publishes. Never less conservative than the last segmented decision.
 
     Degraded if that decision was degraded (or there is none), if no mask has ever been published, or if the
-    newest published mask is older than `max_age_s`.
+    newest mask was published more than `max_age_s` ago (monotonic clock).
     """
     return (
         last_decision_degraded is not False
-        or last_mask_stamp_ns is None
-        or mask_expired(last_mask_stamp_ns, now_ns, max_age_s)
+        or last_published_ns is None
+        or mask_stream_stalled(
+            last_published_ns=last_published_ns, first_image_ns=None, now_ns=now_ns, max_age_s=max_age_s
+        )
     )
 
 

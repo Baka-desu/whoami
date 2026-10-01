@@ -168,8 +168,12 @@ mask was produced, and that a minimum spacing is the wrong rule for a 4 to 6 Hz 
   delta contradicts it. A camera that never lets the node idle is faster than a depth tick, and then the interval cannot
   be the larger term, so it is left out. A wrong skip is paid for once (the node then idles and measures it).
 - **Degraded flag.** Published on every processed frame again. On a depth-only frame it is: the last segmented decision
-  OR the newest published mask older than `perception_max_age` OR no mask ever published. The watchdog thread
-  additionally raises it when the newest published mask is older than `perception_max_age`, while keeping its image rule.
+  OR no mask ever published OR no mask published for longer than `perception_max_age` (monotonic time since the newest
+  one went out). The watchdog thread, while its image rule says the input is live, additionally raises it when no mask has
+  been published for longer than `perception_max_age` (counted from the first image while there is none); its image rule
+  is unchanged. This is liveness of the mask stream, **not** the age of the newest mask's image stamp: that is latency plus
+  the time the mask is held until the next one replaces it (see "Open for the owner"), and compared with 0.5 s it would
+  trip in normal operation. Freshness (latency) is still checked for every segmented frame by `evaluate()`.
 
 Simulation of the real node (injected clocks, seg 123 ms, depth-only tick 80 ms, camera interval T, 30 s, queue depth 1):
 
@@ -191,12 +195,22 @@ was using the CPU): **depth 6.25 Hz, mask 3.70 Hz**; 126 degraded flags (one per
 none true; mask gaps 0.273 s mean, 0.369 s longest; mask age at arrival 0.174 s mean, 0.267 s longest; depth age 0.236 s mean.
 Stage means from `/ugv/perception/stats`: seg 126.6 ms, depth_infer 67.2, depth_post 12.6, cloud 1.7, publish 1.9.
 
-**Margin warning.** With the mask refreshed every 0.27 s and published 0.17 s after its image, the previous mask is on
-average **0.447 s old when the next one replaces it, and 0.584 s at worst (7 of 73 replacements were over 0.5 s)**, on a
-camera with no latency. The new rules compare that age with `perception_max_age` (0.5 s), so a real camera (tens of ms
-of latency) will see the flag go true for a few tens of ms every few cycles. This run happened to show none (the
-watchdog samples every 0.25 s). The simulation says the same: 0.44 to 0.49 s at 30 fps and 12 Hz. Either
-`perception_max_age` or `mask_max_gap_s` has to give; see the task report.
+Margin of the liveness rules (time between two mask publications against the 0.5 s limit): over DDS at 7.4 Hz the longest
+was 0.369 s (margin 0.13 s); in the simulation (33 to 300 ms cameras) the longest was 0.397 s (margin 0.10 s, the one wrong
+skip at 200 ms before its interval is known) and in steady state 0.283 to 0.300 s (margin 0.20 s or more). No degraded flag
+was true in any healthy run, and in the simulation a depth-only frame never saw a mask published more than 80 ms earlier.
+
+**Open for the owner (not changed here).** A mask is held until the next one replaces it, so the mask in use just before
+a replacement is (mask gap + latency) old. Over DDS at 7.4 Hz that was **0.447 s on average and 0.584 s at worst** (7 of 73
+replacements over 0.5 s, camera with no latency), against `perception_max_age` = 0.5 s; the simulation gives 0.44 to
+0.49 s at 30 fps and 12 Hz. It was already so before this task: the old node produced masks at 3.25 Hz (gap about 0.31 s)
+with a 0.176 s mean arrival age, so about 0.48 s held on average (derived from those two measured numbers, not measured
+directly), and one mask arrived 0.536 s old (measured) with the flag false, because freshness is checked before inference
+only. The degraded rules above do not use this age, so they do not flicker; but a consumer that applies architecture §8.4
+literally (reject a mask older than `perception_max_age`) would reject a held mask in the last part of some cycles.
+Options: (a) raise `perception_max_age` (about 0.65 s would clear the worst case measured) together with the safety
+timeouts that follow it; (b) lower `mask_max_gap_s` to about 0.20 s, which removes the alternation at 7.4 Hz (predicted gap
+283 ms) and puts depth back near 4.9 Hz; (c) accept it. No budget was changed.
 
 ## Task 23: odometry input QoS, before and after
 

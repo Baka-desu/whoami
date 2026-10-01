@@ -684,18 +684,19 @@ def _tear_down(node, *others) -> None:
 
 
 class _FlakyAdapter(SpyAdapter):
-    """Raises on the nth call, like a model that fell over once."""
+    """Raises on the nth call (like a model that fell over once), or on every call from the nth on."""
 
-    def __init__(self, fail_on: int) -> None:
+    def __init__(self, fail_on: int, *, stay_down: bool = False) -> None:
         super().__init__()
         self._fail_on = fail_on
+        self._stay_down = stay_down
         self.attempts = 0
 
     def infer(self, frame):
         from ugv_perception.adapter.output import AdapterError
 
         self.attempts += 1
-        if self.attempts == self._fail_on:
+        if self.attempts == self._fail_on or (self._stay_down and self.attempts > self._fail_on):
             raise AdapterError("model fell over")
         return super().infer(frame)
 
@@ -766,22 +767,41 @@ def test_a_depth_only_frame_carries_a_degraded_last_decision() -> None:
         _tear_down(node)
 
 
-def test_a_depth_only_frame_is_degraded_when_the_newest_mask_is_older_than_the_max_age() -> None:
+def test_the_age_of_the_masks_image_does_not_degrade_a_depth_only_frame() -> None:
+    """The wrong quantity: the image stamp of the newest mask is latency plus hold time (0.45 to 0.58 s in normal
+    operation). A mask published 100 ms ago from an image stamped 550 ms ago is perfectly alive."""
     rclpy.init()
     clock, wall = _Clock(), _Wall()
     node = _scheduled_node(clock, wall, SpyAdapter(), _FakeDepth(clock))
     got = _capture(node)
     try:
-        _prime(node, clock, wall)  # the newest mask is stamped 100 ms
-        assert got["degraded"][-1].data is False
-        # The frame itself is fresh (450 ms old) but the mask from the 100 ms frame is 550 ms old.
-        _feed(node, clock, wall, 200, age_ms=450)
-        assert len(got["mask"]) == 2, "still depth only"
-        assert got["degraded"][-1].data is True
-        # The next frame sees a mask that is 240 ms old: the flag is not latched.
-        _feed(node, clock, wall, 290, age_ms=50)
+        _prime(node, clock, wall)  # the newest mask is stamped 100 ms and was published at 100 ms
+        _feed(node, clock, wall, 200, age_ms=450)  # wall is 650 ms after that stamp
         assert len(got["mask"]) == 2, "still depth only"
         assert got["degraded"][-1].data is False
+    finally:
+        _tear_down(node)
+
+
+def test_a_depth_only_frame_is_degraded_once_no_mask_was_published_for_longer_than_the_max_age() -> None:
+    rclpy.init()
+    clock, wall = _Clock(), _Wall()
+    node = _scheduled_node(clock, wall, SpyAdapter(), _FakeDepth(clock))
+    got = _capture(node)
+    try:
+        _prime(node, clock, wall)  # the newest mask was published at 100 ms
+        node._sched.due = lambda start_ns: False  # the scheduler is forced to skip: masks stop
+        flags = []
+        for t_ms in (200, 300, 400, 500, 600, 700, 800):
+            _feed(node, clock, wall, t_ms)
+            flags.append((t_ms, got["degraded"][-1].data))
+        assert len(got["mask"]) == 2, "no mask after the second"
+        # Published at 100 ms: still alive up to and including 600 ms, stalled from the first frame after that.
+        assert flags == [(t, t > 600) for t in (200, 300, 400, 500, 600, 700, 800)]
+        # A mask comes back: the flag is not latched.
+        del node._sched.due
+        _feed(node, clock, wall, 900)
+        assert len(got["mask"]) == 3 and got["degraded"][-1].data is False
     finally:
         _tear_down(node)
 
@@ -954,42 +974,109 @@ def test_the_default_mask_max_gap_is_declared_as_a_parameter() -> None:
 # --- R-b: the watchdog also watches the newest mask. --------------------------------------------------
 
 
-def test_the_watchdog_raises_degraded_when_the_newest_mask_is_too_old_even_while_images_are_fresh() -> None:
+def _watchdog_node(adapter=None):
     rclpy.init()
     clock, wall = _Clock(), _Wall()
-    node = _scheduled_node(clock, wall, SpyAdapter(), _FakeDepth(clock))
-    node._stop.set()  # no background thread: the check is called directly, with a time we choose
-    got = _capture(node)
+    node = _scheduled_node(clock, wall, adapter or SpyAdapter(), _FakeDepth(clock))
+    node._stop.set()  # no background thread: the check is called directly, with the times we choose
+    return node, clock, wall, _capture(node)
+
+
+def test_the_watchdog_ignores_the_age_of_the_masks_image_while_masks_keep_coming() -> None:
+    node, clock, wall, got = _watchdog_node()
     try:
-        _prime(node, clock, wall)  # newest mask 100 ms
-        _feed(node, clock, wall, 200)  # depth only: the newest IMAGE is 200 ms
+        _prime(node, clock, wall)  # newest mask: stamped 100 ms, published at monotonic 100 ms
+        _feed(node, clock, wall, 200)  # depth only: the newest IMAGE is stamped 200 ms
         got["degraded"].clear()
-        # 400 ms: image 200 ms old, mask 300 ms old. Nothing to report.
-        node._watchdog_check(_STAMP + 400 * _MS)
+        # Wall 650 ms: image 450 ms old (live), the mask's image 550 ms old, but the mask was published 250 ms ago.
+        assert node._watchdog_check(_STAMP + 650 * _MS, _MONO0 + 350 * _MS) is False
         assert got["degraded"] == []
-        # 650 ms: image 450 ms old (fresh, the old rule is quiet), mask 550 ms old.
-        node._watchdog_check(_STAMP + 650 * _MS)
+    finally:
+        _tear_down(node)
+
+
+def test_the_watchdog_raises_degraded_when_masks_stop_while_fresh_images_keep_arriving() -> None:
+    node, clock, wall, got = _watchdog_node()
+    try:
+        _prime(node, clock, wall)  # newest mask published at monotonic 100 ms
+        _feed(node, clock, wall, 200)
+        got["degraded"].clear()
+        # Images are live (stamp 200 ms, wall 400 ms): only the mask stream can trip it.
+        wall_now = _STAMP + 400 * _MS
+        assert node._watchdog_check(wall_now, _MONO0 + 600 * _MS) is False  # 500 ms since the mask: at the limit
+        assert node._watchdog_check(wall_now, _MONO0 + 600 * _MS + 1) is True
         assert [m.data for m in got["degraded"]] == [True]
-        # 750 ms: the image itself is 550 ms old: the existing rule still fires too.
-        node._watchdog_check(_STAMP + 750 * _MS)
+        # The existing image rule is unchanged: a 550 ms old image trips it regardless of the masks.
+        assert node._watchdog_check(_STAMP + 750 * _MS, _MONO0 + 150 * _MS) is True
         assert [m.data for m in got["degraded"]] == [True, True]
     finally:
         _tear_down(node)
 
 
-def test_the_watchdog_is_quiet_before_any_mask_while_images_are_fresh() -> None:
-    rclpy.init()
-    clock, wall = _Clock(), _Wall()
-    node = _scheduled_node(clock, wall, SpyAdapter(), _FakeDepth(clock))
-    node._stop.set()
-    got = _capture(node)
+def test_the_watchdog_raises_degraded_when_no_mask_comes_for_longer_than_the_max_age_since_the_first_image() -> None:
+    node, clock, wall, got = _watchdog_node(_FlakyAdapter(fail_on=1, stay_down=True))
     try:
-        node._last_image_stamp = _STAMP  # an image has arrived; no mask yet
-        node._watchdog_check(_STAMP + 100 * _MS)
-        assert got["degraded"] == []
-        node._last_image_stamp = None  # no image at all: the existing rule
-        node._watchdog_check(_STAMP + 100 * _MS)
+        _feed(node, clock, wall, 0)  # the first image, at monotonic 0; the adapter fails: no mask
+        assert not got["mask"]
+        got["degraded"].clear()
+        wall_now = _STAMP + 400 * _MS  # the image stamped at 0 is 400 ms old: live
+        assert node._watchdog_check(wall_now, _MONO0 + 500 * _MS) is False
+        assert node._watchdog_check(wall_now, _MONO0 + 500 * _MS + 1) is True
+    finally:
+        _tear_down(node)
+
+
+def test_the_watchdogs_image_rule_is_unchanged_when_no_image_has_arrived() -> None:
+    node, clock, wall, got = _watchdog_node()
+    try:
+        tripped = node._watchdog_check(_STAMP + 100 * _MS, _MONO0 + 100 * _MS)
+        assert tripped is True, "no image at all: the existing rule"
         assert [m.data for m in got["degraded"]] == [True]
+    finally:
+        _tear_down(node)
+
+
+def _run_until_the_masks_stop(node, clock, wall, got, *, frame_ms=100, watchdog_ms=250, until_ms=2_000):
+    """Fresh frames every `frame_ms`, a watchdog check every `watchdog_ms` (the node's real period), both on the
+    monotonic clock. Returns (frame flags as (t, value), first watchdog publication time or None)."""
+    frame_flags: list[tuple[int, bool]] = []
+    first_watchdog = None
+    next_check = watchdog_ms
+    for t_ms in range(frame_ms * 2, until_ms + 1, frame_ms):
+        while next_check <= t_ms:
+            clock.ns = max(clock.ns, _MONO0 + next_check * _MS)
+            wall_now = _STAMP + next_check * _MS + 50 * _MS  # the newest image is at most one frame old: live
+            if node._watchdog_check(wall_now, clock.ns) and first_watchdog is None:
+                first_watchdog = next_check
+            next_check += watchdog_ms
+        _feed(node, clock, wall, t_ms)
+        frame_flags.append((t_ms, got["degraded"][-1].data))
+    return frame_flags, first_watchdog
+
+
+def test_when_the_adapter_fails_every_frame_the_watchdog_raises_degraded_within_the_limit_plus_one_period() -> None:
+    node, clock, wall, got = _watchdog_node(_FlakyAdapter(fail_on=3, stay_down=True))
+    try:
+        _prime(node, clock, wall)  # the last mask is published at monotonic 100 ms
+        _, first_watchdog = _run_until_the_masks_stop(node, clock, wall, got)
+        assert len(got["mask"]) == 2
+        # The limit is 500 ms after the last mask (600 ms); the watchdog runs every 250 ms: 250, 500, 750.
+        assert first_watchdog is not None and 600 < first_watchdog <= 600 + 250
+    finally:
+        _tear_down(node)
+
+
+def test_when_the_scheduler_is_forced_to_skip_the_watchdog_and_the_next_depth_only_frame_raise_degraded() -> None:
+    node, clock, wall, got = _watchdog_node()
+    try:
+        _prime(node, clock, wall)  # the last mask is published at monotonic 100 ms
+        node._sched.due = lambda start_ns: False  # the scheduler is forced to skip: masks stop
+        frame_flags, first_watchdog = _run_until_the_masks_stop(node, clock, wall, got)
+        assert len(got["mask"]) == 2
+        assert first_watchdog is not None and 600 < first_watchdog <= 600 + 250
+        # The depth-only frames: false while alive, true from the first one after the limit.
+        assert all(v is False for t, v in frame_flags if t <= 600), frame_flags
+        assert all(v is True for t, v in frame_flags if t > 600), frame_flags
     finally:
         _tear_down(node)
 
@@ -1108,6 +1195,21 @@ def test_the_real_node_keeps_the_flag_the_mask_gap_and_the_depth_within_the_rule
     assert len([1 for kind, _, _ in log if kind == "depth"]) == len(processed)
     # A healthy run is never degraded: the carried value does not flicker.
     assert all(value is False for _, value in flags)
+    # Mask liveness: the time between mask publications is all the liveness rules look at. The margin against the
+    # 0.5 s limit is at least 100 ms (worst case 397 ms: the one wrong skip at 200 ms, before the interval is known).
+    published = [t for kind, t, _ in log if kind == "mask"]
+    assert max(_ms_between(published)) <= 400
+    from ugv_perception.node.schedule import mask_stream_stalled
+
+    for phase_ms in (0, 50, 100, 150, 200):  # a watchdog sampling every 250 ms, at any phase
+        for k in range(int(20_000 / 250)):
+            now = _MONO0 + int((phase_ms + 250 * k) * _MS)
+            if now < published[0]:
+                continue
+            newest = published[bisect.bisect_right(published, now) - 1]
+            assert not mask_stream_stalled(
+                last_published_ns=newest, first_image_ns=_MONO0, now_ns=now, max_age_s=0.5
+            )
 
 
 @pytest.mark.parametrize("interval", [83, 135, 200, 240])

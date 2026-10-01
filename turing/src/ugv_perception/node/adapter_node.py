@@ -5,9 +5,12 @@ depth-only only if skipping it is predicted to keep the start-to-start gap betwe
 `mask_max_gap_s` (default 0.30 s; see node/schedule.py for the prediction). The prediction rests on running
 estimates, so the real gap can exceed the bound by up to about one camera interval. What is guaranteed is only
 the order: a missing, undecodable or stale frame is never skipped, and the degraded flag goes out on EVERY
-processed frame. On a depth-only frame its value is that of the last segmented decision, or True if the newest
-published mask is older than perception_max_age or none was ever published. The watchdog thread applies the same
-mask-age rule, so a mask that stops being refreshed degrades perception even while fresh images keep arriving.
+processed frame. On a depth-only frame its value is that of the last segmented decision, or True if no mask was
+ever published or none was published for longer than perception_max_age (monotonic time since the newest one went
+out). The watchdog thread watches the same liveness: images arriving but no mask for longer than perception_max_age
+(counted from the first image while there is none) degrades perception, on top of its image-stamp rule.
+Liveness is time since publication, not the age of the mask's image stamp: that is latency plus the time a mask is
+held until the next one replaces it (0.45 to 0.58 s in normal operation) and would trip all the time.
 """
 
 from __future__ import annotations
@@ -34,7 +37,7 @@ from ugv_perception.node.schedule import (
     DEFAULT_MASK_MAX_GAP_S,
     SegScheduler,
     carried_degraded,
-    mask_expired,
+    mask_stream_stalled,
 )
 from ugv_perception.node.wire import wire_compose_out
 
@@ -140,10 +143,11 @@ class PerceptionAdapterNode(Node):
                 f"got {mask_max_gap_s} with perception_max_age {fresh.perception_max_age}"
             )
         self._sched = SegScheduler(mask_max_gap_s)
-        # What the degraded flag says on a frame that is not segmented, and what the watchdog checks. Set by
-        # the mask path; the stamp is read by the watchdog thread too.
+        # What the degraded flag says on a frame that is not segmented, and what the watchdog checks. Set by the
+        # mask path. Times are the monotonic clock; the two below are read by the watchdog thread too.
         self._last_decision_degraded: bool | None = None
-        self._last_mask_stamp_ns: int | None = None
+        self._last_mask_published_ns: int | None = None
+        self._first_image_ns: int | None = None
         self._now_ns_fn = now_ns_fn or time.time_ns
         self._last_image: ImageView | None = None
         self._last_info: CameraInfoView | None = None
@@ -200,6 +204,8 @@ class PerceptionAdapterNode(Node):
             view = image_msg_to_view(msg)
         with self._stamp_lock:
             self._last_image_stamp = view.stamp_ns
+            if self._first_image_ns is None:
+                self._first_image_ns = entry_ns
         self.metrics.frames_in += 1
         self._last_image = view
         self._sched.frame_arrived(entry_ns, view.stamp_ns)
@@ -230,7 +236,7 @@ class PerceptionAdapterNode(Node):
             self._segment(frame, now_ns)
             seg_ns = self._monotonic_ns() - seg_start_ns
         else:
-            self._publish_flag(Bool(data=self._carried_degraded(now_ns)))
+            self._publish_flag(Bool(data=self._carried_degraded()))
         # Depth does not depend on the mask: a stale or failed mask still gets its depth.
         depth_done = frame is not None and self._publish_depth(frame, info.k)
         if had_pair and self._last_image is not None:
@@ -259,11 +265,11 @@ class PerceptionAdapterNode(Node):
                 int(wired.mask.header.stamp.sec) * _NS
                 + int(wired.mask.header.stamp.nanosec)
             )
-            with self._stamp_lock:
-                self._last_mask_stamp_ns = stamp
             self.metrics.latencies_ns.append(now_ns - stamp)
             self.metrics.mark_mask()
             self._publish(self._pub_mask, wired.mask)
+            with self._stamp_lock:
+                self._last_mask_published_ns = self._monotonic_ns()
             self._publish(self._pub_conf, wired.confidence)
             self._publish(self._pub_meta, wired.port_meta)
             if self._last_camera_info_msg is not None:
@@ -285,14 +291,14 @@ class PerceptionAdapterNode(Node):
         self._sched.segmented(start_ns)
         return True
 
-    def _carried_degraded(self, now_ns: int) -> bool:
+    def _carried_degraded(self) -> bool:
         """The flag for a frame that is not segmented: never less conservative than the last decision."""
         with self._stamp_lock:
-            mask_stamp = self._last_mask_stamp_ns
+            published_ns = self._last_mask_published_ns
         return carried_degraded(
             last_decision_degraded=self._last_decision_degraded,
-            last_mask_stamp_ns=mask_stamp,
-            now_ns=now_ns,
+            last_published_ns=published_ns,
+            now_ns=self._monotonic_ns(),
             max_age_s=float(self._fresh.perception_max_age),
         )
 
@@ -341,21 +347,32 @@ class PerceptionAdapterNode(Node):
                 )
             return False
 
-    def _watchdog_check(self, now_ns: int) -> None:
-        """Publish degraded when the newest image is too old, or the newest published mask is.
+    def _watchdog_check(self, now_ns: int, mono_ns: int | None = None) -> bool:
+        """Publish degraded when the input is dead or the mask stream has stalled. True when it published.
 
-        The mask rule is what catches a mask that stops being refreshed while fresh images keep arriving
-        (depth-only frames, or a segmentation that fails to publish).
+        Input: the newest image is too old (stamp against the wall clock `now_ns`), or none has arrived.
+        Mask stream (the input is live, so images are arriving): no mask published for longer than
+        perception_max_age on the monotonic clock `mono_ns`, counted from the first image while there is none.
+        This catches masks that stop (depth-only frames forever, a segmentation that fails to publish) while
+        fresh images keep arriving. It does not look at the age of the mask's image stamp.
         """
         max_age = float(self._fresh.perception_max_age)
+        if mono_ns is None:
+            mono_ns = self._monotonic_ns()
         with self._stamp_lock:
             stamp = self._last_image_stamp
-            mask_stamp = self._last_mask_stamp_ns
-        if stamp is None or (now_ns - stamp) / _NS > max_age or mask_expired(mask_stamp, now_ns, max_age):
-            flag = Bool()
-            flag.data = True
-            self._pub_degraded.publish(flag)
-            self.metrics.degraded_true += 1
+            published_ns = self._last_mask_published_ns
+            first_image_ns = self._first_image_ns
+        input_dead = stamp is None or (now_ns - stamp) / _NS > max_age
+        if not input_dead and not mask_stream_stalled(
+            last_published_ns=published_ns, first_image_ns=first_image_ns, now_ns=mono_ns, max_age_s=max_age
+        ):
+            return False
+        flag = Bool()
+        flag.data = True
+        self._pub_degraded.publish(flag)
+        self.metrics.degraded_true += 1
+        return True
 
     def _watchdog_loop(self, period_s: float) -> None:
         while not self._stop.wait(timeout=period_s):
@@ -363,7 +380,7 @@ class PerceptionAdapterNode(Node):
             if type(now_ns) is not int or now_ns <= 0:
                 continue
             try:
-                self._watchdog_check(now_ns)
+                self._watchdog_check(now_ns, self._monotonic_ns())
             except Exception:
                 break
 
