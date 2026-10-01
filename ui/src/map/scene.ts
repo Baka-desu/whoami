@@ -29,14 +29,16 @@ import {
 //    0 elevation mesh, pushed back a little in depth so points lying on it win the depth test
 //    1 cost grid, draped: no depth test, blended (custom blending keeps it in the opaque pass, after the terrain and
 //      before the points), so the halo stays visible on uneven terrain and points stand on top of it
-//    2 the two clouds, depth tested
-//    3 trajectory and robot pose, no depth test: never hidden inside the cloud
+//    2 the accumulated map cloud, depth tested
+//    3 the live scan, depth tested, drawn after the map cloud and 1.5x larger, so where the two coincide the current
+//      scan's fan stays readable on top (the depth test passes on equal depth)
+//    4 trajectory and robot pose, no depth test: never hidden inside the cloud
 
 export interface LayerVisibility { cloud: boolean; live: boolean; trajectory: boolean; elevation: boolean; grid: boolean }
 type SceneLayer = keyof LayerVisibility
 const SCENE_LAYERS: readonly SceneLayer[] = ['cloud', 'live', 'trajectory', 'elevation', 'grid']
 
-const ORDER = { ground: -1, elevation: 0, grid: 1, points: 2, overlay: 3 } as const
+const ORDER = { ground: -1, elevation: 0, grid: 1, cloud: 2, live: 3, overlay: 4 } as const
 
 const BACKGROUND = '#03100c' // --bg
 const GROUND_LINE = '#1f4637' // between --line and --line-strong
@@ -46,18 +48,20 @@ const POSE_AXIS_M = 1 // length of the robot's axis triad (x red = forward, y gr
 const POINT_DEFAULT_M = 0.05
 const POINT_MIN_PX = 1.5 // CSS pixels; scaled by the device pixel ratio
 const POINT_MAX_PX = 12
+const LIVE_POINT_SCALE = 1.5 // the live scan's points against the map cloud's
 
 const POINT_VERTEX = /* glsl */ `
   attribute vec3 aColor;
   uniform float uSizeM;   // point size in metres
   uniform float uPxPerM;  // drawing-buffer pixels per metre at unit view depth
   uniform vec2 uPxRange;  // clamp, in drawing-buffer pixels
+  uniform float uScale;   // this layer's size factor, applied after the clamp so it holds near and far
   varying vec3 vColor;
   void main() {
     vColor = aColor;
     vec4 mv = modelViewMatrix * vec4(position, 1.0);
     gl_Position = projectionMatrix * mv;
-    gl_PointSize = clamp(uSizeM * uPxPerM / max(-mv.z, 0.001), uPxRange.x, uPxRange.y);
+    gl_PointSize = uScale * clamp(uSizeM * uPxPerM / max(-mv.z, 0.001), uPxRange.x, uPxRange.y);
   }
 `
 
@@ -78,7 +82,7 @@ const BYTE_COLOR_FRAGMENT = /* glsl */ `
   }
 `
 
-const pointMaterial = () =>
+const pointMaterial = (scale: number) =>
   new THREE.ShaderMaterial({
     vertexShader: POINT_VERTEX,
     fragmentShader: BYTE_COLOR_FRAGMENT,
@@ -86,13 +90,15 @@ const pointMaterial = () =>
       uSizeM: { value: POINT_DEFAULT_M },
       uPxPerM: { value: 1 },
       uPxRange: { value: new THREE.Vector2(POINT_MIN_PX, POINT_MAX_PX) },
+      uScale: { value: scale },
     },
   })
 
 const pointSizeM = (spacingM: number) => (Number.isFinite(spacingM) && spacingM > 0 ? Math.min(0.5, Math.max(0.01, spacingM)) : POINT_DEFAULT_M)
 
-// Bounds for frustum culling, set once per frame update: the given box (a cloud's header) or one pass over the
-// positions, and the sphere around that box (no second pass).
+// Bounds, set once per frame update: the given box (a cloud's header) or one pass over the positions, and the sphere
+// around that box (no second pass). They place the camera and the ground grid, and cull the mesh and the line (the
+// point objects are never culled).
 function fitBounds(g: THREE.BufferGeometry, box: Bounds | null): Bounds | null {
   if (box) g.boundingBox = new THREE.Box3(new THREE.Vector3(box.minX, box.minY, box.minZ), new THREE.Vector3(box.maxX, box.maxY, box.maxZ))
   else g.computeBoundingBox()
@@ -111,8 +117,8 @@ export class MapScene {
   private scene = new THREE.Scene()
   private camera = new THREE.PerspectiveCamera(50, 1, 0.1, 4000)
 
-  private cloudMat = pointMaterial()
-  private liveMat = pointMaterial()
+  private cloudMat = pointMaterial(1)
+  private liveMat = pointMaterial(LIVE_POINT_SCALE)
   private elevationMat = new THREE.ShaderMaterial({
     vertexShader: MESH_VERTEX,
     fragmentShader: BYTE_COLOR_FRAGMENT,
@@ -192,8 +198,12 @@ export class MapScene {
       throw e
     }
 
-    this.cloud.renderOrder = ORDER.points
-    this.live.renderOrder = ORDER.points
+    this.cloud.renderOrder = ORDER.cloud
+    this.live.renderOrder = ORDER.live
+    // Points are never culled: a wrong bounding box in a header must not silently hide a cloud (a cull test against
+    // one sphere saves nothing worth that).
+    this.cloud.frustumCulled = false
+    this.live.frustumCulled = false
     this.elevation.renderOrder = ORDER.elevation
     this.grid.renderOrder = ORDER.grid
     this.trajectory.renderOrder = ORDER.overlay

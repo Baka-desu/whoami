@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { DepthFrame } from '../map/codec'
 import { depthToRgba, type ElevationColorMode } from '../map/geometry'
+import { enabledLayers, parseToggles, toggled, type MapToggles, type ToggleKey } from '../map/mapToggles'
 import { MapScene } from '../map/scene'
-import { enabledLayers, parseToggles, type MapToggles } from '../map/scene-math'
 import { useMapData } from '../map/useMapData'
 import { LAYERS, type MapStatus, type Telemetry } from '../source/api'
 
@@ -14,20 +14,22 @@ import { LAYERS, type MapStatus, type Telemetry } from '../source/api'
 const TOGGLES_KEY = 'ugv.console.map.layers'
 const CAMERA_PANEL_MAX_W = 480 // the camera panel is a thumbnail; no need to keep a full-size copy
 
-type ToggleKey = Exclude<keyof MapToggles, 'mode'>
-const LAYER_BUTTONS: { key: ToggleKey; label: string; title: string }[] = [
-  { key: 'cloud', label: 'map cloud', title: 'Accumulated 3D map, in camera colours' },
-  { key: 'live', label: 'live cloud', title: 'The current depth scan, coloured by height' },
-  { key: 'trajectory', label: 'trajectory', title: 'Path the robot has travelled' },
-  { key: 'elevation', label: 'elevation', title: 'Elevation map of the ground' },
-  { key: 'grid', label: 'cost grid', title: 'Navigation costmap: obstacles and their inflation halo' },
-  { key: 'images', label: 'images', title: 'Depth and camera panels' },
+// Short labels keep the bar on one row from a 1280 px window up (the view area is then about 580 px wide); the full
+// name is the accessible name and the tooltip.
+const LAYER_BUTTONS: { key: ToggleKey; label: string; name: string; title: string }[] = [
+  { key: 'cloud', label: 'cloud', name: 'Map cloud', title: 'Map cloud: the accumulated 3D map, in camera colours' },
+  { key: 'live', label: 'live', name: 'Live cloud', title: 'Live cloud: the current depth scan, coloured by height' },
+  { key: 'trajectory', label: 'path', name: 'Trajectory path', title: 'Trajectory: the path the robot has travelled' },
+  { key: 'elevation', label: 'elev', name: 'Elevation', title: 'Elevation map of the ground' },
+  { key: 'grid', label: 'cost', name: 'Cost grid', title: 'Cost grid: obstacles and their inflation halo' },
+  { key: 'images', label: 'img', name: 'Image panels', title: 'Image panels: depth and camera' },
 ]
 const MODES: { value: ElevationColorMode; label: string }[] = [
   { value: 'height', label: 'height' },
-  { value: 'confidence', label: 'confidence' },
-  { value: 'obstacle', label: 'obstacle' },
+  { value: 'confidence', label: 'conf' },
+  { value: 'obstacle', label: 'obst' },
 ]
+const count = (n: number) => n.toLocaleString('en-US')
 
 const loadToggles = (): MapToggles => {
   try {
@@ -65,6 +67,12 @@ interface Props {
 
 export function MapView({ telemetry, live }: Props) {
   const [toggles, setToggles] = useState<MapToggles>(loadToggles)
+  // Saved only once the operator changed something, so a later change of the defaults still reaches anyone who never
+  // touched a toggle.
+  const touched = useRef(false)
+  useEffect(() => {
+    if (touched.current) remember(toggles)
+  }, [toggles])
   const pageVisible = usePageVisible()
   const data = useMapData(pageVisible, enabledLayers(toggles)) // a toggled-off layer is not fetched
   const [scene, setScene] = useState<MapScene | null>(null)
@@ -105,8 +113,10 @@ export function MapView({ telemetry, live }: Props) {
   const depth = ofEpoch(data.depth, status)
   const camera = status && status.seq.camera > 0 ? data.camera : null // a bitmap carries no epoch
 
-  // The pose goes first: the first layer to arrive frames the camera on it within the same commit.
-  useEffect(() => { scene?.setPose(pose) }, [scene, pose])
+  // The robot is hidden while telemetry is not live: a pose from a dead stream is not where the robot is. The pose
+  // goes first: the first layer to arrive frames the camera on it within the same commit.
+  const shownPose = live ? pose : null
+  useEffect(() => { scene?.setPose(shownPose) }, [scene, shownPose])
   const { cloud: showCloud, live: showLive, trajectory: showTrajectory, elevation: showElevation, grid: showGrid, mode } = toggles
   useEffect(() => {
     scene?.setLayers({ cloud: showCloud, live: showLive, trajectory: showTrajectory, elevation: showElevation, grid: showGrid })
@@ -117,10 +127,14 @@ export function MapView({ telemetry, live }: Props) {
   useEffect(() => { scene?.setTrajectory(trajectory) }, [scene, trajectory])
   useEffect(() => { scene?.setGrid(grid) }, [scene, grid])
 
-  const update = (patch: Partial<MapToggles>) => {
-    const next = { ...toggles, ...patch }
-    setToggles(next)
-    remember(next)
+  // Functional updates: two clicks inside one render both count.
+  const flip = (key: ToggleKey) => {
+    touched.current = true
+    setToggles((t) => toggled(t, key))
+  }
+  const pickMode = (m: ElevationColorMode) => {
+    touched.current = true
+    setToggles((t) => ({ ...t, mode: m }))
   }
 
   const staleReason = data.stale ? 'map not updating' : !live ? 'telemetry lost' : null
@@ -128,6 +142,12 @@ export function MapView({ telemetry, live }: Props) {
   const slamMode = typeof status?.stats.mode === 'string' ? status.stats.mode : null
   const depthPanel = toggles.images ? depth : null // a panel shows only with data and with the images toggle on
   const cameraPanel = toggles.images ? camera : null
+  // Counts sit in the stage, not the bar, so the bar never cuts a number short.
+  const info = [
+    showCloud && cloud && `${count(cloud.count)} map pts`,
+    showLive && liveCloud && `${count(liveCloud.count)} live pts`,
+    showTrajectory && trajectory && `${trajectory.lengthM.toFixed(1)} m path`,
+  ].filter(Boolean).join(' · ')
 
   return (
     <section className="mapview">
@@ -136,26 +156,28 @@ export function MapView({ telemetry, live }: Props) {
         <span>
           3d map
           {slamMode && ` · ${slamMode}`}
-          {cloud && ` · ${cloud.count.toLocaleString('en-US')} pts`}
         </span>
         <span className="livefeed-layers">
-          {LAYER_BUTTONS.map(({ key, label, title }) => (
-            <button key={key} type="button" title={title} className={toggles[key] ? 'on' : ''} aria-pressed={toggles[key]}
-              onClick={() => update({ [key]: !toggles[key] })}>
+          {LAYER_BUTTONS.map(({ key, label, name, title }) => (
+            <button key={key} type="button" title={title} aria-label={name} className={toggles[key] ? 'on' : ''}
+              aria-pressed={toggles[key]} onClick={() => flip(key)}>
               {label}
             </button>
           ))}
-          <select aria-label="Elevation colour" title="Elevation colour" value={toggles.mode} disabled={!toggles.elevation}
-            onChange={(e) => update({ mode: e.target.value as ElevationColorMode })}>
+          <select aria-label="Elevation colour" title="Elevation colour: height, confidence or obstacle" value={toggles.mode}
+            disabled={!toggles.elevation} onChange={(e) => pickMode(e.target.value as ElevationColorMode)}>
             {MODES.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
           </select>
-          <button type="button" title="Back behind the robot" disabled={!scene} onClick={() => scene?.resetView()}>
-            reset view
+          <button type="button" aria-label="Reset view" title="Reset view: back behind the robot" disabled={!scene}
+            onClick={() => scene?.resetView()}>
+            reset
           </button>
         </span>
       </header>
       <div className="mapview-stage">
-        <div ref={attachScene} className="mapview-gl" />
+        <div ref={attachScene} className="mapview-gl" role="img"
+          aria-label="3D map around the robot: drag to orbit, right-drag to pan, scroll to zoom" />
+        {!noMap && info && <div className="mapview-info">{info}</div>}
         {glFailed ? (
           <div className="nosignal">
             <b>NO 3D VIEW</b>
@@ -194,7 +216,7 @@ function DepthPanel({ frame }: { frame: DepthFrame }) {
   return (
     <figure className="mapview-inset" title="Depth image: near is bright">
       <figcaption>depth</figcaption>
-      <canvas ref={ref} />
+      <canvas ref={ref} role="img" aria-label="Depth image from the camera, near is bright" />
     </figure>
   )
 }
@@ -217,7 +239,7 @@ function CameraPanel({ frame }: { frame: ImageBitmap }) {
   return (
     <figure className="mapview-inset">
       <figcaption>camera</figcaption>
-      <canvas ref={ref} />
+      <canvas ref={ref} role="img" aria-label="Latest camera image" />
     </figure>
   )
 }

@@ -392,8 +392,13 @@ code { font-size: 10px; color: var(--text); overflow-wrap: anywhere; }
    reference picture. Everything is scoped under .mapview; the .viewport canvas rules above belong to the camera view
    and reach neither the GL canvas (MapScene styles it inline) nor the panels' canvases. */
 .mapview { grid-area: view; display: grid; grid-template-rows: auto minmax(0, 1fr); min-height: 0; }
-.mapview .livefeed-layers { flex: 0 1 auto; flex-wrap: wrap; justify-content: flex-end; }
-.mapview .livefeed-layers select { font: inherit; font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; padding: 2px 6px; background: var(--bg); color: var(--text); border: 1px solid var(--line-strong); cursor: pointer; }
+/* The bar fits one row from a 1280 px window (view area ~580 px): the status text takes only what the controls leave
+   (flex-basis 0, so it can never push them onto a second row) and holds no numbers that could be cut; compact
+   controls; below 1280 px the controls may wrap. */
+.mapview .livefeed-bar > span:nth-child(2) { flex: 1 1 0; min-width: 0; }
+.mapview .livefeed-layers { flex: 0 1 auto; flex-wrap: wrap; justify-content: flex-end; gap: 4px; }
+.mapview .livefeed-layers button { padding: 3px 6px; }
+.mapview .livefeed-layers select { font: inherit; font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; padding: 2px 2px; background: var(--bg); color: var(--text); border: 1px solid var(--line-strong); cursor: pointer; }
 .mapview .livefeed-layers button:disabled, .mapview .livefeed-layers select:disabled { opacity: 0.4; cursor: not-allowed; }
 .mapview-stage { position: relative; min-height: 0; overflow: hidden; background: var(--bg); }
 .mapview-gl { position: absolute; inset: 0; }
@@ -413,6 +418,26 @@ code { font-size: 10px; color: var(--text); overflow-wrap: anywhere; }
 .mapview-inset { margin: 0; background: rgba(3, 16, 12, 0.88); border: 1px solid var(--line-strong); }
 .mapview-inset figcaption { padding: 3px 8px; font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--dim); border-bottom: 1px solid var(--line); }
 .mapview-inset canvas { display: block; width: 100%; height: auto; max-height: 34vh; object-fit: contain; }
+.mapview-info {
+  position: absolute;
+  right: 28px;
+  bottom: 28px;
+  z-index: 3;
+  padding: 4px 10px;
+  background: rgba(3, 16, 12, 0.82);
+  border: 1px solid var(--line);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--dim);
+  pointer-events: none;
+}
+
+/* A main view that failed (App.tsx's boundary): shown in the view area only, the console around it keeps working. */
+.viewfail { grid-area: view; display: grid; place-content: center; justify-items: center; gap: 8px; padding: 24px; text-align: center; color: var(--dim); min-height: 0; }
+.viewfail b { font-size: 16px; letter-spacing: 0.24em; text-transform: uppercase; color: var(--orange); }
+.viewfail span { max-width: 56ch; overflow-wrap: anywhere; }
+.viewfail-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: 8px; }
 
 @media (max-width: 1000px) {
   /* the top bar wraps here, so the switch gets a row of its own under it */

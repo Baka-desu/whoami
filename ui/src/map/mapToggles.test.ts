@@ -1,0 +1,107 @@
+import { describe, expect, it } from 'vitest'
+import {
+  DEFAULT_TOGGLES, enabledLayers, parseToggles, parseView, slotOnError, slotOnProps, slotState, toggled, type MapToggles,
+} from './mapToggles'
+
+describe('persisted toggles', () => {
+  it('falls back to the defaults for nothing stored or anything unreadable', () => {
+    expect(parseToggles(null)).toEqual(DEFAULT_TOGGLES)
+    expect(parseToggles('')).toEqual(DEFAULT_TOGGLES)
+    expect(parseToggles('not json')).toEqual(DEFAULT_TOGGLES)
+    expect(parseToggles('[true, false]')).toEqual(DEFAULT_TOGGLES)
+    expect(parseToggles('null')).toEqual(DEFAULT_TOGGLES)
+    expect(parseToggles('42')).toEqual(DEFAULT_TOGGLES)
+  })
+
+  it('shows every layer but elevation by default, height colours', () => {
+    expect(DEFAULT_TOGGLES).toEqual({
+      cloud: true, live: true, trajectory: true, elevation: false, grid: true, images: true, mode: 'height',
+    })
+  })
+
+  it('honours a saved choice over the default, including elevation turned on', () => {
+    expect(parseToggles(JSON.stringify({ elevation: true })).elevation).toBe(true)
+    // a whole record saved under the old all-on default stays exactly as it was saved
+    const old: MapToggles = { cloud: true, live: true, trajectory: true, elevation: true, grid: true, images: true, mode: 'height' }
+    expect(parseToggles(JSON.stringify(old))).toEqual(old)
+  })
+
+  it('reads each stored value it understands and keeps the default for the rest', () => {
+    const t = parseToggles(JSON.stringify({ cloud: false, grid: 'no', images: false, mode: 'obstacle', future: 1 }))
+    expect(t).toEqual({ ...DEFAULT_TOGGLES, cloud: false, images: false, mode: 'obstacle' })
+    expect(parseToggles(JSON.stringify({ mode: 'rainbow' })).mode).toBe(DEFAULT_TOGGLES.mode)
+  })
+
+  it('round-trips what the view writes', () => {
+    const t: MapToggles = { cloud: false, live: true, trajectory: false, elevation: true, grid: false, images: true, mode: 'confidence' }
+    expect(parseToggles(JSON.stringify(t))).toEqual(t)
+  })
+
+  it('returns a new state and leaves the one it was given alone (React state must not be mutated)', () => {
+    const given: MapToggles = { ...DEFAULT_TOGGLES }
+    const next = toggled(given, 'grid')
+    expect(next).not.toBe(given)
+    expect(given).toEqual(DEFAULT_TOGGLES)
+    expect(next.grid).toBe(!DEFAULT_TOGGLES.grid)
+  })
+
+  it('flips one toggle from the state it is given, so two flips in one render both count', () => {
+    const once = toggled(DEFAULT_TOGGLES, 'cloud')
+    expect(once).toEqual({ ...DEFAULT_TOGGLES, cloud: false })
+    expect(toggled(once, 'cloud')).toEqual(DEFAULT_TOGGLES)
+    // two updaters queued against the same render: the second sees the first's result
+    const queued = [(t: MapToggles) => toggled(t, 'grid'), (t: MapToggles) => toggled(t, 'live')]
+    expect(queued.reduce((t, f) => f(t), DEFAULT_TOGGLES)).toEqual({ ...DEFAULT_TOGGLES, grid: false, live: false })
+    expect(DEFAULT_TOGGLES.cloud).toBe(true) // never mutated
+  })
+
+  it('turns toggles into the layers to fetch: the image panels switch depth and camera together', () => {
+    const t: MapToggles = { ...DEFAULT_TOGGLES, cloud: false, live: true, trajectory: false, elevation: true, grid: false, images: false }
+    expect(enabledLayers(t)).toEqual({
+      cloud: false, live: true, trajectory: false, elevation: true, grid: false, depth: false, camera: false,
+    })
+    expect(enabledLayers({ ...t, images: true })).toMatchObject({ depth: true, camera: true })
+    expect(enabledLayers(DEFAULT_TOGGLES).elevation).toBe(false) // off by default: not fetched either
+  })
+})
+
+describe('main view choice', () => {
+  it('is the map only when the map was saved', () => {
+    expect(parseView('map')).toBe('map')
+    expect(parseView('camera')).toBe('camera')
+    expect(parseView(null)).toBe('camera')
+    expect(parseView('MAP')).toBe('camera')
+    expect(parseView('"map"')).toBe('camera')
+  })
+})
+
+describe('view slot error state', () => {
+  it('starts without a failure, keyed to the view', () => {
+    expect(slotState('map:0')).toEqual({ key: 'map:0', failed: null })
+  })
+
+  it.each([
+    'Failed to fetch dynamically imported module: http://robot/assets/MapView-abc.js', // Chromium
+    'error loading dynamically imported module: http://robot/assets/MapView-abc.js', // Firefox
+    'Importing a module script failed.', // Safari
+    'Unable to preload CSS for /assets/MapView-abc.css', // Vite's preload helper
+  ])('tells a chunk that could not be downloaded from a crash (%s)', (message) => {
+    expect(slotOnError(new TypeError(message))).toEqual({ failed: { load: true, detail: message } })
+  })
+
+  it('reports any other error by its message, and something readable for a non-Error throw', () => {
+    expect(slotOnError(new RangeError('Invalid typed array length: -3'))).toEqual({ failed: { load: false, detail: 'Invalid typed array length: -3' } })
+    expect(slotOnError('boom')).toEqual({ failed: { load: false, detail: 'boom' } })
+    expect(slotOnError({ code: 7 })).toEqual({ failed: { load: false, detail: 'unexpected error' } })
+    expect(slotOnError(new Error(''))).toEqual({ failed: { load: false, detail: 'Error' } })
+    expect(slotOnError(null)).toEqual({ failed: { load: false, detail: 'unexpected error' } })
+  })
+
+  it('keeps a failure while the view stays the same and clears it when the view (or the attempt) changes', () => {
+    const failed = { key: 'map:0', failed: { load: false, detail: 'x' } }
+    expect(slotOnProps(failed, 'map:0')).toBeNull() // React: null = no change
+    expect(slotOnProps(failed, 'camera:0')).toEqual({ key: 'camera:0', failed: null })
+    expect(slotOnProps(failed, 'map:1')).toEqual({ key: 'map:1', failed: null })
+    expect(slotOnProps(slotState('camera:0'), 'camera:0')).toBeNull()
+  })
+})

@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useState } from 'react'
+import { Component, lazy, Suspense, useEffect, useState, type ReactNode } from 'react'
 import { CameraView } from './components/CameraView'
 import { CommandPanel } from './components/CommandPanel'
 import { Inspector } from './components/Inspector'
@@ -6,6 +6,9 @@ import { SafetyBoard } from './components/SafetyBoard'
 import { SourcePanel } from './components/SourcePanel'
 import { StatusWidgets } from './components/StatusWidgets'
 import { TopBar } from './components/TopBar'
+import {
+  parseView, slotOnError, slotOnProps, slotState, type MainView, type SlotFailure, type SlotState,
+} from './map/mapToggles'
 import { ApiError, api, isLive, subscribeTelemetry, type Mode, type Telemetry } from './source/api'
 import { useCameraSource } from './source/useCameraSource'
 
@@ -14,15 +17,40 @@ const CLOCK_MS = 250 // re-check telemetry freshness at 4 Hz so a dead stream re
 // three.js is large, so the map view is its own lazily loaded chunk: the camera view's first paint does not pay for it.
 const MapView = lazy(() => import('./components/MapView').then((m) => ({ default: m.MapView })))
 
-type View = 'camera' | 'map'
-const VIEWS: View[] = ['camera', 'map']
+const VIEWS: MainView[] = ['camera', 'map']
 const VIEW_KEY = 'ugv.console.view'
 
-const savedView = (): View => {
+const savedView = (): MainView => {
   try {
-    return localStorage.getItem(VIEW_KEY) === 'map' ? 'map' : 'camera'
+    return parseView(localStorage.getItem(VIEW_KEY))
   } catch {
     return 'camera'
+  }
+}
+
+interface SlotProps {
+  resetKey: string // a new key (another view, another attempt) clears a failure
+  fallback: (failure: SlotFailure) => ReactNode
+  children: ReactNode
+}
+
+// Error boundary around the main view only. A view that fails - its code cannot be downloaded (a stale chunk after a
+// redeploy, a network hiccup) or it throws while rendering or in an effect (say, a malformed frame) - shows its
+// failure in the view area; without this React would unmount the whole console, the e-stop and safety board with it.
+// The state logic is in mapToggles.ts (slotState / slotOnError / slotOnProps), where it is tested.
+class ViewBoundary extends Component<SlotProps, SlotState> {
+  state: SlotState = slotState(this.props.resetKey)
+
+  static getDerivedStateFromError(error: unknown) {
+    return slotOnError(error)
+  }
+
+  static getDerivedStateFromProps(props: SlotProps, state: SlotState) {
+    return slotOnProps(state, props.resetKey)
+  }
+
+  render() {
+    return this.state.failed ? this.props.fallback(this.state.failed) : this.props.children
   }
 }
 
@@ -43,13 +71,32 @@ export default function App() {
   const [now, setNow] = useState(() => Date.now())
   const [estopBusy, setEstopBusy] = useState(false)
   const [message, setMessage] = useState<Message>(null)
-  const [view, setView] = useState<View>(savedView)
+  const [view, setView] = useState<MainView>(savedView)
+  const [viewAttempt, setViewAttempt] = useState(0) // bumped by "try again" after a failed view
   const cam = useCameraSource()
 
-  const pickView = (v: View) => {
+  const pickView = (v: MainView) => {
     setView(v)
     try { localStorage.setItem(VIEW_KEY, v) } catch { /* not persisted */ }
   }
+
+  const viewFailed = (f: SlotFailure) => (
+    <section className="viewfail" role="alert">
+      <b>{view} view {f.load ? 'failed to load' : 'stopped'}</b>
+      <span>{f.detail}</span>
+      <span>The rest of the console, the e-stop included, keeps working.</span>
+      <div className="viewfail-actions">
+        {view === 'map' && (
+          <button type="button" className="btn primary" onClick={() => pickView('camera')}>back to camera view</button>
+        )}
+        {f.load ? (
+          <button type="button" className="btn" onClick={() => window.location.reload()}>reload page</button>
+        ) : (
+          <button type="button" className="btn" onClick={() => setViewAttempt((a) => a + 1)}>try again</button>
+        )}
+      </div>
+    </section>
+  )
 
   useEffect(() => subscribeTelemetry(setTelemetry, setConnected), [])
   useEffect(() => {
@@ -114,13 +161,15 @@ export default function App() {
         />
         <SourcePanel cam={cam} />
       </aside>
-      {view === 'camera' ? (
-        <CameraView cam={cam} />
-      ) : (
-        <Suspense fallback={<section className="mapview" aria-busy="true" />}>
-          <MapView telemetry={telemetry} live={live} />
-        </Suspense>
-      )}
+      <ViewBoundary resetKey={`${view}:${viewAttempt}`} fallback={viewFailed}>
+        {view === 'camera' ? (
+          <CameraView cam={cam} />
+        ) : (
+          <Suspense fallback={<section className="mapview" aria-busy="true" />}>
+            <MapView telemetry={telemetry} live={live} />
+          </Suspense>
+        )}
+      </ViewBoundary>
       <aside className="panel inspector">
         <SafetyBoard safety={safety} live={live} />
         <p className="inspector-hint">drag widgets to rearrange · alt + arrows on keyboard</p>

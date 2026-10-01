@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
-  DEFAULT_TOGGLES, GROUND_MARGIN_M, GROUND_MAX_DIVISIONS, GROUND_MIN_SIZE_M, LIVE_BAND_ABOVE_M, LIVE_BAND_BELOW_M, VIEW_MAX_DIST_M,
-  VIEW_MIN_DIST_M, cloudBounds, enabledLayers, gridQuad, groundGridFor, homeView, liveHeightBand, parseToggles,
-  pointBounds, unionBounds, yawOf, type Bounds, type MapToggles,
+  GROUND_MARGIN_M, GROUND_MAX_DIVISIONS, GROUND_MIN_SIZE_M, LIVE_BAND_ABOVE_M, LIVE_BAND_BELOW_M, VIEW_MAX_DIST_M,
+  VIEW_MIN_DIST_M, cloudBounds, gridQuad, groundGridFor, homeView, liveHeightBand, pointBounds, unionBounds, yawOf,
+  type Bounds,
 } from './scene-math'
 
 const box = (minX: number, minY: number, minZ: number, maxX: number, maxY: number, maxZ: number): Bounds =>
@@ -197,35 +197,5 @@ describe('liveHeightBand', () => {
   it('uses the map ground when the robot height is not known', () => {
     expect(liveHeightBand(null)).toEqual(liveHeightBand(0))
     expect(liveHeightBand(Number.NaN)).toEqual(liveHeightBand(0))
-  })
-})
-
-describe('persisted toggles', () => {
-  it('falls back to the defaults for nothing stored or anything unreadable', () => {
-    expect(parseToggles(null)).toEqual(DEFAULT_TOGGLES)
-    expect(parseToggles('')).toEqual(DEFAULT_TOGGLES)
-    expect(parseToggles('not json')).toEqual(DEFAULT_TOGGLES)
-    expect(parseToggles('[true, false]')).toEqual(DEFAULT_TOGGLES)
-    expect(parseToggles('null')).toEqual(DEFAULT_TOGGLES)
-    expect(parseToggles('42')).toEqual(DEFAULT_TOGGLES)
-  })
-
-  it('reads each stored value it understands and keeps the default for the rest', () => {
-    const t = parseToggles(JSON.stringify({ cloud: false, grid: 'no', images: false, mode: 'obstacle', future: 1 }))
-    expect(t).toEqual({ ...DEFAULT_TOGGLES, cloud: false, images: false, mode: 'obstacle' })
-    expect(parseToggles(JSON.stringify({ mode: 'rainbow' })).mode).toBe(DEFAULT_TOGGLES.mode)
-  })
-
-  it('round-trips what the view writes', () => {
-    const t: MapToggles = { cloud: false, live: true, trajectory: false, elevation: true, grid: false, images: true, mode: 'confidence' }
-    expect(parseToggles(JSON.stringify(t))).toEqual(t)
-  })
-
-  it('turns toggles into the layers to fetch: the image panels switch depth and camera together', () => {
-    const t: MapToggles = { ...DEFAULT_TOGGLES, cloud: false, live: true, trajectory: false, elevation: true, grid: false, images: false }
-    expect(enabledLayers(t)).toEqual({
-      cloud: false, live: true, trajectory: false, elevation: true, grid: false, depth: false, camera: false,
-    })
-    expect(enabledLayers({ ...t, images: true })).toMatchObject({ depth: true, camera: true })
   })
 })

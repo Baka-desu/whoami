@@ -1,9 +1,6 @@
-// Pure helpers for the 3D map view (scene.ts and MapView.tsx): where the camera goes, where the cost-grid quad lies,
-// how big the ground grid is, the live cloud's height band and the view's persisted toggles. No three.js and no DOM,
-// so they are tested in node. World frame = the map frame: metres, x forward/east, y left/north, z up.
-
-import type { ElevationColorMode } from './geometry'
-import type { Enabled } from './useMapData'
+// Pure helpers for the 3D map scene (scene.ts): where the camera goes, where the cost-grid quad lies, how big the
+// ground grid is and the live cloud's height band. No three.js and no DOM, so they are tested in node. World frame =
+// the map frame: metres, x forward/east, y left/north, z up. (The view's toggles live in mapToggles.ts.)
 
 export interface Vec3 { x: number; y: number; z: number }
 export interface Bounds { minX: number; minY: number; minZ: number; maxX: number; maxY: number; maxZ: number }
@@ -144,49 +141,4 @@ export const LIVE_BAND_ABOVE_M = 2.25
 export function liveHeightBand(groundZ: number | null): [number, number] {
   const z0 = groundZ !== null && Number.isFinite(groundZ) ? groundZ : 0
   return [z0 - LIVE_BAND_BELOW_M, z0 + LIVE_BAND_ABOVE_M]
-}
-
-// ---- persisted toggles ----------------------------------------------------------------------------
-export interface MapToggles {
-  cloud: boolean // accumulated map cloud
-  live: boolean // current depth scan
-  trajectory: boolean
-  elevation: boolean
-  grid: boolean // cost grid
-  images: boolean // the depth and camera panels
-  mode: ElevationColorMode
-}
-
-export const DEFAULT_TOGGLES: MapToggles = {
-  cloud: true, live: true, trajectory: true, elevation: true, grid: true, images: true, mode: 'height',
-}
-
-const TOGGLE_KEYS = ['cloud', 'live', 'trajectory', 'elevation', 'grid', 'images'] as const
-const MODES: readonly ElevationColorMode[] = ['height', 'confidence', 'obstacle']
-
-// What localStorage held, read leniently: every value that is understood is kept, anything else (absent, wrong type,
-// unknown mode, unparsable text) falls back to its default.
-export function parseToggles(raw: string | null): MapToggles {
-  let v: unknown = null
-  try {
-    v = raw ? JSON.parse(raw) : null
-  } catch {
-    v = null
-  }
-  const o = typeof v === 'object' && v !== null && !Array.isArray(v) ? (v as Record<string, unknown>) : {}
-  const out = { ...DEFAULT_TOGGLES }
-  for (const k of TOGGLE_KEYS) {
-    const b = o[k]
-    if (typeof b === 'boolean') out[k] = b
-  }
-  if (MODES.includes(o.mode as ElevationColorMode)) out.mode = o.mode as ElevationColorMode
-  return out
-}
-
-// The layers the data hook fetches: a layer that is toggled off is not requested at all.
-export function enabledLayers(t: MapToggles): Enabled {
-  return {
-    cloud: t.cloud, live: t.live, trajectory: t.trajectory, elevation: t.elevation, grid: t.grid,
-    depth: t.images, camera: t.images,
-  }
 }
