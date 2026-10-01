@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from contextlib import AbstractContextManager, nullcontext
 from pathlib import Path
 
 import numpy as np
@@ -19,12 +21,27 @@ from ugv_perception.depth.geometry import (
 )
 
 
+def _no_timing(name: str) -> AbstractContextManager[None]:
+    return nullcontext()
+
+
 class DepthChannel:
     def __init__(self, backend: object) -> None:
         self._backend = backend
 
-    def maps(self, rgb: np.ndarray, k: tuple[float, ...] | np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """Camera-sized meters (NaN holes) and unorganized XYZ. One infer."""
+    def maps(
+        self,
+        rgb: np.ndarray,
+        k: tuple[float, ...] | np.ndarray,
+        stage: Callable[[str], AbstractContextManager[None]] | None = None,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Camera-sized meters (NaN holes) and unorganized XYZ. One infer.
+
+        `stage(name)` is an optional timing hook returning a context manager. It sees
+        "depth_infer" (backend sizing, preprocess, model run) and "depth_post"
+        (meters, hole-safe resize, back-projection). It does not change the result.
+        """
+        span = stage if stage is not None else _no_timing
         if rgb.dtype != np.uint8 or rgb.ndim != 3 or rgb.shape[2] != 3:
             raise TypeError("rgb must be uint8 HWC")
         k_cam = np.asarray(k, dtype=np.float64).reshape(3, 3)
@@ -32,18 +49,20 @@ class DepthChannel:
         k_m, (mh, mw) = k_model(k_cam, (height, width))
         if model_hw(height, width) != (mh, mw):
             raise AdapterError("model size disagrees with K_model")
-        self._backend.ensure_hw(mh, mw)
-        blob, sized = preprocess_nchw(rgb)
-        if sized != (mh, mw):
-            raise AdapterError("preprocess size disagrees with K_model")
-        outputs = self._backend.run_all(blob)
+        with span("depth_infer"):
+            self._backend.ensure_hw(mh, mw)
+            blob, sized = preprocess_nchw(rgb)
+            if sized != (mh, mw):
+                raise AdapterError("preprocess size disagrees with K_model")
+            outputs = self._backend.run_all(blob)
         if len(outputs) < 2:
             raise AdapterError("DA3 must return depth_raw and sky")
-        raw = np.squeeze(outputs[0])
-        sky = np.squeeze(outputs[1])
-        depth_m = meters_from_raw(raw, focal_model(k_m))
-        on_camera = hole_safe_resize(depth_m, sky, (height, width)).astype(np.float32)
-        return on_camera, backproject(on_camera, k_cam)
+        with span("depth_post"):
+            raw = np.squeeze(outputs[0])
+            sky = np.squeeze(outputs[1])
+            depth_m = meters_from_raw(raw, focal_model(k_m))
+            on_camera = hole_safe_resize(depth_m, sky, (height, width)).astype(np.float32)
+            return on_camera, backproject(on_camera, k_cam)
 
     def points(self, rgb: np.ndarray, k: tuple[float, ...] | np.ndarray) -> np.ndarray:
         return self.maps(rgb, k)[1]

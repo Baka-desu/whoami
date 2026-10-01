@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 from pathlib import Path
@@ -10,7 +11,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import CameraInfo, Image
-from std_msgs.msg import Bool, Float64MultiArray
+from std_msgs.msg import Bool, Float64MultiArray, String
 
 from ugv_perception.compose.load import load_compose_configs
 from ugv_perception.ingest.msgs import CameraInfoView, ImageView
@@ -21,6 +22,8 @@ from ugv_perception.node.wire import wire_compose_out
 
 _ROOT = Path(__file__).resolve().parents[3]
 _NS = 1_000_000_000
+_STATS_PERIOD_S = 1.0
+_DEPTH_WARN_EVERY = 100
 
 
 def _image_qos() -> QoSProfile:
@@ -65,6 +68,7 @@ class PerceptionAdapterNode(Node):
         queue_depth: object | None = None,
         adapter_id: str | None = None,
         depth: object | None = None,
+        monotonic_ns_fn: object | None = None,
     ) -> None:
         if queue_depth is not None and (type(queue_depth) is not int or queue_depth != 1):
             raise TypeError("queue_depth must be Python int == 1")
@@ -98,7 +102,7 @@ class PerceptionAdapterNode(Node):
             gates_path=gates_path,
             freshness_path=freshness_path,
         )
-        self.metrics = PerceptionMetrics()
+        self.metrics = PerceptionMetrics(clock_ns=monotonic_ns_fn or time.monotonic_ns)
         self._adapter = _CountingAdapter(adapter, self.metrics)
         self._table = table
         self._gates = gates
@@ -124,6 +128,8 @@ class PerceptionAdapterNode(Node):
         self._pub_conf = self.create_publisher(Image, "/segmentation/confidence", 10)
         self._pub_meta = self.create_publisher(Float64MultiArray, "/segmentation/port_meta", 10)
         self._pub_cinfo = self.create_publisher(CameraInfo, "/segmentation/camera_info", 10)
+        self._pub_stats = self.create_publisher(String, "/ugv/perception/stats", 10)
+        self._stats_timer = self.create_timer(_STATS_PERIOD_S, self._publish_stats)
         self._depth = depth
         self._pub_cloud = None
         self._pub_depth = None
@@ -149,7 +155,8 @@ class PerceptionAdapterNode(Node):
         super().destroy_node()
 
     def _on_image(self, msg: Image) -> None:
-        view = image_msg_to_view(msg)
+        with self.metrics.stage("decode"):
+            view = image_msg_to_view(msg)
         with self._stamp_lock:
             self._last_image_stamp = view.stamp_ns
         self.metrics.frames_in += 1
@@ -169,17 +176,18 @@ class PerceptionAdapterNode(Node):
         if type(now_ns) is not int or now_ns <= 0:
             raise TypeError("now_ns must be a Python int > 0")
         had_pair = self._last_image is not None and self._last_info is not None
-        out = perception_cycle(
-            image=self._last_image,
-            camera_info=self._last_info,
-            now_ns=now_ns,
-            adapter=self._adapter,
-            remap_table=self._table,
-            gate_profile=self._gates,
-            freshness_profile=self._fresh,
-        )
+        with self.metrics.stage("seg"):
+            out = perception_cycle(
+                image=self._last_image,
+                camera_info=self._last_info,
+                now_ns=now_ns,
+                adapter=self._adapter,
+                remap_table=self._table,
+                gate_profile=self._gates,
+                freshness_profile=self._fresh,
+            )
         wired = wire_compose_out(out)
-        self._pub_degraded.publish(wired.degraded)
+        self._publish(self._pub_degraded, wired.degraded)
         if wired.degraded.data is True:
             self.metrics.degraded_true += 1
         else:
@@ -190,15 +198,25 @@ class PerceptionAdapterNode(Node):
                 + int(wired.mask.header.stamp.nanosec)
             )
             self.metrics.latencies_ns.append(now_ns - stamp)
-            self.metrics.masks_published += 1
-            self._pub_mask.publish(wired.mask)
-            self._pub_conf.publish(wired.confidence)
-            self._pub_meta.publish(wired.port_meta)
+            self.metrics.mark_mask()
+            self._publish(self._pub_mask, wired.mask)
+            self._publish(self._pub_conf, wired.confidence)
+            self._publish(self._pub_meta, wired.port_meta)
             if self._last_camera_info_msg is not None:
-                self._pub_cinfo.publish(self._last_camera_info_msg)
+                self._publish(self._pub_cinfo, self._last_camera_info_msg)
             self._publish_depth()
         if had_pair and self._last_image is not None:
             self._inferred_stamp = self._last_image.stamp_ns
+        self.metrics.end_frame()
+
+    def _publish(self, publisher: object, msg: object) -> None:
+        with self.metrics.stage("publish"):
+            publisher.publish(msg)
+
+    def _publish_stats(self) -> None:
+        msg = String()
+        msg.data = json.dumps(self.metrics.snapshot())
+        self._pub_stats.publish(msg)
 
     def _publish_depth(self) -> None:
         """After the mask. Failure publishes no cloud and does not touch degraded."""
@@ -208,18 +226,27 @@ class PerceptionAdapterNode(Node):
             from ugv_perception.ingest.decode import decode_frame
             from ugv_perception.node.cloud import depth_to_image, points_to_cloud
 
-            frame = decode_frame(self._last_image, self._last_info)
-            depth_m, points = self._depth.maps(frame.rgb, self._last_info.k)
+            with self.metrics.stage("decode"):
+                frame = decode_frame(self._last_image, self._last_info)
+            depth_m, points = self._depth.maps(
+                frame.rgb, self._last_info.k, stage=self.metrics.stage
+            )
             if self._pub_depth is not None:
-                self._pub_depth.publish(
-                    depth_to_image(depth_m, frame.stamp_ns, frame.frame_id)
-                )
+                with self.metrics.stage("cloud"):
+                    depth_msg = depth_to_image(depth_m, frame.stamp_ns, frame.frame_id)
+                self._publish(self._pub_depth, depth_msg)
             if points is not None and self._pub_cloud is not None:
-                self._pub_cloud.publish(
-                    points_to_cloud(points, frame.stamp_ns, frame.frame_id)
+                with self.metrics.stage("cloud"):
+                    cloud_msg = points_to_cloud(points, frame.stamp_ns, frame.frame_id)
+                self._publish(self._pub_cloud, cloud_msg)
+            self.metrics.mark_depth()
+        except Exception as exc:
+            self.metrics.record_depth_error(exc)
+            n = self.metrics.depth_errors
+            if n == 1 or n % _DEPTH_WARN_EVERY == 0:
+                self.get_logger().warning(
+                    f"depth failed ({n} so far): {self.metrics.last_depth_error}"
                 )
-        except Exception:
-            return
 
     def _watchdog_loop(self, period_s: float) -> None:
         max_age = float(self._fresh.perception_max_age)
