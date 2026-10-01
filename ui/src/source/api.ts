@@ -70,6 +70,31 @@ export interface Navigation {
   activeGoal: Goal | null
 }
 
+// The map layers the gateway serves (GET /map/{layer}); MapStatus.seq always carries all seven.
+export const LAYERS = ['cloud', 'elevation', 'trajectory', 'grid', 'live', 'depth', 'camera'] as const
+export type Layer = (typeof LAYERS)[number]
+
+export type StatValue = number | string | boolean | null
+
+export interface MapStatus {
+  epoch: number // random per gateway process: a change means the layer sequences restarted
+  seq: Record<Layer, number> // per-layer change counter, 0 = nothing received yet
+  stats: Record<string, StatValue> // snake_case keys passed through from the ROS stats nodes; unknown keys are fine
+}
+
+// map -> base_link. Until a transform has been seen: available false and every coordinate null.
+export interface Pose {
+  available: boolean
+  x: number | null
+  y: number | null
+  z: number | null
+  qx: number | null
+  qy: number | null
+  qz: number | null
+  qw: number | null
+  ageS: number | null
+}
+
 // RFC 9457 problem details, as the gateway returns them.
 export interface Problem {
   title: string
@@ -95,6 +120,8 @@ const optNum = (v: unknown): v is number | null => v === null || isNum(v)
 const optStr = (v: unknown): v is string | null => v === null || typeof v === 'string'
 const optBool = (v: unknown): v is boolean | null => v === null || typeof v === 'boolean'
 const isVec = (v: unknown): v is Vector3 => isObj(v) && isNum(v.x) && isNum(v.y) && isNum(v.z)
+const isStat = (v: unknown): v is StatValue => v === null || isNum(v) || typeof v === 'string' || typeof v === 'boolean'
+const POSE_COORDS = ['x', 'y', 'z', 'qx', 'qy', 'qz', 'qw'] as const
 
 function asWatch(v: unknown): Watch | null {
   if (!isObj(v) || !WATCH_NAMES.includes(v.name as WatchName)) return null
@@ -150,6 +177,21 @@ export function asNavigation(v: unknown): Navigation | null {
   return { ...(v as unknown as Navigation), activeGoal }
 }
 
+export function asMapStatus(v: unknown): MapStatus | null {
+  if (!isObj(v) || !isNum(v.epoch) || !isObj(v.seq) || !isObj(v.stats)) return null
+  const s = v.seq
+  if (LAYERS.some((l) => !isNum(s[l]))) return null // all seven layers or nothing
+  if (!Object.values(v.stats).every(isStat)) return null // flat scalars only
+  const seq = Object.fromEntries(LAYERS.map((l) => [l, s[l] as number])) as Record<Layer, number>
+  return { epoch: v.epoch, seq, stats: { ...(v.stats as Record<string, StatValue>) } }
+}
+
+export function asPose(v: unknown): Pose | null {
+  if (!isObj(v) || typeof v.available !== 'boolean' || !optNum(v.ageS)) return null
+  if (v.available ? !POSE_COORDS.every((k) => isNum(v[k])) : !POSE_COORDS.every((k) => v[k] === null)) return null
+  return v as unknown as Pose
+}
+
 export function asProblem(v: unknown, status: number): Problem {
   if (isObj(v) && typeof v.title === 'string') {
     return {
@@ -183,6 +225,31 @@ async function request<T>(method: string, path: string, parse: (v: unknown) => T
   return parsed
 }
 
+// Binary layer download (GET /map/{layer}). Resolves null on 503: the layer has no data yet, which is a normal state, not
+// an error. Any other failure throws like `request`; an abort via `signal` is rethrown untouched so callers can tell it
+// from a failure.
+export async function getBinary(path: string, signal: AbortSignal): Promise<ArrayBuffer | null> {
+  let res: Response
+  try {
+    res = await fetch(API_BASE + path, { signal })
+  } catch (e) {
+    if (signal.aborted) throw e
+    throw new ApiError({ title: 'Gateway unreachable', status: 0, detail: `cannot reach ${API_BASE}` })
+  }
+  if (res.status === 503) return null
+  if (!res.ok) {
+    let json: unknown = null
+    try { json = await res.json() } catch { /* empty or non-JSON body */ }
+    throw new ApiError(asProblem(json, res.status))
+  }
+  try {
+    return await res.arrayBuffer()
+  } catch (e) {
+    if (signal.aborted) throw e
+    throw new ApiError({ title: 'Bad response', status: res.status, detail: `truncated payload from ${path}` })
+  }
+}
+
 export const api = {
   setEstop: (asserted: boolean) => request('PUT', '/safety/e-stop', asEStop, { asserted }),
   setMode: (mode: Mode) => request('PUT', '/localization/mode', (v) => (isObj(v) && v.mode === mode ? mode : null), { mode }),
@@ -197,6 +264,8 @@ export interface Telemetry {
   command?: BaseCommand
   localization?: Localization
   navigation?: Navigation
+  map?: MapStatus
+  pose?: Pose
   at: number // browser ms of the newest accepted event
 }
 
@@ -207,7 +276,9 @@ export function isLive(t: Telemetry | null, now: number): t is Telemetry {
   return !!t && now - t.at <= TELEMETRY_MAX_AGE_MS
 }
 
-const PARSERS = { safety: asSafety, command: asCommand, localization: asLocalization, navigation: asNavigation } as const
+const PARSERS = {
+  safety: asSafety, command: asCommand, localization: asLocalization, navigation: asNavigation, map: asMapStatus, pose: asPose,
+} as const
 
 export function applyEvent(prev: Telemetry | null, event: string, data: string, now: number): Telemetry | null {
   const parse = PARSERS[event as keyof typeof PARSERS]
