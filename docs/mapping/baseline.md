@@ -72,3 +72,57 @@ standard deviation 0.26. Centre-patch median 0.75–2.89 m. Both are DA3's respo
   the `/perception/depth_cloud` contract for.
 - Getting every synced frame to visual odometry (Task 5b) is the cheapest improvement: it should raise the
   odometry rate from about 1.3 Hz to the depth rate without touching any model.
+
+## Task 23: odometry input QoS, before and after
+
+**When:** 2026-10-02, branch `mapping-3d`. The real stack (`localization.launch.py`: `rgbd_sync`, `rgbd_odometry`, `rtabmap`,
+`odom_selector`, `pose_validity`, `odom_source:=auto`) in the `ugv-run` container, fed synthetic sensors by
+`test/test_ros_stack.py` (static textured scene, 640x480 rgb8 + 32FC1 depth + CameraInfo, one complete frame about every
+0.27 s, so 3.6 frames/s against 3.3 Hz live). Window 32 s (30 s of frames plus 2 s drain). Each `rgbd_image` is ~2.1 MB.
+Counts are messages in the window; "reliable subscriber" is a counting subscriber in the test process, so it sees what
+`rgbd_sync` actually published.
+
+### The cause is transport loss on a best-effort subscription, not odometry
+
+| `laptop` timing, 640x480, reliable camera | Before | After |
+|---|---|---|
+| Complete frames sent | 116-117 | 116-117 |
+| `rgbd_image` seen by a reliable subscriber | 116 of 116 | 113-117 of 116-117 |
+| `rgbd_image` seen by a best-effort subscriber (test process) | 0-2 of 116 | 6-48 of 116 (still lossy) |
+| `rgbd_odometry` `odom_info` | **23-59 (0.7-1.8 Hz), 20-51 %** (typical 33, 1.0 Hz) | **116-117 (3.65 Hz), 100 %** |
+| `rtabmap` `/rtabmap/info` (a SLAM step; `Rtabmap/DetectionRate` caps it at 2 Hz) | 4-6 (0.12-0.19 Hz) | 58 (1.8 Hz) |
+| `rgbd_odometry` / `rtabmap` subscription to `/rtabmap/rgbd_image` | BEST_EFFORT / BEST_EFFORT | RELIABLE / RELIABLE |
+
+- `rgbd_sync` delivered every frame to a reliable reader (116 of 116) while the best-effort readers got a fraction. After
+  the change the same odometry node, same data, same machine processes all of them (3.65 Hz, each estimate 0.03-0.05 s
+  against a 0.27 s frame period). So the missing frames were lost before odometry, not skipped by it.
+- Mechanism (likely, not separately proven): Fast DDS cannot create its shared-memory transport in this container
+  (`RTPS_TRANSPORT_SHM Error: Failed to create segment ... SHM Transport is not supported` in every node log), so the 2.1 MB
+  message travels as UDP fragments. Best effort never retransmits, so one lost fragment loses the whole message. A 0.5 MB
+  message (320x240) is hit too, less often (before: 29-31 of 117 reached odometry).
+- The synthetic ratio (20-51 %) brackets the live one (1.1-1.4 Hz of 3.3 Hz, 33-42 %).
+
+| `default` timing, 320x240, best-effort camera (the documented contract) | Before | After |
+|---|---|---|
+| `rgbd_sync` publishes `rgbd_image` | BEST_EFFORT (no reliable subscriber can connect) | RELIABLE |
+| `rgbd_odometry` `odom_info` of 117 frames | 29-31 (0.9-1.0 Hz) | 116-117 (3.65 Hz) |
+| `/rtabmap/info` | 5-6 | 58 |
+
+### What changed (configuration only)
+
+- `config/rgbd_odometry.yaml`, `config/rtabmap_rgbd.yaml`: `qos: 1` (reliable) and `topic_queue_size: 10 -> 2`, so a
+  slow consumer skips old frames rather than replaying a backlog of 2.1 MB messages. Both files are shared by the `default`
+  and `laptop` timing profiles.
+- `config/rgbd_sync.yaml` (`default` timing): `qos: 2 -> 0`. This was needed: rgbd_sync's `qos` also sets the QoS of
+  the `rgbd_image` it publishes, so with `qos: 2` the publisher was best effort and reliable consumers could never connect.
+  `0` (system default) is a best-effort subscriber on the camera inputs, so they still connect to reliable and best-effort
+  drivers alike (`docs/localization/interfaces.md`), and a reliable publisher. `rgbd_sync_laptop.yaml` already had `qos: 1`.
+- Pinned by `test_x3_every_synced_frame_reaches_odometry_and_slam` (both timing profiles).
+
+### Found, not fixed
+
+- `default` timing at 640x480 loses most frames **before** `rgbd_sync`: its camera, depth and CameraInfo inputs are
+  best effort by design, and only 7 of 117 frames paired in the synthetic run (the odometry fix does not change that).
+  The `laptop` profile avoids it with reliable inputs, because Dev 5's `camera_driver` is reliable. Whether `default`
+  should do the same is a decision for the owner (it would stop `default` connecting to a best-effort camera).
+- Not re-measured on the live robot; the live rate should now follow the synced rate (3.2-3.3 Hz at the measured depth rate).

@@ -26,7 +26,11 @@
     subscribe_odom: true        # /odom from odom_selector
     approx_sync: true           # rgbd_image (depth rate) vs /odom (wheel rate) stamps differ
     sync_queue_size: 30
-    topic_queue_size: 10
+    # rgbd_image is ~2.1 MB per message at 640x480; best effort drops most of them in transport (see
+    # rgbd_odometry.yaml, docs/mapping/baseline.md "Task 23"). Reliable input, short reader queue so a busy
+    # SLAM step skips old frames rather than replaying a backlog. rgbd_sync must publish RELIABLE (its `qos`).
+    qos: 1                      # 0 = system default (best effort for a subscriber), 1 = reliable, 2 = best effort
+    topic_queue_size: 2
 
     # ---- RTAB-Map library params (strings) ------------------------------------------
     Reg/Strategy: "0"               # visual registration
