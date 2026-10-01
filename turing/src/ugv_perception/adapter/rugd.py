@@ -100,18 +100,17 @@ def preprocess_rgb(
     if rgb.dtype != np.uint8 or rgb.ndim != 3 or rgb.shape[2] != 3:
         raise TypeError("rgb must be uint8 HWC")
     in_h, in_w = input_hw
-    resized = np.moveaxis(
-        _resize_map(np.moveaxis(rgb.astype(np.float32), 2, 0), in_h, in_w), 0, 2
-    )
-    norm = (resized / 255.0 - np.asarray(mean, dtype=np.float32)) / np.asarray(
-        std, dtype=np.float32
-    )
-    return np.transpose(norm, (2, 0, 1))[None].astype(np.float32)
+    chw = np.transpose(rgb, (2, 0, 1)).astype(np.float32, copy=False)
+    resized = _resize_maps(chw, in_h, in_w)
+    mean_a = np.asarray(mean, dtype=np.float32)[:, None, None]
+    std_a = np.asarray(std, dtype=np.float32)[:, None, None]
+    norm = (resized / 255.0 - mean_a) / std_a
+    return norm[None].astype(np.float32)
 
 
 def decode_rugd_logits(logits: np.ndarray, frame: ImageFrame) -> RawSemOutput:
     """(1, 25, h, w) or (25, h, w) logits → argmax softmax on camera HW."""
-    a = np.asarray(logits, dtype=np.float64)
+    a = np.asarray(logits, dtype=np.float32)
     if a.ndim == 4 and a.shape[0] == 1:
         a = a[0]
     if a.ndim != 3 or a.shape[0] != N_CLASSES:
@@ -120,7 +119,7 @@ def decode_rugd_logits(logits: np.ndarray, frame: ImageFrame) -> RawSemOutput:
         raise AdapterError("RUGD logits are not finite")
     rh, rw = int(frame.rgb.shape[0]), int(frame.rgb.shape[1])
     if (a.shape[1], a.shape[2]) != (rh, rw):
-        a = _resize_map(a, rh, rw)
+        a = _resize_maps(a, rh, rw)
     shifted = a - a.max(axis=0, keepdims=True)
     exp = np.exp(np.clip(shifted, -80.0, 80.0))
     prob = exp / exp.sum(axis=0, keepdims=True)
@@ -158,49 +157,68 @@ class RugdSegformerAdapter:
             blob = preprocess_rgb(
                 frame.rgb, input_hw=self._input_hw, mean=self._mean, std=self._std
             )
-            hw = (int(frame.rgb.shape[0]), int(frame.rgb.shape[1]))
-            fast = getattr(self._backend, "run_decoded", None)
-            if fast is not None:
-                # Backend decodes on its own device (CUDA): same maths as decode_rugd_logits.
-                labels, scores = fast(blob, hw)
-            else:
-                logits = self._backend.run(blob)
+            rh, rw = int(frame.rgb.shape[0]), int(frame.rgb.shape[1])
+            run_seg = getattr(self._backend, "run_seg", None)
+            if callable(run_seg) and not getattr(self._backend, "seg_post_disabled", False):
+                try:
+                    labels, scores = run_seg(blob, (rh, rw))
+                    return _raw_from_maps(labels, scores, frame)
+                except AdapterError as exc:
+                    if "not finite" in str(exc):
+                        raise
+            elif callable(getattr(self._backend, "run_decoded", None)):
+                # Backend decodes on its own device: same maths as decode_rugd_logits.
+                labels, scores = self._backend.run_decoded(blob, (rh, rw))
+                return _raw_from_maps(labels, scores, frame)
+            logits = self._backend.run(blob)
         except AdapterError:
             raise
         except Exception as exc:
             raise AdapterError("RUGD backend failed") from exc
-        if fast is None:
-            return decode_rugd_logits(logits, frame)
-        if labels.shape != hw or scores.shape != hw:
-            raise AdapterError("RUGD backend decoded to the wrong size")
-        if np.any(~np.isfinite(scores)) or np.any(scores < 0.0) or np.any(scores > 1.0):
-            raise AdapterError("RUGD scores are not finite and in [0,1]")
-        return RawSemOutput(
-            adapter_id=ADAPTER_ID,
-            label_ids=labels,
-            raw_scores=scores,
-            id_to_name={i: CLASS_NAMES[i] for i in range(N_CLASSES)},
-            stamp_ns=frame.stamp_ns,
-            frame_id=frame.frame_id,
-            hw=hw,
-        )
+        return decode_rugd_logits(logits, frame)
 
 
 def _axis_weights(n_src: int, n_dst: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Half-pixel bilinear sample positions along one axis: (i0, i1, weight of i1)."""
-    pos = np.clip((np.arange(n_dst) + 0.5) * n_src / n_dst - 0.5, 0.0, n_src - 1)
+    pos = np.arange(n_dst, dtype=np.float32)
+    pos = np.clip((pos + 0.5) * (n_src / n_dst) - 0.5, 0.0, n_src - 1)
     i0 = np.floor(pos).astype(np.intp)
-    return i0, np.minimum(i0 + 1, n_src - 1), pos - i0
+    return i0, np.minimum(i0 + 1, n_src - 1), pos - i0.astype(np.float32)
+
+
+def _raw_from_maps(labels: np.ndarray, scores: np.ndarray, frame: ImageFrame) -> RawSemOutput:
+    rh, rw = int(frame.rgb.shape[0]), int(frame.rgb.shape[1])
+    labels_a = np.squeeze(np.asarray(labels, dtype=np.int32))
+    scores_a = np.squeeze(np.asarray(scores, dtype=np.float32))
+    if labels_a.shape != (rh, rw) or scores_a.shape != (rh, rw):
+        raise AdapterError("RUGD GPU decode size must match the camera")
+    if np.any(~np.isfinite(scores_a)) or np.any(scores_a < 0.0) or np.any(scores_a > 1.0):
+        raise AdapterError("RUGD scores are not finite and in [0,1]")
+    return RawSemOutput(
+        adapter_id=ADAPTER_ID,
+        label_ids=labels_a,
+        raw_scores=scores_a,
+        id_to_name={i: CLASS_NAMES[i] for i in range(N_CLASSES)},
+        stamp_ns=frame.stamp_ns,
+        frame_id=frame.frame_id,
+        hw=(rh, rw),
+    )
 
 
 def _resize_map(src: np.ndarray, h: int, w: int) -> np.ndarray:
-    """Bilinear resize of the last two axes (half-pixel centres, edge clamp), float64.
+    return _resize_maps(src, h, w)
 
-    Separable: rows first, then columns, with the sample positions computed once for every leading
-    channel. Same result as the 2D four-tap form; that form rebuilt full-image index grids per class
-    map and cost ~0.8 s per 640x480 frame for the 25 RUGD logit maps.
+
+def _resize_maps(src: np.ndarray, h: int, w: int) -> np.ndarray:
+    """Bilinear resize of the last two axes (half-pixel centres, edge clamp), float32.
+
+    src is (H, W) or (C, H, W). Separable: rows first, then columns, with the sample positions
+    computed once for every channel. Same result as the 2D four-tap form; that form rebuilt
+    full-image index grids per class map and cost ~0.8 s per 640x480 frame for the 25 RUGD logit maps.
     """
-    src_f = np.asarray(src).astype(np.float64, copy=False)
+    if src.ndim not in (2, 3):
+        raise ValueError("src must be (H, W) or (C, H, W)")
+    src_f = np.asarray(src, dtype=np.float32)
     mh, mw = src_f.shape[-2:]
     if (mh, mw) == (h, w):
         return src_f

@@ -324,6 +324,82 @@ def test_openvino_cpu_forced_run_without_product_picker() -> None:
     assert all(t.size > 0 for t in tensors)
 
 
+def test_openvino_run_seg_gpu_then_cpu() -> None:
+    """RUGD interpolate+softmax on the compiled device. GPU if present, else CPU."""
+    import openvino as ov
+
+    root = Path(__file__).resolve().parents[3]
+    xml = root / "weights" / "rugd-segformer.xml"
+    if not xml.is_file():
+        pytest.skip("RUGD IR missing")
+    from ugv_perception.backend.openvino_gpu import OpenVinoGpuTensorBackend
+
+    blob = np.zeros((1, 3, 640, 640), dtype=np.float32)
+    gpu = OpenVinoGpuTensorBackend()
+    gpu.load(str(xml), input_hw=None)
+    labels, scores = gpu.run_seg(blob, (40, 60))
+    assert labels.shape == (40, 60)
+    assert scores.shape == (40, 60)
+    assert labels.dtype == np.int32
+    assert scores.dtype == np.float32
+    assert float(scores.min()) >= 0.0
+    assert float(scores.max()) <= 1.0
+
+    core = ov.Core()
+    if not any(str(d).startswith("CPU") for d in core.available_devices):
+        return
+    cpu = OpenVinoGpuTensorBackend()
+    cpu._core = core
+    cpu._model = core.read_model(str(xml))
+    cpu._compiled = core.compile_model(cpu._model, "CPU")
+    cpu.device = "CPU"
+    cpu._hw = (640, 640)
+    clabels, cscores = cpu.run_seg(blob, (40, 60))
+    assert clabels.shape == (40, 60)
+    assert cscores.shape == (40, 60)
+    assert float(cscores.min()) >= 0.0
+    assert float(cscores.max()) <= 1.0
+
+
+def test_seg_post_cpu_without_ir_weights() -> None:
+    """Post graph only. No gitignored SegFormer IR."""
+    ov = pytest.importorskip("openvino")
+    from ugv_perception.adapter.frame import ImageFrame
+    from ugv_perception.adapter.rugd import decode_rugd_logits
+    from ugv_perception.backend.openvino_gpu import OpenVinoGpuTensorBackend, _compile_seg_post
+
+    core = ov.Core()
+    if not any(str(d).startswith("CPU") for d in core.available_devices):
+        pytest.skip("OpenVINO CPU device missing")
+    logits = np.full((1, 25, 2, 2), -20.0, dtype=np.float32)
+    logits[0, 4] = 8.0
+    post = _compile_seg_post(core, "CPU", 25, 2, 2, 4, 6)
+    result = post([logits])
+    labels = np.squeeze(np.asarray(result[post.output(0)]))
+    assert labels.shape == (4, 6)
+    assert set(int(x) for x in np.unique(labels).tolist()) == {4}
+
+    backend = OpenVinoGpuTensorBackend()
+    backend._core = core
+    backend.device = "CPU"
+    bad = logits.copy()
+    bad[0, 0, 0, 0] = np.nan
+    with pytest.raises(AdapterError, match="not finite"):
+        backend._decode_seg(bad, (4, 6))
+    assert backend.seg_post_disabled is False
+
+    tie = np.zeros((1, 25, 2, 2), dtype=np.float32)
+    tie[0, 0] = 0.01
+    tie[0, 1] = 0.01001
+    frame = ImageFrame(
+        rgb=np.zeros((4, 6, 3), dtype=np.uint8), stamp_ns=1, frame_id="camera_optical"
+    )
+    numpy_labels = decode_rugd_logits(tie, frame).label_ids
+    post_tie = _compile_seg_post(core, "CPU", 25, 2, 2, 4, 6)
+    ov_labels = np.squeeze(np.asarray(post_tie([tie])[post_tie.output(0)])).astype(np.int32)
+    np.testing.assert_array_equal(ov_labels, numpy_labels)
+
+
 def test_openvino_cpu_forced_rugd_and_da3_without_product_picker() -> None:
     """Force CPU compile+infer on live IRs. Does not call the product picker."""
     import openvino as ov
