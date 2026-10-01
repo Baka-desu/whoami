@@ -54,7 +54,7 @@ export function TopDownMap({ analysis, freshness: fr }: { analysis: Analysis; fr
     if (analysis.path.length > 1) {
       ctx.beginPath()
       analysis.path.forEach((p, i) => (i ? ctx.lineTo(px(p.x), pz(p.z)) : ctx.moveTo(px(p.x), pz(p.z))))
-      ctx.strokeStyle = unsafe ? '#8a8a8a' : '#fff'
+      ctx.strokeStyle = unsafe ? '#8a8a8a' : '#eafff7'
       ctx.lineWidth = 3
       ctx.lineJoin = 'round'
       ctx.setLineDash(unsafe ? [5, 4] : [])
@@ -72,7 +72,7 @@ export function TopDownMap({ analysis, freshness: fr }: { analysis: Analysis; fr
     ctx.closePath()
     ctx.fillStyle = '#000'
     ctx.fill()
-    ctx.strokeStyle = unsafe ? '#8a8a8a' : '#ff2a2a'
+    ctx.strokeStyle = unsafe ? '#8a8a8a' : '#86f0cf'
     ctx.lineWidth = 2
     ctx.stroke()
   }, [analysis, unsafe])
