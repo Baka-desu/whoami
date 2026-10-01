@@ -41,12 +41,12 @@ export interface FrameMeta {
 export interface Analysis {
   meta: FrameMeta
   mask: Uint8Array // GW*GH, values strictly {0,1,2}
-  depth: Float32Array // GW*GH, metres
+  depth: Float32Array | null // GW*GH, metres; null when there is no depth channel
   grid: Uint8Array // TW*TH costmap, 0 free / 1 inflated / 2 lethal
   path: { x: number; z: number }[] // ground metres, x right, z forward
   pathPx: { u: number; v: number }[] // normalised 0..1 image coords
   classPct: [number, number, number]
-  depthStats: { min: number; median: number; max: number }
+  depthStats: { min: number; median: number; max: number } | null
   ageMs: number // now - stamp at analysis time
   latencyMs: number
   degraded: boolean

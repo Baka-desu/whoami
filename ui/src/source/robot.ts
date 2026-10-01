@@ -35,6 +35,8 @@ export interface RobotState {
   odomSource?: Stamped<string> // /ugv/localization/odom_source: wheel | visual
   nav2Heartbeat?: Stamped<boolean> // /ugv/nav2_heartbeat (Dev 4, 20 Hz)
   nav2Status?: Stamped<string> // /ugv/nav2_status: ok | <server> not active ...
+  safetyStatus?: Stamped<string> // /ugv/safety_status (safety arbiter, on change): `L<level> <NAME>[: reasons]`
+  portMeta?: Stamped<{ valid: boolean; ageS: number; scale: number }> // /segmentation/port_meta (Dev 1)
   perceptionDegraded?: Stamped<boolean> // /ugv/perception_degraded (Dev 1)
   odom?: Stamped<{ x: number; y: number; yaw: number; v: number; w: number }> // /odom (odom frame)
   cmdVelNav2?: Stamped<{ v: number; w: number }> // /cmd_vel_nav2 (candidate only; Dev 5 owns /cmd_vel)

@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react'
 import type { Freshness } from '../analysis/freshness'
+import GlyphHero from './ui/glyph-hero'
 import { CLASS_NAMES, CLASS_RGB, GH, GW, PERCEPTION_MAX_AGE_MS, type Analysis, type Layers } from '../types'
 
 const layerCanvas = document.createElement('canvas')
@@ -52,9 +53,11 @@ export function Viewport({ frame, analysis, layers, freshness: fr }: Props) {
 
     const unsafe = fr ? !fr.ok : false
 
-    if (layers.depth) {
+    const depth = analysis.depth
+    if (layers.depth && depth) {
       paintLayer(ctx, w, h, (i) => {
-        const t = 1 - (analysis.depth[i] - 1.5) / 13.5
+        if (!Number.isFinite(depth[i])) return [0, 0, 0, 0] // no measurable depth (sky, holes): leave the photo showing
+        const t = 1 - (depth[i] - 1.5) / 13.5
         return [...depthFill(t), unsafe ? 120 : 225]
       })
     }
@@ -87,14 +90,14 @@ export function Viewport({ frame, analysis, layers, freshness: fr }: Props) {
         ctx.strokeStyle = '#000'
         ctx.lineWidth = 9
         ctx.stroke()
-        ctx.strokeStyle = '#fff'
+        ctx.strokeStyle = '#eafff7'
         ctx.lineWidth = 4
         ctx.stroke()
 
         const goal = analysis.pathPx[analysis.pathPx.length - 1]
         ctx.beginPath()
         ctx.arc(goal.u * w, goal.v * h, 8, 0, Math.PI * 2)
-        ctx.strokeStyle = '#ff2a2a'
+        ctx.strokeStyle = '#86f0cf'
         ctx.lineWidth = 3
         ctx.stroke()
       }
@@ -123,13 +126,14 @@ export function Viewport({ frame, analysis, layers, freshness: fr }: Props) {
                   {i} {n}
                 </span>
               ))}
-              {layers.depth && <span><i style={{ background: `rgb(${depthFill(0.8).join(',')})` }} />NEAR</span>}
+              {layers.depth && analysis?.depth && <span><i style={{ background: `rgb(${depthFill(0.8).join(',')})` }} />NEAR</span>}
               {layers.path && <span><i className="path" />PATH</span>}
             </div>
           )}
         </>
       ) : (
         <div className="nosignal">
+          <GlyphHero className="glyph-bg" />
           <b>NO SIGNAL</b>
           <span>Upload a photo, take one, or start a live source</span>
         </div>

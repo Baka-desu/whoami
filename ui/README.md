@@ -12,11 +12,16 @@ npm test         # unit tests (vitest)
 
 ## Status
 
-- **Analysis goes through one seam.** `src/analysis/analyzer.ts` defines the `Analyzer` interface
-  that `App.tsx` calls. No real perception backend is connected yet, so the shipped analyzer is
-  `unavailableAnalyzer`: frames are shown, the top bar reads `NO ANALYZER`, and there is no mask,
-  depth or path. Dev 1's REST analyzer plugs in by implementing `Analyzer` (returning the
-  Perception Port result: mask in `{0,1,2}`, metric depth, freshness) - no UI change needed.
+- **Analysis goes through one seam.** `src/analysis/analyzer.ts` defines the `Analyzer` interface that
+  `App.tsx` calls. For the **ROS 2 source** the analyzer is `RosPerception` (`analysis/ros-analyzer.ts`): it is
+  fed by Dev 1's Perception Port over rosbridge (`/segmentation/mask`, `/segmentation/port_meta`,
+  `/ugv/perception_degraded`, and `/perception/depth/image` when the DA3 weights are exported), checks each
+  message against the contract (`source/rosimage.ts`), and builds the ground map and path preview from the
+  mask (`analysis/groundmap.ts`, flat-ground approximation, not Nav2's plan). Each analysis carries the mask's
+  own age, so a stalled perception node goes STALE even while camera frames keep arriving. A mask that is not
+  `{0,1,2}` becomes an all-unknown mask flagged `INVALID MASK`. Without a depth channel the Depth layer and
+  widget say so. **Uploads and the browser camera have no perception backend**, so they stay at `NO ANALYZER`
+  (no REST analyzer yet): implement `Analyzer` for them without touching the UI.
 - **Mock analysis is a test fixture only.** `src/analysis/__fixtures__/mock.ts` is imported by
   tests, never by production code (a test fails if it is). It is not a stand-in to replace later.
 - **Robot / navigation (ROS 2 source).** Over rosbridge the UI reads Dev 2 (`ugv_nav`:
