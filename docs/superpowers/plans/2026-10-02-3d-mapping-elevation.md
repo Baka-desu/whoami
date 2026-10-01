@@ -31,7 +31,7 @@ The stack runs end to end on the laptop and shows a camera feed, mask, depth and
 | 3 | **Visual odometry only** (no wheel encoders). |
 | 4 | Phone gets its own calibration file, seeded from the laptop calibration as a flagged placeholder until calibrated. |
 | 5 | General navigation map: generic defaults, no environment-specific tuning, only four elevation layers (height, obstacle, confidence, unknown). |
-| 6 | 3D viewer in the web UI (three.js) plus an RViz config for debugging. The web viewer also shows the live height-coloured cloud and Nav2's costmap, display only. |
+| 6 | The 3D view lives **in the web UI only** (three.js); **no RViz** (the RViz screenshot was only an example of the picture wanted). One map view shows everything: RGB and depth panels, the live height-coloured cloud, Nav2's costmap halo, the accumulated cloud, trajectory, elevation map and statistics. Display only. Revised by the owner 2026-10-02. |
 | 7 | No deadline; do it properly with tests. |
 | 8 | Do not edit `architecture.md`. Record deviations in `mindmap.md`. |
 
@@ -43,7 +43,8 @@ The stack runs end to end on the laptop and shows a camera feed, mask, depth and
 - Repo style: pure-Python kernel + thin ROS wrapper node; kernels tested with plain pytest, ROS behaviour in `test_ros_stack.py`.
 - `Reg/Force3DoF` stays `"true"`. Elevation height is **relief relative to the driving plane** (`base_link` z = 0 is the ground, `ugv_robot_description/urdf.py`), not absolute altitude.
 - Fuse near range only: 0.3 m to 5.0 m from the camera (matches `Grid/RangeMax`).
-- Wire format is little-endian; every binary body starts with the 24-byte prelude in "Binary format v1".
+- The web UI is the only viewer: no RViz configuration and no RViz dependency anywhere in this plan.
+- Wire format is little-endian; every binary body starts with the 24-byte prelude in "Binary format v1" (the camera JPEG passthrough is the one exception).
 - Commit after every task. Branch: `mapping-3d`.
 
 ## Review Focus
@@ -63,7 +64,7 @@ Failure modes the design implies that are most likely to bite; each has a test i
 | Area (owner) | Create | Modify |
 |---|---|---|
 | Perception (Dev 1) `turing/src/ugv_perception/` | — | `node/adapter_node.py`, `node/metrics.py`, `backend/cuda_pytorch.py`, `backend/depth_live.py`, `depth/geometry.py`, `tests/test_adapter_node.py`, `tests/test_depth_meters.py` |
-| Camera (Dev 5) `ugv_nav/ugv_bringup/` | `rviz/mapping.rviz` | `ugv_bringup/camera_core.py`, `ugv_bringup/nodes/camera_driver.py`, `test/test_camera_core.py`, `docker/live.Dockerfile`, `setup.py`, `README.md` |
+| Camera (Dev 5) `ugv_nav/ugv_bringup/` | — | `ugv_bringup/camera_core.py`, `ugv_bringup/nodes/camera_driver.py`, `test/test_camera_core.py`, `README.md` |
 | Calibration (Dev 2) | `ugv_nav/config/cameras/phone_640x480.yaml` | `ugv_localization/camera/calib.py`, `test/test_camera_calib.py`, `config/cameras/README.md` |
 | 3D map (Dev 2) `ugv_nav/ugv_localization/` | `ugv_localization/mapstats/{__init__,stats}.py`, `nodes/map_stats_node.py`, `test/test_mapstats.py` | `config/rtabmap_rgbd.yaml`, `launch/localization.launch.py`, `scripts/record_eval_bag.sh`, `setup.py`, `test/test_ros_stack.py`, `test/test_ros_smoke.py` |
 | Elevation (Dev 2) `ugv_nav/ugv_localization/` | `ugv_localization/elevation/{__init__,contracts,decode,tile,store,fuse}.py`, `nodes/elevation_map_node.py`, `config/elevation.yaml`, `test/test_elevation_{decode,tile,fuse,store}.py` | `launch/localization.launch.py`, `setup.py`, `test/test_ros_stack.py` |
@@ -94,12 +95,9 @@ Failure modes the design implies that are most likely to bite; each has a test i
 
 - [ ] Commit: `chore: start mapping-3d from main + full-withcamera; record decisions D9-D14`.
 
-### Task 2: RViz live view (reproduces the reference screenshot)
+### Task 2: DROPPED (owner, 2026-10-02)
 
-**Files:** Create `ugv_nav/ugv_bringup/rviz/mapping.rviz`; Modify `ugv_nav/ugv_bringup/docker/live.Dockerfile` (add `ros-lyrical-rviz2 ros-lyrical-rtabmap-rviz-plugins`, both have apt candidates), `ugv_nav/ugv_bringup/setup.py` (install `rviz/`), `README.md`.
-
-- [ ] Displays: Image `/camera/image_raw`; Image `/perception/depth/image`; PointCloud2 `/perception/depth_cloud` (AxisColor on Z, fixed frame `map`); Map `/global_costmap/costmap` (costmap colour scheme); TF; plus `/rtabmap/cloud_map`, Path `/rtabmap/mapPath`, PointCloud2 `/ugv/elevation/cloud`, Map `/ugv/elevation/obstacles` (empty until Tasks 8 and 12).
-- [ ] Verify by observation: run `live_cam` with the laptop webcam, `rviz2 -d <installed path>/mapping.rviz` over WSLg; capture a screenshot showing depth panel, RGB panel, height-coloured cloud and the inflation halo. Save it to `docs/mapping/`.
+The RViz live view is removed: the owner wants the reference picture reproduced in the web UI, not in RViz. Its content (RGB panel, depth panel, height-coloured live cloud, costmap halo) is delivered by Tasks 13–20. Task numbers are kept so the ledger stays valid.
 
 ### Task 3: Perception stage timing and visible depth failures
 
@@ -386,7 +384,7 @@ def test_ids_that_left_the_graph_are_dropped_and_restart_clears_everything():
 
 - [ ] Behaviour: subscribe `/rtabmap/mapData`; admit a node as a tile only if its id is in `graph.poses_id`, it has depth, and `accept_tile` passes (frames RTAB-Map publishes but does not keep are not graph nodes); apply `graph_delta`; re-fuse in a worker thread with newest-wins; bulk-load through `get_map_data` at start.
 - [ ] Tests in `test_ros_stack.py`: after the moving synthetic run, both topics publish with equal stamps and the cloud has points; restarting the stack in `localize` mode on the saved database reproduces a grid with the same known-cell count (± 2 %).
-- [ ] Verify on the Task 7 bag: view both topics in `mapping.rviz`; RTAB-Map's own `/rtabmap/cloud_ground` is the cross-check for the height layer.
+- [ ] Verify on the Task 7 bag: view the elevation layer in the web map view (Task 20); RTAB-Map's own `/rtabmap/cloud_ground` is the cross-check for the height layer.
 
 ---
 
@@ -413,11 +411,17 @@ UGVT  header 32: 24 u32 count | 28 f32 length_m
       body: f32[7*count]  x,y,z,qx,qy,qz,qw                         = 32 + 28 * count
 UGVG  header 48: 24 u32 width | 28 u32 height | 32 f32 resolution_m | 36 f32 origin_x | 40 f32 origin_y | 44 f32 origin_yaw
       body: i8[w*h] row-major (-1 unknown, 0..100)                  = 48 + w * h
+UGVD  header 40: 24 u32 width | 28 u32 height | 32 f32 unit_m (metres per count, 0.001) | 36 f32 max_range_m
+      body: u16[w*h] row-major, 0 = hole, saturates at 65535        = 40 + 2 * w * h
 ```
+
+Two image layers feed the RGB and depth panels of the map view:
+- `depth` — `UGVD`, the DA3 depth image decimated by `map.depth_stride` (default 2, so 320x240).
+- `camera` — the JPEG bytes of `/image_raw/compressed` passed through unchanged as `image/jpeg`. It has no prelude; its version is the `seq` in `MapStatus`.
 
 ### Task 13: Codec
 
-**Files:** Create `ugv_api/mapcodec.py`, `test/test_mapcodec.py`, `test/fixtures/map/{cloud,elevation,trajectory,grid}.bin`.
+**Files:** Create `ugv_api/mapcodec.py`, `test/test_mapcodec.py`, `test/fixtures/map/{cloud,elevation,trajectory,grid,depth}.bin`.
 
 ```python
 def cloud_view(*, fields, point_step: int, n_points: int, is_bigendian: bool, data: bytes) -> np.ndarray  # ValueError if xyz is not float32
@@ -427,7 +431,8 @@ def grid_from_cells(x, y, z, confidence, obstacle_h, *, origin_xy, resolution, w
 def encode_elevation(height, obstacle_h, confidence, *, epoch, seq, stamp_s, origin_xy, resolution, max_side: int) -> bytes
 def encode_trajectory(poses: np.ndarray, *, epoch, seq, stamp_s) -> bytes        # (N, 7) float32
 def encode_grid(cells: np.ndarray, *, epoch, seq, stamp_s, resolution, origin_xy, origin_yaw) -> bytes
-def decode_cloud(b: bytes) -> dict; decode_elevation(b) -> dict; decode_trajectory(b) -> dict; decode_grid(b) -> dict   # tests only
+def encode_depth(depth_m: np.ndarray, *, epoch, seq, stamp_s, stride: int, max_range_m: float) -> bytes   # NaN / <=0 / >max -> 0
+def decode_cloud(b: bytes) -> dict; decode_elevation(b) -> dict; decode_trajectory(b) -> dict; decode_grid(b) -> dict; decode_depth(b) -> dict   # tests only
 ```
 - [ ] Failing tests: each layer round-trips and has exactly the length in the spec; `grid_from_cells` puts three cells at the right row/column and leaves the rest NaN; non-finite points are dropped; `count <= budget`, and decimation is a spatial-hash selection so the same input always selects the same points; `encode_elevation` crops to the known bounding box and block-reduces to `max_side` (max height, max obstacle, min confidence); a big-endian or non-float32 cloud raises `ValueError`; (Review Focus 4) two encodes with different `epoch` and equal `seq` differ at bytes 8–11; golden `.bin` fixtures are byte-identical to fresh encodes.
 
@@ -437,14 +442,14 @@ def decode_cloud(b: bytes) -> dict; decode_elevation(b) -> dict; decode_trajecto
 
 ```python
 class MapStore:                                   # ROS-free, thread-safe
-    LAYERS = ("cloud", "elevation", "trajectory", "grid", "live")
+    LAYERS = ("cloud", "elevation", "trajectory", "grid", "live", "depth", "camera")
     epoch: int
     def put(self, layer: str, source: object, stamp_s: float) -> None      # swaps a reference, bumps seq
     def seq(self, layer: str) -> int                                        # 0 = nothing received
     def blob(self, layer: str, encode: Callable[[object, int, int], bytes]) -> bytes | None   # encodes once per seq
     def touch(self, now_s: float) -> None; def wanted(self, now_s: float, idle_s: float) -> bool
 ```
-- [ ] `create_app(..., maps: MapStore | None = None)`. Routes, all sync `def` so encoding runs in the threadpool: `GET /api/v1/map` (JSON `MapStatus`: `epoch`, per-layer `seq`, `stats`), `GET /api/v1/map/{cloud|elevation|trajectory|grid|live}` → `Response(body, media_type="application/octet-stream", headers={"Cache-Control": "no-store"})`. `GET /map` calls `maps.touch()`: it is the demand heartbeat.
+- [ ] `create_app(..., maps: MapStore | None = None)`. Routes, all sync `def` so encoding runs in the threadpool: `GET /api/v1/map` (JSON `MapStatus`: `epoch`, per-layer `seq`, `stats`), `GET /api/v1/map/{cloud|elevation|trajectory|grid|live|depth}` → `Response(body, media_type="application/octet-stream", headers={"Cache-Control": "no-store"})`, and `GET /api/v1/map/camera` → the stored JPEG bytes with `media_type="image/jpeg"`. `GET /map` calls `maps.touch()`: it is the demand heartbeat.
 - [ ] SSE: append `"map": map_view, "pose": pose_view` **after** the four existing entries (`app.py:258-261`) and update the exact-set assertion in `test_api_ros.py`.
 - [ ] Failing tests with a fake `Robot` and `fastapi.testclient`: (Review Focus 5) every blob route returns 503 `application/problem+json` before any data; after `put`, the body decodes and repeated GETs encode once; `GET /map` reports the new `seq`.
 
@@ -461,6 +466,8 @@ class MapStore:                                   # ROS-free, thread-safe
 | elevation | `/ugv/elevation/cloud` + `/ugv/elevation/obstacles` | used only when both stamps match; `map.elevation_max_side: 512` |
 | grid | `/global_costmap/costmap` | sent as received |
 | live | `/perception/depth/image` + `/camera/camera_info` K + TF `map ← frame_id` | back-projected at stride 4, range 0.3–8 m, no rgb |
+| depth | `/perception/depth/image` (the same subscription as `live`) | `map.depth_stride: 2`, `max_range_m` 8.0 |
+| camera | `/image_raw/compressed` (the camera driver's existing rate-limited JPEG stream) | bytes stored as received |
 | stats | `/ugv/map/stats`, `/ugv/perception/stats` | JSON merged into `MapStatus.stats` |
 
 - [ ] `_poll_tf` (`ros_node.py:129-134`) stores the pose tuple `(x, y, z, qx, qy, qz, qw)` instead of `None`; `watches.py` reads only the stamp, so the §12 table is unaffected.
@@ -483,6 +490,8 @@ export function decodeCloud(buf: ArrayBuffer): CloudFrame | null
 export function decodeElevation(buf: ArrayBuffer): ElevationFrame | null
 export function decodeTrajectory(buf: ArrayBuffer): TrajectoryFrame | null
 export function decodeGrid(buf: ArrayBuffer): GridFrame | null
+export type DepthFrame = { epoch: number; seq: number; stampS: number; width: number; height: number; unitM: number; maxRangeM: number; counts: Uint16Array }
+export function decodeDepth(buf: ArrayBuffer): DepthFrame | null
 ```
 - [ ] Failing vitest tests: each golden fixture from Task 13 decodes to the expected counts and first values; (Review Focus 5) wrong magic, unknown `format`, a body one byte short and an empty buffer all return `null`. Typed arrays are zero-copy views.
 
@@ -491,7 +500,7 @@ export function decodeGrid(buf: ArrayBuffer): GridFrame | null
 **Files:** Modify `ui/src/source/api.ts`, `api.test.ts`.
 
 ```ts
-export type Layer = 'cloud' | 'elevation' | 'trajectory' | 'grid' | 'live'
+export type Layer = 'cloud' | 'elevation' | 'trajectory' | 'grid' | 'live' | 'depth' | 'camera'
 export type MapStatus = { epoch: number; seq: Record<Layer, number>; stats: Record<string, number | string | boolean | null> }
 export type Pose = { x: number; y: number; z: number; qx: number; qy: number; qz: number; qw: number; ageS: number | null }
 ```
@@ -504,11 +513,11 @@ export type Pose = { x: number; y: number; z: number; qx: number; qy: number; qz
 
 ```ts
 export function nextFetches(status: MapStatus, have: Record<Layer, string | null>, enabled: Record<Layer, boolean>): Layer[]   // pure
-export function useMapData(active: boolean, enabled: Record<Layer, boolean>): { cloud; elevation; trajectory; grid; live; status; stale: boolean }
+export function useMapData(active: boolean, enabled: Record<Layer, boolean>): { cloud; elevation; trajectory; grid; live; depth; camera: ImageBitmap | null; status; stale: boolean }
 export type MapData = ReturnType<typeof useMapData>
 ```
 - [ ] Failing tests for `nextFetches`: a layer is fetched when its `epoch:seq` key differs from the one held; (Review Focus 4) an epoch change with an unchanged `seq` refetches every enabled layer; `seq` 0 and disabled layers are never fetched.
-- [ ] Hook in the `useCameraSource` idiom: 1 Hz status poll while `active`, one in-flight fetch per layer, minimum intervals (cloud 2 s, elevation 1 s, live 0.5 s), `AbortController` cleanup, newest-result-wins counter.
+- [ ] Hook in the `useCameraSource` idiom: 1 Hz status poll while `active`, one in-flight fetch per layer, minimum intervals (cloud 2 s, elevation 1 s, live / depth / camera 0.5 s), `AbortController` cleanup, newest-result-wins counter. The camera body is turned into an `ImageBitmap` with `createImageBitmap(new Blob([buf], { type: 'image/jpeg' }))`.
 
 ### Task 19: Geometry builders
 
@@ -519,6 +528,7 @@ export function buildElevationGeometry(f: ElevationFrame): { positions: Float32A
 export function colorElevation(f: ElevationFrame, cellOfVertex: Uint32Array, mode: 'height' | 'confidence' | 'obstacle'): Uint8Array
 export function colorByHeight(xyz: Float32Array, zMin: number, zMax: number): Uint8Array
 export function buildGridTexture(f: GridFrame): Uint8ClampedArray   // RGBA, unknown transparent
+export function depthToRgba(f: DepthFrame): Uint8ClampedArray       // RGBA grey ramp, near = bright, holes transparent
 ```
 - [ ] Failing tests (no WebGL needed): a 3×3 grid with one NaN cell yields quads only where all four corner cells are known, so unknown regions are holes; obstacle cells are raised by `obstacle * 0.05` m; switching colour mode changes only the colour array.
 
@@ -527,8 +537,9 @@ export function buildGridTexture(f: GridFrame): Uint8ClampedArray   // RGBA, unk
 **Files:** Create `ui/src/map/scene.ts`, `ui/src/components/MapView.tsx`; Modify `ui/src/App.tsx`, `ui/src/index.css`.
 
 - [ ] `MapScene` class in the style of `RingScene` (`ui/src/components/ui/glyph-ring.tsx`): `setCloud`, `setLive`, `setElevation`, `setTrajectory`, `setGrid`, `setPose`, `setLayers`, `resize`, `dispose`. `camera.up` = +Z before `OrbitControls` (from `three/addons`); points use a small `ShaderMaterial` with sRGB byte colours; **render on demand** (controls change, data change, pose event, resize), never a continuous loop, because the GPU is shared with SegFormer and DA3; `dispose()` frees geometries, materials, controls and calls `forceContextLoss()` (StrictMode double-mounts).
-- [ ] `App.tsx`: `view: 'camera' | 'map'` state persisted to localStorage, rendering `<CameraView>` or `<MapView>` in grid area `view`. `MapView` reuses `.livefeed-bar` / `.livefeed-layers` for toggles (accumulated cloud, live cloud, trajectory, elevation, cost grid) and the elevation colour mode; it shows "no map yet" when every `seq` is 0 and a STALE banner over the last map when telemetry is not live.
-- [ ] Verify by observation (`npm run dev`, real browser): replay the Task 7 bag, open the map view, confirm the cloud grows, the trajectory follows, the live cloud and cost-grid halo match `mapping.rviz`, toggles work, and switching to the camera view and back leaves no WebGL context warnings in the console.
+- [ ] `App.tsx`: `view: 'camera' | 'map'` state persisted to localStorage, rendering `<CameraView>` or `<MapView>` in grid area `view`. `MapView` reuses `.livefeed-bar` / `.livefeed-layers` for toggles (accumulated cloud, live cloud, trajectory, elevation, cost grid, image panels) and the elevation colour mode; it shows "no map yet" when every `seq` is 0 and a STALE banner over the last map when telemetry is not live.
+- [ ] Image panels, as in the owner's reference picture: two inset canvases stacked on the left edge of the map view, depth on top (`depthToRgba`) and the RGB camera frame below, each hidden when its layer has no data.
+- [ ] Verify by observation (`npm run dev`, real browser) with the live stack: open the map view and confirm it reproduces the reference picture (depth panel, RGB panel, height-coloured live cloud fanning out from the robot, costmap halo around obstacles, robot pose marker), that toggles work, and that switching to the camera view and back leaves no WebGL context warnings in the console. On the Task 7 bag, also confirm the accumulated cloud grows and the trajectory follows.
 
 ### Task 21: Map statistics widget
 
@@ -546,7 +557,7 @@ export function buildGridTexture(f: GridFrame): Uint8ClampedArray   // RGBA, unk
 **Files:** Create `docs/mapping/README.md`; Modify `ugv_nav/docs/localization/interfaces.md`, `ui/README.md`, `ugv_nav/ugv_bringup/README.md`, `.github/workflows/ui.yml`, `mindmap.md` (move any item settled during execution out of "Open / to verify").
 
 - [ ] `docs/mapping/README.md`: data flow, the topic and endpoint tables from this plan, how to run mapping and view it, and the honest limits (monocular scale wobble, 5 m fusion range, height relative to the driving plane, placeholder calibration).
-- [ ] End-to-end run on the UGV with the calibrated phone camera: drive a closed loop in `mapping` mode, save the database, restart in `localize` mode. Evidence to capture in `docs/mapping/`: a screenshot of the web map view and of RViz for the same run, the stats values, and the four gate numbers from Task 7 re-measured.
+- [ ] End-to-end run on the UGV with the calibrated phone camera: drive a closed loop in `mapping` mode, save the database, restart in `localize` mode. Evidence to capture in `docs/mapping/`: a screenshot of the web map view, the stats values, and the four gate numbers from Task 7 re-measured.
 
 ---
 
@@ -559,13 +570,13 @@ export function buildGridTexture(f: GridFrame): Uint8ClampedArray   // RGBA, unk
 | ROS stack | container: `colcon test --packages-select ugv_localization ugv_bringup ugv_api && colcon test-result --verbose` | real RTAB-Map 3D outputs, elevation node, gateway round trip |
 | Gateway | `python -m pytest ugv_nav/ugv_api/test -k "map"` | codec, store, endpoints |
 | UI | `cd ui && npm run lint && npm test && npm run build` | decoders, scheduler, geometry, guard |
-| Observation | RViz (`mapping.rviz`) and the web map view on the recorded bag, then on the UGV | the map actually accumulates and matches between the two viewers |
+| Observation | the web map view with the live stack, on the recorded bag, then on the UGV | the view reproduces the reference picture and the map actually accumulates |
 
 Container commands assume the existing `ugv-run` container and its `/ws/sync_ws.sh` build script (currently stopped; start and re-verify before use).
 
 ## Execution
 
-22 tasks across five packages, joined by three contracts (elevation topics, binary format v1, `MapStatus`). Recommended: subagent-driven, one fresh implementer and reviewer per task, because the tasks are independently testable and a wrong byte layout or frame convention would otherwise surface only at the end. Hardware steps (phone calibration, latency measurement, the recorded run, the UGV run) are the owner's and are marked in Tasks 6, 7 and 22.
+21 active tasks (Task 2 dropped) across five packages, joined by three contracts (elevation topics, binary format v1, `MapStatus`). Recommended: subagent-driven, one fresh implementer and reviewer per task, because the tasks are independently testable and a wrong byte layout or frame convention would otherwise surface only at the end. Hardware steps (phone calibration, latency measurement, the recorded run, the UGV run) are the owner's and are marked in Tasks 6, 7 and 22.
 
 ## Out of scope
 
