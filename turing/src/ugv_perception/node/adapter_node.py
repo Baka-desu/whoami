@@ -1,4 +1,10 @@
-"""ROS 2 perception node: subscribe Image+CameraInfo, compose_tick, publish port."""
+"""ROS 2 perception node: subscribe Image+CameraInfo, compose_tick, publish port.
+
+With a depth channel, depth runs on every frame that decodes and segmentation runs on the first frame and then
+at most every `mask_period_s` (default 0.25 s, never more than perception_max_age / 2). A frame without a
+segmentation publishes its depth only; no mask and no degraded flag. A missing, undecodable or stale frame is
+never skipped, so the degraded flag still goes out at once.
+"""
 
 from __future__ import annotations
 
@@ -15,10 +21,12 @@ from std_msgs.msg import Bool, Float64MultiArray, String
 
 from ugv_perception.adapter.frame import ImageFrame
 from ugv_perception.compose.load import load_compose_configs
+from ugv_perception.freshness.evaluate import evaluate
 from ugv_perception.ingest.msgs import CameraInfoView, ImageView
 from ugv_perception.ingest.ros_bridge import camera_info_msg_to_view, image_msg_to_view
 from ugv_perception.node.cycle import cycle_on_frame, decode_cycle_frame
 from ugv_perception.node.metrics import PerceptionMetrics
+from ugv_perception.node.schedule import DEFAULT_MASK_PERIOD_S, seg_due
 from ugv_perception.node.wire import wire_compose_out
 
 _ROOT = Path(__file__).resolve().parents[3]
@@ -70,6 +78,7 @@ class PerceptionAdapterNode(Node):
         adapter_id: str | None = None,
         depth: object | None = None,
         monotonic_ns_fn: object | None = None,
+        mask_period_s: float | None = None,
     ) -> None:
         if queue_depth is not None and (type(queue_depth) is not int or queue_depth != 1):
             raise TypeError("queue_depth must be Python int == 1")
@@ -80,11 +89,14 @@ class PerceptionAdapterNode(Node):
             if type(adapter_id) is not str or adapter_id == "":
                 raise TypeError("adapter_id must be a non-empty str")
             overrides.append(Parameter("adapter", Parameter.Type.STRING, adapter_id))
+        if mask_period_s is not None:
+            overrides.append(Parameter("mask_period_s", Parameter.Type.DOUBLE, float(mask_period_s)))
         super().__init__("ugv_perception", parameter_overrides=overrides)
         self.declare_parameter("adapter", "rugd")
         self.declare_parameter("image_topic", "/camera/image_raw")
         self.declare_parameter("camera_info_topic", "/camera/camera_info")
         self.declare_parameter("queue_depth", 1)
+        self.declare_parameter("mask_period_s", DEFAULT_MASK_PERIOD_S)
         adapter_name = self.get_parameter("adapter").get_parameter_value().string_value
         if adapter_name not in ("rugd", "yoloe", "onnx"):
             raise ValueError("adapter must be rugd, yoloe, or onnx; live default is rugd")
@@ -103,11 +115,21 @@ class PerceptionAdapterNode(Node):
             gates_path=gates_path,
             freshness_path=freshness_path,
         )
-        self.metrics = PerceptionMetrics(clock_ns=monotonic_ns_fn or time.monotonic_ns)
+        self._monotonic_ns = monotonic_ns_fn or time.monotonic_ns
+        self.metrics = PerceptionMetrics(clock_ns=self._monotonic_ns)
         self._adapter = _CountingAdapter(adapter, self.metrics)
         self._table = table
         self._gates = gates
         self._fresh = fresh
+        # With a depth channel, segmentation runs at most this often and depth runs on every frame. It must
+        # leave room inside perception_max_age, or a mask could expire between two segmentations.
+        self._mask_period_s = float(self.get_parameter("mask_period_s").value)
+        if not 0.0 <= self._mask_period_s <= float(fresh.perception_max_age) / 2.0:
+            raise ValueError(
+                "mask_period_s must be in [0, perception_max_age / 2]; "
+                f"got {self._mask_period_s} with perception_max_age {fresh.perception_max_age}"
+            )
+        self._last_seg_ns: int | None = None
         self._now_ns_fn = now_ns_fn or time.time_ns
         self._last_image: ImageView | None = None
         self._last_info: CameraInfoView | None = None
@@ -149,7 +171,10 @@ class PerceptionAdapterNode(Node):
         self._watchdog.start()
 
     def destroy_node(self) -> None:
-        self._stop.set()
+        # A constructor that raised (a bad parameter) leaves a half-built node that rclpy.shutdown() still destroys.
+        stop = getattr(self, "_stop", None)
+        if stop is not None:
+            stop.set()
         wd = getattr(self, "_watchdog", None)
         if wd is not None and wd.is_alive():
             wd.join(timeout=2.0)
@@ -181,6 +206,17 @@ class PerceptionAdapterNode(Node):
         # One decode per frame. `decode` times it, `seg` times the cycle after it; depth reuses the frame.
         with self.metrics.stage("decode"):
             frame = decode_cycle_frame(self._last_image, info)
+        if self._segment_this_frame(frame, now_ns):
+            self._segment(frame, now_ns)
+        if frame is not None:
+            # Depth does not depend on the mask: a stale or failed mask still gets its depth.
+            self._publish_depth(frame, info.k)
+        if had_pair and self._last_image is not None:
+            self._inferred_stamp = self._last_image.stamp_ns
+        self.metrics.end_frame()
+
+    def _segment(self, frame: ImageFrame | None, now_ns: int) -> None:
+        """The mask path: the cycle, the degraded flag, the mask. Scheduling decides whether it runs, not how."""
         with self.metrics.stage("seg"):
             out = cycle_on_frame(
                 frame=frame,
@@ -208,12 +244,23 @@ class PerceptionAdapterNode(Node):
             self._publish(self._pub_meta, wired.port_meta)
             if self._last_camera_info_msg is not None:
                 self._publish(self._pub_cinfo, self._last_camera_info_msg)
-        if frame is not None:
-            # Depth does not depend on the mask: a stale or failed mask still gets its depth.
-            self._publish_depth(frame, info.k)
-        if had_pair and self._last_image is not None:
-            self._inferred_stamp = self._last_image.stamp_ns
-        self.metrics.end_frame()
+
+    def _segment_this_frame(self, frame: ImageFrame | None, now_ns: int) -> bool:
+        """False only for a depth-only frame: a fresh, decodable frame that arrives inside the mask period.
+
+        Every other frame goes through the mask path exactly as before: with no depth channel there is nothing
+        to make room for, and a missing, undecodable or stale frame costs no inference and must publish the
+        degraded flag at once. Only a frame that is really segmented restarts the mask period.
+        """
+        if self._depth is None or frame is None:
+            return True
+        if evaluate(self._fresh, frame.stamp_ns, now_ns).time_degraded:
+            return True
+        now_mono = self._monotonic_ns()
+        if not seg_due(now_mono, self._last_seg_ns, self._mask_period_s):
+            return False
+        self._last_seg_ns = now_mono
+        return True
 
     def _publish(self, publisher: object, msg: object) -> None:
         with self.metrics.stage("publish"):
