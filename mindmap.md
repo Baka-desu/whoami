@@ -15,6 +15,12 @@
 | D6 | TF ownership | **Dev 2 owns full `map->odom->base_link`**. Only `odom_selector` publishes `odom->base_link`; `rgbd_odometry` runs `publish_tf:=false`; Dev 5 publishes `/wheel/odom` topic only (no TF) | User. Architecture silent → dev.md §3 contract applies |
 | D7 | SLAM mode | **RGB-D only.** RTAB-Map subscribes to one `rgbd_sync` RGBDImage (camera RGB + DA3 depth, exact stamps). `rtabmap_mono.yaml` deleted; **no mono fallback** — without depth Dev 2 holds (`depth_missing`) | User 2026-09-28 |
 | D8 | Depth source | **Dev 1 publishes a DA3 depth image** `/perception/depth/image` (32FC1 m, NaN holes, RGB stamp + frame + size; Dev 1 `af7ebbf`) → launch default `depth_input:=image`. Fallback `depth_input:=cloud`: `/perception/depth_cloud` converted by `rtabmap_util/pointcloud_to_depthimage`. Dev 2 never runs DA3. Contract: `ugv_nav/docs/localization/interfaces.md` "Depth input" | User 2026-09-29 |
+| D9 | Map products | RTAB-Map `Grid/3D true` + `cloud_map`/`mapPath`/`mapGraph`/`mapData` consumed; new elevation map and map-stats nodes in `ugv_localization`. Architecture §5–§7 name no map products. Mapping and display only: not a second perception port, not a Nav2 input (§9 unchanged). | User 2026-10-02 |
+| D10 | Camera transport | Phone camera on the UGV streamed through a network tunnel to the laptop. Stamps are **arrival time** minus a measured `transport_latency_s`, where §8.4 says "image time". | User 2026-10-02 |
+| D11 | Calibration | `phone_640x480.yaml` seeded from the laptop calibration with `placeholder: true` until the phone is calibrated. §17 assumes calibrated vision and `config/cameras/README.md` forbids placeholders; mapping runs for the Phase 0 gate require the real calibration. | User 2026-10-02 |
+| D12 | Elevation semantics | `Reg/Force3DoF true` kept; elevation height is relief relative to the driving plane. General-purpose defaults, four layers only. | User 2026-10-02 |
+| D13 | Operator UI | Map, live cloud and Nav2 costmap shown in the web UI through `ugv_api` binary endpoints, display only. The UI guard's blanket ban on the word "costmap" is narrowed to costmap topic names. | User 2026-10-02 |
+| D14 | Depth vs mask | DA3 depth is published for every processed frame, no longer only when a mask was published, so a degraded mask does not starve SLAM. | User 2026-10-02 |
 
 ## What architecture.md says (and doesn't)
 - §2/§6: brain = "RTAB-Map VO/SLAM" — now true in RGB-D mode (DA3 depth).
