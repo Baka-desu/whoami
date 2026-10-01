@@ -68,10 +68,16 @@ export function Inspector({ analysis: a, freshness: fr, robot, estop }: Props) {
       </Section>
 
       <Section title="Depth">
-        <Row k="min" v={`${meta.kAssumed ? '~' : ''}${d.min.toFixed(1)} m`} />
-        <Row k="median" v={`${meta.kAssumed ? '~' : ''}${d.median.toFixed(1)} m`} />
-        <Row k="max" v={`${meta.kAssumed ? '~' : ''}${d.max.toFixed(1)} m`} />
-        <div className="scale"><span>{meta.kAssumed ? '~' : ''}1.5 m</span><i className="depth" /><span>15 m+</span></div>
+        {d ? (
+          <>
+            <Row k="min" v={`${meta.kAssumed ? '~' : ''}${d.min.toFixed(1)} m`} />
+            <Row k="median" v={`${meta.kAssumed ? '~' : ''}${d.median.toFixed(1)} m`} />
+            <Row k="max" v={`${meta.kAssumed ? '~' : ''}${d.max.toFixed(1)} m`} />
+            <div className="scale"><span>{meta.kAssumed ? '~' : ''}1.5 m</span><i className="depth" /><span>15 m+</span></div>
+          </>
+        ) : (
+          <p className="dim">No depth channel: the perception node publishes depth only once the DA3 weights are exported.</p>
+        )}
       </Section>
 
       <Section title="Health">

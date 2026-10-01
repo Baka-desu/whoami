@@ -3,6 +3,7 @@
 // goal and assert the operator e-stop. Never publishes /cmd_vel* (architecture.md §3.1).
 import type { Intrinsics } from '../types'
 import type { Costmap, RobotState, Stamped, Tf2D } from './robot'
+import { parseDepth, parseMask, type RosDepth, type RosMask } from './rosimage'
 
 export interface RosOptions {
   url: string
@@ -40,6 +41,9 @@ export interface RosCallbacks {
   // Incremental robot-state update (heartbeats, odom, plan, costmap, TF). Fires at topic rate;
   // the receiver should throttle re-rendering.
   onState?: (patch: RobotState) => void
+  // Dev 1's Perception Port outputs, decoded and validated (see rosimage.ts)
+  onMask?: (mask: RosMask) => void
+  onDepth?: (depth: RosDepth) => void
 }
 
 const NAV_ACTION = '/navigate_to_pose'
@@ -137,7 +141,8 @@ export function connectRos(opts: RosOptions, cb: RosCallbacks): () => void {
       window.clearInterval(estopTimer)
       estopTimer = undefined
       const pub = (data: boolean) => send({ op: 'publish', topic: E_STOP_TOPIC, msg: { data } })
-      send({ op: 'advertise', topic: E_STOP_TOPIC, type: 'std_msgs/msg/Bool' })
+      // latch: a latching publisher lets an arbiter that (re)starts later still receive the last value
+      send({ op: 'advertise', topic: E_STOP_TOPIC, type: 'std_msgs/msg/Bool', latch: true })
       pub(asserted)
       if (asserted) estopTimer = window.setInterval(() => pub(true), ESTOP_REPUBLISH_MS)
     },
@@ -159,6 +164,26 @@ export function connectRos(opts: RosOptions, cb: RosCallbacks): () => void {
       case '/ugv/nav2_status':
         if (typeof msg.data === 'string') cb.onState?.({ nav2Status: stamped(msg.data) })
         return
+      case '/ugv/safety_status':
+        if (typeof msg.data === 'string') cb.onState?.({ safetyStatus: stamped(msg.data) })
+        return
+      case '/segmentation/port_meta': {
+        const d = msg.data
+        if (Array.isArray(d) && d.length >= 3 && d.slice(0, 3).every(num)) {
+          cb.onState?.({ portMeta: stamped({ valid: d[0] >= 0.5, ageS: d[1], scale: d[2] }) })
+        }
+        return
+      }
+      case '/segmentation/mask': {
+        const mask = parseMask(msg, Date.now())
+        if (mask) cb.onMask?.(mask)
+        return
+      }
+      case '/perception/depth/image': {
+        const depth = parseDepth(msg, Date.now())
+        if (depth) cb.onDepth?.(depth)
+        return
+      }
       case '/ugv/localization_status':
         if (typeof msg.data === 'string') cb.onState?.({ locStatus: stamped(msg.data) })
         return
@@ -267,11 +292,16 @@ export function connectRos(opts: RosOptions, cb: RosCallbacks): () => void {
       // ugv_navigation (Dev 4)
       sub('/ugv/nav2_heartbeat', 'std_msgs/msg/Bool', { throttle_rate: 100 })
       sub('/ugv/nav2_status', 'std_msgs/msg/String')
+      // Dev 5 (safety arbiter): what is actually allowed to reach the base, and why
+      sub('/ugv/safety_status', 'std_msgs/msg/String')
       sub('/cmd_vel_nav2', 'geometry_msgs/msg/Twist', { throttle_rate: 100 })
       sub('/plan', 'nav_msgs/msg/Path', { throttle_rate: 500 })
       sub('/local_costmap/costmap', 'nav_msgs/msg/OccupancyGrid', { throttle_rate: 500 })
-      // Dev 1, consumed for the goal gate only
+      // Dev 1 Perception Port: degraded flag + the mask / depth the analyzer is built from
       sub('/ugv/perception_degraded', 'std_msgs/msg/Bool')
+      sub('/segmentation/port_meta', 'std_msgs/msg/Float64MultiArray')
+      sub('/segmentation/mask', 'sensor_msgs/msg/Image', { throttle_rate: 200, queue_length: 1 })
+      sub('/perception/depth/image', 'sensor_msgs/msg/Image', { throttle_rate: 500, queue_length: 1 })
       cb.onReady?.(api)
     }
 

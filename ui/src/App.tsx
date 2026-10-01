@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { unavailableAnalyzer, type Analyzer } from './analysis/analyzer'
+import { RosPerception } from './analysis/ros-analyzer'
 import { useFreshness } from './analysis/freshness'
 import { Inspector } from './components/Inspector'
 import { SourcePanel } from './components/SourcePanel'
@@ -16,8 +17,10 @@ const FRAME_INTERVAL_MS = 250
 const ROBOT_SNAPSHOT_MS = 250 // topics arrive at up to 20 Hz; re-render at 4 Hz
 const START_POSE_MAX_AGE_MS = 1000
 
-// Swap for Dev 1's REST analyzer when it exists; nothing else in the UI changes.
-const analyzer: Analyzer = unavailableAnalyzer
+// ROS 2 frames are analysed by Dev 1's Perception Port outputs received over rosbridge. Uploads and the browser
+// camera have no perception backend (no REST analyzer yet), so they stay unavailable rather than faked.
+const rosPerception = new RosPerception()
+const analyzerFor = (src: SourceKind): Analyzer => (src === 'ros2' ? rosPerception : unavailableAnalyzer)
 
 export default function App() {
   const [source, setSource] = useState<SourceKind>('upload')
@@ -63,7 +66,7 @@ export default function App() {
     const seq = ++ingestSeq.current
     let result: Analysis | null = null
     try {
-      result = await analyzer.analyze(bmp, meta)
+      result = await analyzerFor(src).analyze(bmp, meta)
     } catch {
       result = null
     }
@@ -184,13 +187,20 @@ export default function App() {
         if (estopRef.current) api.setEstop(true) // an asserted e-stop survives a reconnect
       },
       onGoalUpdate: setGoalStatus,
-      onState: (patch) => { Object.assign(robotRef.current, patch) },
+      onState: (patch) => {
+        Object.assign(robotRef.current, patch)
+        if (patch.perceptionDegraded) rosPerception.setHealth({ degraded: patch.perceptionDegraded.value })
+        if (patch.portMeta) rosPerception.setHealth({ valid: patch.portMeta.value.valid })
+      },
+      onMask: (m) => rosPerception.pushMask(m),
+      onDepth: (d) => rosPerception.pushDepth(d),
     })
     const snapshotTimer = window.setInterval(() => setRobot({ ...robotRef.current, now: Date.now() }), ROBOT_SNAPSHOT_MS)
     return () => {
       window.clearInterval(snapshotTimer)
       rosApi.current = null
       robotRef.current = {}
+      rosPerception.reset()
       setRobot(null); setRosConnected(false); setStartPose(null)
       disconnect()
     }
@@ -254,7 +264,7 @@ export default function App() {
 
   return (
     <div className="app">
-      <TopBar status={status} fps={fps} note={note} analyzerOnline={analyzer.available} />
+      <TopBar status={status} fps={fps} note={note} analyzerOnline={analyzerFor(source).available} />
       <SourcePanel
         source={source} onSource={pickSource}
         layers={layers} onLayers={setLayers}

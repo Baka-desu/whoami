@@ -52,9 +52,11 @@ export function Viewport({ frame, analysis, layers, freshness: fr }: Props) {
 
     const unsafe = fr ? !fr.ok : false
 
-    if (layers.depth) {
+    const depth = analysis.depth
+    if (layers.depth && depth) {
       paintLayer(ctx, w, h, (i) => {
-        const t = 1 - (analysis.depth[i] - 1.5) / 13.5
+        if (!Number.isFinite(depth[i])) return [0, 0, 0, 0] // no measurable depth (sky, holes): leave the photo showing
+        const t = 1 - (depth[i] - 1.5) / 13.5
         return [...depthFill(t), unsafe ? 120 : 225]
       })
     }
@@ -123,7 +125,7 @@ export function Viewport({ frame, analysis, layers, freshness: fr }: Props) {
                   {i} {n}
                 </span>
               ))}
-              {layers.depth && <span><i style={{ background: `rgb(${depthFill(0.8).join(',')})` }} />NEAR</span>}
+              {layers.depth && analysis?.depth && <span><i style={{ background: `rgb(${depthFill(0.8).join(',')})` }} />NEAR</span>}
               {layers.path && <span><i className="path" />PATH</span>}
             </div>
           )}
