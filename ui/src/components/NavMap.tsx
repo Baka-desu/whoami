@@ -62,12 +62,12 @@ export function NavMap({ robot }: { robot: RobotSnapshot }) {
         if (i) ctx.lineTo(X, Y)
         else ctx.moveTo(X, Y)
       })
-      ctx.strokeStyle = '#fff'
+      ctx.strokeStyle = '#eafff7'
       ctx.lineWidth = 2
       ctx.stroke()
     }
 
-    ctx.fillStyle = '#ff2a2a' // robot, pointing up
+    ctx.fillStyle = '#86f0cf' // robot, pointing up
     ctx.beginPath()
     ctx.moveTo(SIZE / 2, SIZE / 2 - 9)
     ctx.lineTo(SIZE / 2 + 6, SIZE / 2 + 7)

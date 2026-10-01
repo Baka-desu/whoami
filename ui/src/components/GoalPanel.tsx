@@ -105,7 +105,7 @@ export function GoalPanel(p: Props) {
       {p.status && <p className="dim">{p.status}</p>}
 
       <button
-        className={`btn ${p.estop ? 'primary' : ''}`}
+        className={`btn danger ${p.estop ? 'primary' : ''}`}
         disabled={!p.connected}
         onClick={() => p.onEstop(!p.estop)}
         style={{ marginTop: 16, width: '100%' }}

@@ -18,6 +18,7 @@ export function TopBar({ status, fps, note, analyzerOnline }: Props) {
           NO ANALYZER
         </div>
       )}
+      <a className="tb-link" href="#features">FEATURES ↓</a>
       {note && <div className={`note ${status === 'error' ? 'err' : ''}`}>{note}</div>}
       <div className={`pill ${status}`}>
         <i />
