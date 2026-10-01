@@ -425,3 +425,80 @@ def test_segmentation_never_runs_under_autocast_whatever_da3_half_says() -> None
     backend.run_decoded(blob, (64, 64))
     backend.run_all(blob)
     assert backend._model.autocast_seen == [False, False, False]
+
+
+# --- One definition of the DA3 preprocess constants and the half-pixel positions. --------------------------
+
+
+def test_half_pixel_positions_are_the_bilinear_sample_positions_with_edge_clamp() -> None:
+    from ugv_perception.depth.geometry import half_pixel_positions
+
+    assert half_pixel_positions(4, 2).tolist() == [0.5, 2.5]
+    assert half_pixel_positions(2, 4).tolist() == [0.0, 0.25, 0.75, 1.0]  # clamped to [0, n_src - 1]
+    assert half_pixel_positions(3, 3).tolist() == [0.0, 1.0, 2.0]
+
+
+def test_the_gpu_module_uses_the_numpy_reference_definitions_not_copies() -> None:
+    pytest.importorskip("torch")
+    from ugv_perception.depth import geometry, geometry_gpu
+
+    assert geometry_gpu.half_pixel_positions is geometry.half_pixel_positions
+    assert geometry_gpu.IMAGENET_MEAN is geometry.IMAGENET_MEAN
+    assert geometry_gpu.IMAGENET_STD is geometry.IMAGENET_STD
+    assert not hasattr(geometry_gpu, "_MEAN") and not hasattr(geometry_gpu, "_STD")
+    assert geometry.IMAGENET_MEAN == (0.485, 0.456, 0.406)
+    assert geometry.IMAGENET_STD == (0.229, 0.224, 0.225)
+
+
+# --- The CUDA backend places everything on its own device, not on a hard-coded "cuda". ---------------------
+
+
+class _DeviceProbe:
+    """A model stub that records where its input was put."""
+
+    def __init__(self, kind: str) -> None:
+        self.kind = kind
+        self.devices: list[str] = []
+
+    def __call__(self, pixel_values):
+        import torch
+
+        self.devices.append(pixel_values.device.type)
+        n, _, h, w = pixel_values.shape
+        if self.kind == "rugd":
+            return _StubOut(torch.zeros((n, 25, h // 4, w // 4), device=pixel_values.device))
+        return (
+            torch.ones((n, h, w), device=pixel_values.device),
+            torch.zeros((n, h, w), device=pixel_values.device),
+        )
+
+
+def _cpu_backend(kind: str):
+    pytest.importorskip("torch")
+    from ugv_perception.backend.cuda_pytorch import CudaPytorchTensorBackend
+
+    backend = CudaPytorchTensorBackend()
+    backend.device = "cpu"  # the backend's own setting; every placement must follow it
+    backend.da3_half = False  # CPU fp16 autocast is not what this test is about
+    backend._model = _DeviceProbe(kind)
+    backend._kind = kind
+    return backend
+
+
+def test_rugd_paths_put_the_input_on_the_backend_device() -> None:
+    backend = _cpu_backend("rugd")
+    blob = np.zeros((1, 3, 64, 64), dtype=np.float32)
+    backend.run_seg(blob, (64, 64))
+    backend.run_decoded(blob, (64, 64))
+    backend.run_all(blob)
+    assert backend._model.devices == ["cpu", "cpu", "cpu"]
+
+
+def test_da3_paths_put_the_input_on_the_backend_device_and_need_no_cuda_to_run() -> None:
+    backend = _cpu_backend("da3")
+    backend.run_all(np.zeros((1, 3, 28, 28), dtype=np.float32))
+    out = backend.run_depth_metres(
+        np.zeros((28, 28, 3), dtype=np.uint8), 100.0, (504, 504), (28, 28)
+    )
+    assert backend._model.devices == ["cpu", "cpu"]
+    assert out.shape == (28, 28) and out.dtype == np.float32

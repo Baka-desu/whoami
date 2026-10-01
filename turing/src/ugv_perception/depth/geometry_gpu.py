@@ -13,19 +13,19 @@ import numpy as np
 import torch
 
 from ugv_perception.depth.geometry import (
+    IMAGENET_MEAN,
+    IMAGENET_STD,
     SKY_THRESHOLD,
     VALID_COVERAGE,
+    half_pixel_positions,
     two_step_hw,
 )
-
-_MEAN = (0.485, 0.456, 0.406)
-_STD = (0.229, 0.224, 0.225)
 
 
 @lru_cache(maxsize=32)
 def _axis(n_src: int, n_dst: int, device: str) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Half-pixel sample positions along one axis: (i0, i1, weight of i1). Tables built in float64 like geometry._bilinear."""
-    pos = np.clip((np.arange(n_dst) + 0.5) * n_src / n_dst - 0.5, 0.0, n_src - 1)
+    """Sample positions along one axis as (i0, i1, weight of i1). Tables built in float64 like geometry._bilinear."""
+    pos = half_pixel_positions(n_src, n_dst)
     i0 = np.floor(pos).astype(np.int64)
     i1 = np.minimum(i0 + 1, n_src - 1)
     return (
@@ -64,8 +64,8 @@ def preprocess_nchw_gpu(rgb: np.ndarray, device: str) -> tuple[torch.Tensor, tup
     first, second = two_step_hw(int(rgb.shape[0]), int(rgb.shape[1]))
     image = torch.from_numpy(np.ascontiguousarray(rgb)).to(device)
     image = _resize_u8(_resize_u8(image, first), second)
-    mean = torch.tensor(_MEAN, dtype=torch.float32, device=device).view(3, 1, 1)
-    std = torch.tensor(_STD, dtype=torch.float32, device=device).view(3, 1, 1)
+    mean = torch.tensor(IMAGENET_MEAN, dtype=torch.float32, device=device).view(3, 1, 1)
+    std = torch.tensor(IMAGENET_STD, dtype=torch.float32, device=device).view(3, 1, 1)
     chw = image.permute(2, 0, 1).float() / 255.0
     return ((chw - mean) / std).unsqueeze(0).contiguous(), second
 
@@ -73,7 +73,7 @@ def preprocess_nchw_gpu(rgb: np.ndarray, device: str) -> tuple[torch.Tensor, tup
 def hole_safe_resize_gpu(
     depth_m: torch.Tensor, sky: torch.Tensor, out_hw: tuple[int, int]
 ) -> torch.Tensor:
-    """geometry.hole_safe_resize on the device of `depth_m`: float32, NaN where less than half the neighbourhood is valid."""
+    """geometry.hole_safe_resize on the device of `depth_m`: float32, NaN where under half the area is valid."""
     depth = depth_m.float()
     if sky.dtype == torch.bool:
         hole = sky

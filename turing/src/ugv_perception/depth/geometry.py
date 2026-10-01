@@ -75,14 +75,23 @@ def valid_mask(depth_m: np.ndarray, sky: np.ndarray) -> np.ndarray:
     return np.isfinite(depth_m) & ~hole
 
 
+def half_pixel_positions(n_src: int, n_dst: int) -> np.ndarray:
+    """Source sample position of each of `n_dst` output pixels along one axis: half-pixel centres, edge clamp.
+
+    Float64, in [0, n_src - 1]. The one definition: the GPU twin in geometry_gpu builds its index and
+    weight tables from this, so the two resizes cannot drift apart.
+    """
+    return np.clip((np.arange(n_dst) + 0.5) * n_src / n_dst - 0.5, 0.0, n_src - 1)
+
+
 def _bilinear(src: np.ndarray, out_h: int, out_w: int) -> np.ndarray:
     """Bilinear resize (half-pixel centres, edge clamp), float64. Separable: rows, then columns."""
     src_f = np.asarray(src, dtype=np.float64)
     mh, mw = src_f.shape
     if (mh, mw) == (out_h, out_w):
         return src_f.copy()
-    ys = np.clip((np.arange(out_h) + 0.5) * mh / out_h - 0.5, 0.0, mh - 1)
-    xs = np.clip((np.arange(out_w) + 0.5) * mw / out_w - 0.5, 0.0, mw - 1)
+    ys = half_pixel_positions(mh, out_h)
+    xs = half_pixel_positions(mw, out_w)
     y0 = np.floor(ys).astype(np.intp)
     x0 = np.floor(xs).astype(np.intp)
     y1 = np.minimum(y0 + 1, mh - 1)
@@ -121,8 +130,11 @@ def backproject(depth_hw: np.ndarray, k_camera: np.ndarray) -> np.ndarray:
     return np.stack([x, y, z], axis=1).astype(np.float32)
 
 
-_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float64)
-_STD = np.array([0.229, 0.224, 0.225], dtype=np.float64)
+# ImageNet normalisation of DA3's input. The one definition: geometry_gpu imports these.
+IMAGENET_MEAN = (0.485, 0.456, 0.406)
+IMAGENET_STD = (0.229, 0.224, 0.225)
+_MEAN = np.array(IMAGENET_MEAN, dtype=np.float64)
+_STD = np.array(IMAGENET_STD, dtype=np.float64)
 
 
 def _resize_u8(rgb: np.ndarray, dst_hw: tuple[int, int]) -> np.ndarray:

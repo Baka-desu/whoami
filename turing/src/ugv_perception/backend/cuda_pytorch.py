@@ -38,6 +38,7 @@ class CudaPytorchTensorBackend:
         self._hw: tuple[int, int] | None = None
         self._fallback_logits: np.ndarray | None = None
         self.seg_post_disabled = False
+        # Every tensor this backend creates, and the model it loads, goes to this device.
         self.device = "cuda"
         # DA3 only: run the forward pass under fp16 autocast (about 2x faster on the RTX 4060). Never applied
         # to the RUGD segmentation net. Outputs are cast back to float32 before anything reads them.
@@ -53,13 +54,13 @@ class CudaPytorchTensorBackend:
             import torch
         except ImportError as exc:
             raise AdapterError("torch is not installed") from exc
-        if not torch.cuda.is_available():
+        if torch.device(self.device).type == "cuda" and not torch.cuda.is_available():
             raise AdapterError("CUDA is not available")
         try:
             if kind == "rugd":
-                self._model = _load_rugd(path)
+                self._model = _load_rugd(path, self.device)
             else:
-                self._model = _load_da3(path)
+                self._model = _load_da3(path, self.device)
         except AdapterError:
             raise
         except ImportError as exc:
@@ -67,7 +68,6 @@ class CudaPytorchTensorBackend:
         except Exception as exc:
             raise AdapterError("CUDA load failed") from exc
         self._kind = kind
-        self.device = "cuda"
 
     def ensure_hw(self, height: int, width: int) -> None:
         if self._model is None:
@@ -97,7 +97,7 @@ class CudaPytorchTensorBackend:
             raise AdapterError("torch is not installed") from exc
         logits = None
         try:
-            tensor = torch.from_numpy(blob).to("cuda")
+            tensor = torch.from_numpy(blob).to(self.device)
             with torch.inference_mode():
                 logits = self._model(pixel_values=tensor).logits
                 if not torch.isfinite(logits).all():
@@ -129,7 +129,7 @@ class CudaPytorchTensorBackend:
 
         if not self.da3_half:
             return self._model(tensor)
-        with torch.autocast("cuda", dtype=torch.float16):
+        with torch.autocast(torch.device(self.device).type, dtype=torch.float16):
             depth, sky = self._model(tensor)
         return depth.float(), sky.float()
 
@@ -143,7 +143,7 @@ class CudaPytorchTensorBackend:
         except ImportError as exc:
             raise AdapterError("torch is not installed") from exc
         try:
-            tensor = torch.from_numpy(blob).to("cuda")
+            tensor = torch.from_numpy(blob).to(self.device)
             with torch.inference_mode():
                 if self._kind == "rugd":
                     logits = self._model(pixel_values=tensor).logits
@@ -186,11 +186,12 @@ class CudaPytorchTensorBackend:
             with span("depth_infer"):
                 self.ensure_hw(*model_size)
                 with torch.inference_mode():
-                    blob, sized = geometry_gpu.preprocess_nchw_gpu(rgb, "cuda")
+                    blob, sized = geometry_gpu.preprocess_nchw_gpu(rgb, self.device)
                     if sized != tuple(model_size):
                         raise AdapterError("preprocess size disagrees with K_model")
                     depth, sky = self._da3_forward(blob)
-                torch.cuda.synchronize()
+                if torch.device(self.device).type == "cuda":
+                    torch.cuda.synchronize(self.device)
             with span("depth_post"):
                 with torch.inference_mode():
                     metres = depth[0].float() * (float(focal) / METRIC_SCALE)
@@ -221,7 +222,7 @@ class CudaPytorchTensorBackend:
         except ImportError as exc:
             raise AdapterError("torch is not installed") from exc
         try:
-            tensor = torch.from_numpy(blob).to("cuda")
+            tensor = torch.from_numpy(blob).to(self.device)
             with torch.inference_mode():
                 logits = self._model(pixel_values=tensor).logits
                 if not bool(torch.isfinite(logits).all()):
@@ -243,17 +244,17 @@ class CudaPytorchTensorBackend:
             raise AdapterError("CUDA run failed") from exc
 
 
-def _load_rugd(path: Path) -> object:
+def _load_rugd(path: Path, device: str) -> object:
     from transformers import SegformerForSemanticSegmentation
 
     model = SegformerForSemanticSegmentation.from_pretrained(
         str(path), local_files_only=True
     )
     model.eval()
-    return model.to("cuda")
+    return model.to(device)
 
 
-def _load_da3(path: Path) -> object:
+def _load_da3(path: Path, device: str) -> object:
     from depth_anything_3.cfg import create_object, load_config
     from depth_anything_3.registry import MODEL_REGISTRY
     from safetensors.torch import load_file
@@ -269,7 +270,7 @@ def _load_da3(path: Path) -> object:
             f"(missing={len(missing)} unexpected={len(unexpected)})"
         )
     net.eval()
-    return _Da3Head(net).to("cuda")
+    return _Da3Head(net).to(device)
 
 
 class _Da3Head:
