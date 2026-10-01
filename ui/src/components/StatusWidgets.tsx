@@ -109,8 +109,8 @@ export function StatusWidgets({ live, command, navigation: nav, localization: lo
   }
 
   return (
-    <aside className="panel inspector">
-      <p className="inspector-hint">drag widgets to rearrange · alt + arrows on keyboard</p>
+    <div className="sidegroup">
+      <h4 className="sidegroup-title">Robot</h4>
       <DraggableWidgetGrid
         items={ordered()}
         onChange={remember}
@@ -120,6 +120,6 @@ export function StatusWidgets({ live, command, navigation: nav, localization: lo
         gap={12}
         radius={4}
       />
-    </aside>
+    </div>
   )
 }

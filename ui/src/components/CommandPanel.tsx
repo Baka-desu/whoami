@@ -30,7 +30,7 @@ export function CommandPanel(p: Props) {
   const blocked = !p.live ? ['no telemetry from the gateway'] : p.gateReasons
 
   return (
-    <aside className="panel source">
+    <>
       <section className="section">
         <h3>E-stop</h3>
         <button
@@ -99,6 +99,6 @@ export function CommandPanel(p: Props) {
           {p.message.reasons?.map((r) => <p className="reason" key={r}>{r}</p>)}
         </section>
       )}
-    </aside>
+    </>
   )
 }

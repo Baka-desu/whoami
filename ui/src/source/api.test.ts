@@ -78,8 +78,9 @@ describe('telemetry stream', () => {
 describe('operator boundary', () => {
   const sources = import.meta.glob('/src/**/*.{ts,tsx}', { query: '?raw', import: 'default', eager: true }) as Record<string, string>
   const production = Object.entries(sources).filter(([path]) => !/\.test\.tsx?$/.test(path))
-  // The live camera view (LiveFeed + its rosbridge reader) is display-only, by the owner's call for demos.
-  const LIVE_VIEW = /\/src\/(components\/(LiveFeed|Viewport|TopDownMap)\.tsx|source\/(rosbridge|rosimage)\.ts|analysis\/.*|types\.ts)$/
+  // The camera view (the main page, its rosbridge reader, source picker and perception widgets) is display-only,
+  // by the owner's call.
+  const LIVE_VIEW = /\/src\/(components\/(CameraView|Viewport|TopDownMap|Inspector|SourcePanel)\.tsx|source\/(rosbridge|rosimage|camera|useCameraSource)\.ts|analysis\/.*|types\.ts)$/
 
   it('never commands motion and never publishes to ROS', () => {
     expect(API_BASE).toBe('/api/v1')
