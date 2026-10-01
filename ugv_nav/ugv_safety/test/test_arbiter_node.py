@@ -24,9 +24,10 @@ CONFIG = Path(__file__).resolve().parents[2] / "config" / "safety" / "safety_tim
 
 
 class Rig:
-    def __init__(self, start_arbiter: bool = True) -> None:
+    def __init__(self, state_path: Path) -> None:
         os.environ["ROS_DOMAIN_ID"] = str(40 + os.getpid() % 50)
-        rclpy.init(args=["--ros-args", "-p", f"config_path:={CONFIG}"])
+        # a per-test record, so the tests never touch ~/.ros
+        rclpy.init(args=["--ros-args", "-p", f"config_path:={CONFIG}", "-p", f"estop_state_path:={state_path}"])
         self.arb = None
         self.probe = rclpy.create_node("safety_probe")
         self.ex = SingleThreadedExecutor()
@@ -87,8 +88,8 @@ class Rig:
 
 
 @pytest.fixture
-def rig():
-    r = Rig()
+def rig(tmp_path):
+    r = Rig(tmp_path / "estop")
     r.start_arbiter()
     yield r
     r.close()
@@ -132,8 +133,8 @@ def test_nothing_published_means_a_zero_base_command(rig):
     assert rig.cmds and all(c.linear.x == 0.0 and c.angular.z == 0.0 for c in rig.cmds)
 
 
-def test_estop_asserted_before_the_arbiter_started_is_still_honoured():
-    r = Rig()
+def test_estop_asserted_before_the_arbiter_started_is_still_honoured(tmp_path):
+    r = Rig(tmp_path / "estop")
     try:
         latched = QoSProfile(history=HistoryPolicy.KEEP_LAST, depth=1, reliability=ReliabilityPolicy.RELIABLE,
                              durability=DurabilityPolicy.TRANSIENT_LOCAL)
@@ -144,5 +145,46 @@ def test_estop_asserted_before_the_arbiter_started_is_still_honoured():
         r.run(2.0)  # every other source healthy and a candidate on offer
         assert r.cmds and all(c.linear.x == 0.0 for c in r.cmds)
         assert r.status[-1].startswith("L1 ESTOP")
+    finally:
+        r.close()
+
+
+def test_estop_survives_an_arbiter_restart_with_no_publisher_alive(tmp_path):
+    """Assert, the operator's link disappears (nothing latched remains on the bus), the arbiter restarts."""
+    state = tmp_path / "estop"
+    r = Rig(state)
+    r.start_arbiter()
+    r.run(1.0)
+    r.run(0.5, estop=True)
+    assert r.status[-1].startswith("L1 ESTOP")
+    r.close()
+
+    r2 = Rig(state)  # a new process: no e_stop publisher exists any more
+    try:
+        r2.start_arbiter()
+        r2.run(2.0)  # every other source healthy, a candidate on offer, nobody mentions e-stop
+        assert r2.cmds and all(c.linear.x == 0.0 for c in r2.cmds)
+        assert r2.status[-1].startswith("L1 ESTOP")
+        r2.run(0.5, estop=False)  # only an explicit release clears it
+        r2.run(1.0)
+        assert r2.last().linear.x == pytest.approx(0.3)
+    finally:
+        r2.close()
+
+
+def test_a_replayed_latched_false_cannot_release_a_persisted_estop(tmp_path):
+    state = tmp_path / "estop"
+    state.write_text("1", encoding="ascii")  # asserted before this arbiter started
+    r = Rig(state)
+    try:
+        latched = QoSProfile(history=HistoryPolicy.KEEP_LAST, depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                             durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        pub = r.probe.create_publisher(Bool, "/ugv/e_stop", latched)
+        pub.publish(Bool(data=False))  # an old release, still held by a living latching publisher
+        r.run(0.3, silent=("cand", "pose", "perc", "nav2", "cam"))
+        r.start_arbiter()  # the transient-local subscription replays that False to it
+        r.run(2.0)
+        assert r.status[-1].startswith("L1 ESTOP")
+        assert r.last().linear.x == 0.0
     finally:
         r.close()

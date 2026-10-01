@@ -121,6 +121,10 @@ class SafetyArbiter:
         self._last_step_ns: int | None = None
 
     # ---- inputs ------------------------------------------------------------------------------
+    @property
+    def estop_asserted(self) -> bool:
+        return self._estop
+
     def on_estop(self, asserted: bool, now_ns: int) -> None:
         # No message is not an assertion (nobody could ever drive), but an asserted e-stop stays
         # asserted if the operator's link drops: only an explicit False releases it.

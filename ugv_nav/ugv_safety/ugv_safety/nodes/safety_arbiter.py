@@ -9,6 +9,7 @@ Subscribes : /cmd_vel_nav2             geometry_msgs/Twist  Nav2 candidate (Dev 
 Publishes  : /cmd_vel                  geometry_msgs/Twist  every tick, whatever the inputs do
              /ugv/safety_status        std_msgs/String      `L<level> <NAME>[: reasons]`, on change
 Params     : config_path (required, see config/safety/safety_timeouts.yaml)
+             estop_state_path (default ~/.ros/ugv/estop_latched; empty disables): the e-stop survives a restart
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from sensor_msgs.msg import CameraInfo
 from std_msgs.msg import Bool, String
 
 from ugv_safety.arbiter_core import SafetyArbiter, load_config
+from ugv_safety.estop_store import EstopLatchStore
 
 _NS = 1_000_000_000
 
@@ -35,18 +37,29 @@ class SafetyArbiterNode(Node):
         cfg = load_config(path)
         self._arb = SafetyArbiter(cfg)
 
+        # Start from the e-stop state we last held, not from "released": a latched message dies with its
+        # publisher (the UI disconnecting), so after a restart nothing on the bus remembers the kill.
+        state_path = self.declare_parameter("estop_state_path", "~/.ros/ugv/estop_latched").value
+        self._store = EstopLatchStore(state_path) if state_path else None
+        if self._store is not None:
+            asserted, note = self._store.load()
+            if asserted:
+                self._arb.on_estop(True, self._now_ns())
+            if note:
+                self.get_logger().error(note) if asserted else self.get_logger().warn(note)
+
         reliable = QoSProfile(history=HistoryPolicy.KEEP_LAST, depth=10, reliability=ReliabilityPolicy.RELIABLE)
         # A latched CameraInfo must not read as a fresh frame to a late joiner, so volatile here;
         # compatible with the driver's reliable + transient-local publisher.
         self.create_subscription(Twist, "/cmd_vel_nav2", self._on_candidate, reliable)
         # The kill switch is subscribed twice on purpose. A volatile subscription hears every kind of
-        # publisher (the `ros2 topic pub` CLI, rosbridge). A transient-local one additionally receives
-        # the last latched value from a latching publisher, so an arbiter that (re)starts after an
-        # e-stop was asserted still sees it. A transient-local subscription alone would ignore volatile
-        # publishers. The handler is idempotent, so a message arriving on both is harmless.
+        # publisher (the `ros2 topic pub` CLI, rosbridge) and may assert or release. A transient-local one
+        # additionally receives the last latched value from a still-living latching publisher, so an
+        # arbiter that starts late sees an e-stop asserted before it existed. That replayed history may
+        # only ASSERT: it can be older than the persisted state, and must never release a newer e-stop.
         self.create_subscription(Bool, "/ugv/e_stop", self._on_estop, reliable)
         self.create_subscription(
-            Bool, "/ugv/e_stop", self._on_estop,
+            Bool, "/ugv/e_stop", self._on_estop_replay,
             QoSProfile(history=HistoryPolicy.KEEP_LAST, depth=1, reliability=ReliabilityPolicy.RELIABLE,
                        durability=DurabilityPolicy.TRANSIENT_LOCAL),
         )
@@ -71,8 +84,20 @@ class SafetyArbiterNode(Node):
     def _on_candidate(self, m: Twist) -> None:
         self._arb.on_candidate(m.linear.x, m.angular.z, self._now_ns())
 
+    def _set_estop(self, asserted: bool) -> None:
+        changed = asserted != self._arb.estop_asserted
+        self._arb.on_estop(asserted, self._now_ns())
+        if changed and self._store is not None and not self._store.save(asserted):
+            self.get_logger().error(
+                f"cannot persist the e-stop state to {self._store.path}; it will not survive a restart"
+            )
+
     def _on_estop(self, m: Bool) -> None:
-        self._arb.on_estop(m.data, self._now_ns())
+        self._set_estop(m.data)
+
+    def _on_estop_replay(self, m: Bool) -> None:
+        if m.data:
+            self._set_estop(True)
 
     def _on_pose(self, m: Bool) -> None:
         self._arb.on_pose_valid(m.data, self._now_ns())

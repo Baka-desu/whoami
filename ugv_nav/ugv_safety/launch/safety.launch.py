@@ -16,6 +16,7 @@ def generate_launch_description() -> LaunchDescription:
         [
             DeclareLaunchArgument("config_path", default_value=default_cfg),
             DeclareLaunchArgument("use_sim_time", default_value="false"),
+            DeclareLaunchArgument("estop_state_path", default_value="~/.ros/ugv/estop_latched"),
             Node(
                 package="ugv_safety",
                 executable="safety_arbiter",
@@ -25,6 +26,7 @@ def generate_launch_description() -> LaunchDescription:
                     {
                         "config_path": ParameterValue(LaunchConfiguration("config_path"), value_type=str),
                         "use_sim_time": ParameterValue(LaunchConfiguration("use_sim_time"), value_type=bool),
+                        "estop_state_path": ParameterValue(LaunchConfiguration("estop_state_path"), value_type=str),
                     }
                 ],
             ),
