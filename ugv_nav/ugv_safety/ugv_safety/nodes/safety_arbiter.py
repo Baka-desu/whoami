@@ -46,7 +46,7 @@ class SafetyArbiterNode(Node):
             if asserted:
                 self._arb.on_estop(True, self._now_ns())
             if note:
-                self.get_logger().error(note) if asserted else self.get_logger().warn(note)
+                self.get_logger().error(note) if asserted else self.get_logger().warning(note)
 
         reliable = QoSProfile(history=HistoryPolicy.KEEP_LAST, depth=10, reliability=ReliabilityPolicy.RELIABLE)
         # A latched CameraInfo must not read as a fresh frame to a late joiner, so volatile here;

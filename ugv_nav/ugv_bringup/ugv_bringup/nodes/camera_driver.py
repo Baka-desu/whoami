@@ -126,7 +126,7 @@ class CameraDriver(Node):
         self._failed = 0
         self.create_timer(1.0 / fps, self._tick)
         if calibrating:
-            self.get_logger().warn(
+            self.get_logger().warning(
                 f"CALIBRATION MODE: camera {device!r} {width}x{height} -> {image_topic} raw images only, "
                 "no CameraInfo (nothing downstream can use this)"
             )

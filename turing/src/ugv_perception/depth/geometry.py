@@ -76,25 +76,21 @@ def valid_mask(depth_m: np.ndarray, sky: np.ndarray) -> np.ndarray:
 
 
 def _bilinear(src: np.ndarray, out_h: int, out_w: int) -> np.ndarray:
+    """Bilinear resize (half-pixel centres, edge clamp), float64. Separable: rows, then columns."""
     src_f = np.asarray(src, dtype=np.float64)
     mh, mw = src_f.shape
     if (mh, mw) == (out_h, out_w):
         return src_f.copy()
     ys = np.clip((np.arange(out_h) + 0.5) * mh / out_h - 0.5, 0.0, mh - 1)
     xs = np.clip((np.arange(out_w) + 0.5) * mw / out_w - 0.5, 0.0, mw - 1)
-    yy, xx = np.meshgrid(ys, xs, indexing="ij")
-    y0 = np.floor(yy).astype(np.intp)
-    x0 = np.floor(xx).astype(np.intp)
+    y0 = np.floor(ys).astype(np.intp)
+    x0 = np.floor(xs).astype(np.intp)
     y1 = np.minimum(y0 + 1, mh - 1)
     x1 = np.minimum(x0 + 1, mw - 1)
-    wy = yy - y0
-    wx = xx - x0
-    return (
-        src_f[y0, x0] * (1.0 - wy) * (1.0 - wx)
-        + src_f[y0, x1] * (1.0 - wy) * wx
-        + src_f[y1, x0] * wy * (1.0 - wx)
-        + src_f[y1, x1] * wy * wx
-    )
+    wy = (ys - y0)[:, None]
+    wx = xs - x0
+    rows = src_f[y0, :] * (1.0 - wy) + src_f[y1, :] * wy
+    return rows[:, x0] * (1.0 - wx) + rows[:, x1] * wx
 
 
 def hole_safe_resize(depth_m: np.ndarray, sky: np.ndarray, out_hw: tuple[int, int]) -> np.ndarray:

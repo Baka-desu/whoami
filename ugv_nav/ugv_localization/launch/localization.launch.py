@@ -70,6 +70,11 @@ def _setup(context, *args, **kwargs):
     plan = plan_mode(mode, db, fresh=_to_bool(arg("fresh_db"), "fresh_db"))  # fails fast
 
     cfg = os.path.join(get_package_share_directory("ugv_localization"), "config")
+    # timing:=laptop selects *_laptop.yaml timing profiles (slow GPU laptop: DA3 depth ~1 Hz, ~0.7 s old).
+    timing = arg("timing")
+    if timing not in ("default", "laptop"):
+        raise RuntimeError(f"timing must be default or laptop, got {timing!r}")
+    suffix = "" if timing == "default" else "_laptop"
     image_topic = arg("image_topic")
     info_topic = arg("camera_info_topic")
     depth_input = arg("depth_input")
@@ -110,7 +115,7 @@ def _setup(context, *args, **kwargs):
             name="rgbd_sync",
             namespace="rtabmap",
             output="screen",
-            parameters=[os.path.join(cfg, "rgbd_sync.yaml"), common],
+            parameters=[os.path.join(cfg, f"rgbd_sync{suffix}.yaml"), common],
             remappings=[
                 ("rgb/image", image_topic),
                 ("depth/image", depth_topic),
@@ -140,7 +145,7 @@ def _setup(context, *args, **kwargs):
             parameters=[
                 {
                     **common,
-                    "profile_path": os.path.join(cfg, "odom_select.yaml"),
+                    "profile_path": os.path.join(cfg, f"odom_select{suffix}.yaml"),
                     "odom_source": policy.value,
                 }
             ],
@@ -181,7 +186,7 @@ def _setup(context, *args, **kwargs):
             parameters=[
                 {
                     **common,
-                    "profile_path": os.path.join(cfg, "pose_validity.yaml"),
+                    "profile_path": os.path.join(cfg, f"pose_validity{suffix}.yaml"),
                     "mode": plan.mode.value,
                 }
             ],
@@ -214,6 +219,7 @@ def generate_launch_description() -> LaunchDescription:
                 description="visual (camera + DA3 depth only, default: no wheel sensor yet) | auto (wheel when alive, else visual) | wheel",
             ),
             DeclareLaunchArgument("database_path", default_value="~/.ros/ugv/rtabmap.db"),
+            DeclareLaunchArgument("timing", default_value="default"),
             DeclareLaunchArgument("fresh_db", default_value="false", description="mapping only: delete db at start"),
             DeclareLaunchArgument("profile", default_value="live_cam", description="live_cam | sim | bag"),
             DeclareLaunchArgument("use_sim_time", default_value="auto", description="auto = from profile"),

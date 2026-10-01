@@ -100,9 +100,8 @@ def preprocess_rgb(
     if rgb.dtype != np.uint8 or rgb.ndim != 3 or rgb.shape[2] != 3:
         raise TypeError("rgb must be uint8 HWC")
     in_h, in_w = input_hw
-    resized = np.stack(
-        [_resize_map(rgb[:, :, c].astype(np.float32), in_h, in_w) for c in range(3)],
-        axis=2,
+    resized = np.moveaxis(
+        _resize_map(np.moveaxis(rgb.astype(np.float32), 2, 0), in_h, in_w), 0, 2
     )
     norm = (resized / 255.0 - np.asarray(mean, dtype=np.float32)) / np.asarray(
         std, dtype=np.float32
@@ -121,7 +120,7 @@ def decode_rugd_logits(logits: np.ndarray, frame: ImageFrame) -> RawSemOutput:
         raise AdapterError("RUGD logits are not finite")
     rh, rw = int(frame.rgb.shape[0]), int(frame.rgb.shape[1])
     if (a.shape[1], a.shape[2]) != (rh, rw):
-        a = np.stack([_resize_map(a[c], rh, rw) for c in range(N_CLASSES)], axis=0)
+        a = _resize_map(a, rh, rw)
     shifted = a - a.max(axis=0, keepdims=True)
     exp = np.exp(np.clip(shifted, -80.0, 80.0))
     prob = exp / exp.sum(axis=0, keepdims=True)
@@ -159,31 +158,53 @@ class RugdSegformerAdapter:
             blob = preprocess_rgb(
                 frame.rgb, input_hw=self._input_hw, mean=self._mean, std=self._std
             )
-            logits = self._backend.run(blob)
+            hw = (int(frame.rgb.shape[0]), int(frame.rgb.shape[1]))
+            fast = getattr(self._backend, "run_decoded", None)
+            if fast is not None:
+                # Backend decodes on its own device (CUDA): same maths as decode_rugd_logits.
+                labels, scores = fast(blob, hw)
+            else:
+                logits = self._backend.run(blob)
         except AdapterError:
             raise
         except Exception as exc:
             raise AdapterError("RUGD backend failed") from exc
-        return decode_rugd_logits(logits, frame)
+        if fast is None:
+            return decode_rugd_logits(logits, frame)
+        if labels.shape != hw or scores.shape != hw:
+            raise AdapterError("RUGD backend decoded to the wrong size")
+        if np.any(~np.isfinite(scores)) or np.any(scores < 0.0) or np.any(scores > 1.0):
+            raise AdapterError("RUGD scores are not finite and in [0,1]")
+        return RawSemOutput(
+            adapter_id=ADAPTER_ID,
+            label_ids=labels,
+            raw_scores=scores,
+            id_to_name={i: CLASS_NAMES[i] for i in range(N_CLASSES)},
+            stamp_ns=frame.stamp_ns,
+            frame_id=frame.frame_id,
+            hw=hw,
+        )
+
+
+def _axis_weights(n_src: int, n_dst: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Half-pixel bilinear sample positions along one axis: (i0, i1, weight of i1)."""
+    pos = np.clip((np.arange(n_dst) + 0.5) * n_src / n_dst - 0.5, 0.0, n_src - 1)
+    i0 = np.floor(pos).astype(np.intp)
+    return i0, np.minimum(i0 + 1, n_src - 1), pos - i0
 
 
 def _resize_map(src: np.ndarray, h: int, w: int) -> np.ndarray:
-    mh, mw = src.shape
-    src_f = src.astype(np.float64, copy=False)
+    """Bilinear resize of the last two axes (half-pixel centres, edge clamp), float64.
+
+    Separable: rows first, then columns, with the sample positions computed once for every leading
+    channel. Same result as the 2D four-tap form; that form rebuilt full-image index grids per class
+    map and cost ~0.8 s per 640x480 frame for the 25 RUGD logit maps.
+    """
+    src_f = np.asarray(src).astype(np.float64, copy=False)
+    mh, mw = src_f.shape[-2:]
     if (mh, mw) == (h, w):
         return src_f
-    ys = np.clip((np.arange(h) + 0.5) * mh / h - 0.5, 0.0, mh - 1)
-    xs = np.clip((np.arange(w) + 0.5) * mw / w - 0.5, 0.0, mw - 1)
-    yy, xx = np.meshgrid(ys, xs, indexing="ij")
-    y0 = np.floor(yy).astype(np.intp)
-    x0 = np.floor(xx).astype(np.intp)
-    y1 = np.minimum(y0 + 1, mh - 1)
-    x1 = np.minimum(x0 + 1, mw - 1)
-    wy = yy - y0
-    wx = xx - x0
-    return (
-        src_f[y0, x0] * (1.0 - wy) * (1.0 - wx)
-        + src_f[y0, x1] * (1.0 - wy) * wx
-        + src_f[y1, x0] * wy * (1.0 - wx)
-        + src_f[y1, x1] * wy * wx
-    )
+    y0, y1, wy = _axis_weights(mh, h)
+    x0, x1, wx = _axis_weights(mw, w)
+    rows = src_f[..., y0, :] * (1.0 - wy)[:, None] + src_f[..., y1, :] * wy[:, None]
+    return rows[..., x0] * (1.0 - wx) + rows[..., x1] * wx

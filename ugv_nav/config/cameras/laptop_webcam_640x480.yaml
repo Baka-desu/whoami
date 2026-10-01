@@ -1,0 +1,33 @@
+# Camera: laptop built-in "USB2.0 HD UVC WebCam" (USB 13d3:56a2), fixed lens, mono.
+# Resolution: 640x480 (MJPEG via ugv_bringup/scripts/webcam_stream.py). K is valid only at this resolution.
+# Calibrated: 2026-10-01 by the project owner with ROS camera_calibration (cameracalibrator, Lyrical 7.1.7),
+#   printed checkerboard 10x7 inner corners, 0.020 m squares, 77 views.
+# Reprojection error: RMS 1.30 px over 77 views / 5390 corners (worst view 3.10 px), per-view PnP on the
+#   calibrator's own samples. Usable; re-calibrate in brighter light (camera ran at ~8 fps, motion blur) for < 0.5 px.
+# Result taken from the running calibrator: its SAVE button fails on numpy 2 (ndarray.tostring removed upstream).
+image_width: 640
+image_height: 480
+camera_name: laptop_webcam
+camera_matrix:
+  rows: 3
+  cols: 3
+  data: [594.58444,   0.     , 311.15451,
+           0.     , 596.2187 , 232.11396,
+           0.     ,   0.     ,   1.     ]
+distortion_model: plumb_bob
+distortion_coefficients:
+  rows: 1
+  cols: 5
+  data: [0.033570, -0.132296, -0.003104, 0.001760, 0.000000]
+rectification_matrix:
+  rows: 3
+  cols: 3
+  data: [1., 0., 0.,
+         0., 1., 0.,
+         0., 0., 1.]
+projection_matrix:
+  rows: 3
+  cols: 4
+  data: [593.94919,   0.     , 311.87159,   0.     ,
+           0.     , 597.38709, 231.14419,   0.     ,
+           0.     ,   0.     ,   1.     ,   0.     ]
