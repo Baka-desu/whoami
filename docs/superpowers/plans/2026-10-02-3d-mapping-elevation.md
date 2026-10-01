@@ -131,6 +131,17 @@ The RViz live view is removed: the owner wants the reference picture reproduced 
   4. Only if still short: a scheduling kernel (depth every frame, mask at least every 0.25 s), kernel-tested with an injected clock.
 - [ ] Append before/after numbers to `docs/mapping/baseline.md`.
 
+### Task 23: Every synced frame reaches odometry and SLAM (added 2026-10-02 from the Task 4 measurement; runs before Task 5)
+
+Measured in `docs/mapping/baseline.md`: `rgbd_sync` publishes `/rtabmap/rgbd_image` RELIABLE at 3.3 Hz, `rgbd_odometry` and `rtabmap` subscribe BEST_EFFORT, and odometry produced only 1.1–1.4 updates per second although each estimate took 0.03 s. Each message is about 2.1 MB. Likely cause, to be proven by this task: large best-effort messages dropped in transport.
+
+**Files:** Modify `ugv_nav/ugv_localization/config/rgbd_odometry.yaml`, `config/rtabmap_rgbd.yaml` (and any `_laptop` variants that set the same keys), `launch/localization.launch.py` only if a parameter must be passed; Test `test/test_ros_stack.py`; Modify `docs/mapping/baseline.md` (append the before/after numbers).
+
+- [ ] Prove the cause first: with the stack running on synthetic input, count `/rtabmap/rgbd_image` messages (reliable subscriber) against `/rtabmap/odom_info` messages over the same window, before any change. Record both rates.
+- [ ] Failing test in `test_ros_stack.py`: on the real stack with synthetic sensors, every subscription to `/rtabmap/rgbd_image` held by `rgbd_odometry` and `rtabmap` reports RELIABLE (`get_subscriptions_info_by_topic`), and over the run the `odom_info` count is at least 90 % of the `rgbd_image` count.
+- [ ] Fix in config: the rtabmap_ros input QoS parameter (`qos`: 0 system default, 1 reliable, 2 best effort; confirm the exact name on the installed 0.23.7 nodes with `ros2 param list`) set to reliable for both nodes, with a queue small enough that a slow consumer drops old frames rather than building latency.
+- [ ] Re-count after the change and append before/after rates to `docs/mapping/baseline.md`. If reliable QoS does not close the gap, stop and report what the counts show instead of tuning further.
+
 ### Task 6: Camera driver for a tunnelled phone stream
 
 **Files:** Modify `ugv_nav/ugv_bringup/ugv_bringup/camera_core.py`, `nodes/camera_driver.py`, `ugv_localization/camera/calib.py`, `ugv_nav/config/cameras/README.md`; Create `ugv_nav/config/cameras/phone_640x480.yaml`; Test `ugv_bringup/test/test_camera_core.py`, `ugv_localization/test/test_camera_calib.py`.
