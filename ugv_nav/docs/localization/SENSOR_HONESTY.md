@@ -11,7 +11,9 @@
 | Temporal consistency | Frame-to-frame depth can flicker / rescale → visual odometry jitter, scale drift | Consistent |
 | Metric scale | DA3 metric scale; with `odom_source:=wheel|auto` also wheel odom — the two can **disagree** (scale bias → biased loop-closure constraints) | From the camera itself |
 | Rate | DA3-Large on one GPU: **not measured**; visual odometry and `odom->base_link` (visual mode) run at this rate (CONFLICTS C9) | Camera rate |
+| Odometry source (default: camera only, no wheel sensor) | Visual odometry = DA3 rate; lost on low texture / fast turns / depth dropout → no odometry → hold (no fallback without wheels) | Visual odometry at camera rate |
 | Odometry when wheels slip (mud, grass, sand) | `auto` keeps wheel while it publishes (slip is silent!); `visual` tracks through slip if texture + depth hold | Visual odometry keeps tracking |
+| Distance travelled (`/ugv/localization/distance_travelled`) | Visual-odometry estimate: DA3 scale bias → same % distance bias; lost-VO stretches not counted (under-reports); `distance_basis` = `visual_odometry_estimate`. Not measured yet | From calibrated depth / wheel encoders |
 | Loop closure / relocalization | Yes (bag-of-words + depth-backed 3D words) | Yes |
 | Occupancy grid `/map` | Yes, from DA3 depth — quality = DA3 quality; optional for Dev 3 | Yes |
 | Sky, glass, water, thin branches | NaN or wrong depth; coverage below `min_depth_coverage` → `depth_invalid` hold | Also hard (glass/water), better on thin structure |
@@ -30,8 +32,8 @@ that is the honest outcome.
 2. **Depth accuracy:** replay the bag with
    `ros2 run ugv_localization depth_eval --ros-args -r gt_depth:=<sim depth topic> -p use_sim_time:=true -p out_dir:=eval_out/<run>_depth`
    → AbsRel, RMSE, δ<1.25, coverage, per-range AbsRel, median GT/DA3 scale. Use per-range AbsRel to set `Vis/MaxDepth` / `Grid/RangeMax`.
-3. **Drift matrix** — for each `odom_source ∈ {wheel, visual, auto}` × depth `∈ {sim GT depth image, DA3 cloud}`:
-   `ros2 launch ugv_localization bag_eval.launch.py bag:=eval_bags/<run> mode:=mapping fresh_db:=true odom_source:=… depth_input:=cloud|image [depth_topic:=<gt>]`
+3. **Drift matrix** — for each `odom_source ∈ {wheel, visual, auto}` × depth `∈ {sim GT depth image, DA3 depth image}`:
+   `ros2 launch ugv_localization bag_eval.launch.py bag:=eval_bags/<run> mode:=mapping fresh_db:=true odom_source:=… [depth_topic:=<gt depth topic>]`
    with `ros2 run ugv_localization drift_eval --ros-args -r ground_truth:=/ground_truth/odom -p use_sim_time:=true -p out_dir:=eval_out/<run>_<src>_<depth>`.
    Repeat with `-p with_scale:=true` to separate scale drift from shape drift.
 4. **Fallback:** an `auto` run with `/wheel/odom` removed mid-bag (e.g. `ros2 bag play --topics` excluding it for a segment) —
