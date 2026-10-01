@@ -1,0 +1,27 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>ugv_bringup</name>
+  <version>0.1.0</version>
+  <description>
+    Dev 5 bringup: the camera driver. One V4L2 capture publishes Image + CameraInfo for Dev 1 / Dev 2
+    (/camera/image_raw, /camera/camera_info) and the compressed stream for the web UI
+    (/image_raw/compressed, /camera_info).
+  </description>
+  <maintainer email="dev@neogenmedia.com">dev5</maintainer>
+  <license>Proprietary</license>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>ugv_localization</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>python3-opencv</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
