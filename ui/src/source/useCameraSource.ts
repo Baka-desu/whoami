@@ -1,26 +1,35 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { unavailableAnalyzer, type Analyzer } from './analysis/analyzer'
-import { RosPerception } from './analysis/ros-analyzer'
-import { useFreshness } from './analysis/freshness'
-import { Inspector } from './components/Inspector'
-import { SourcePanel } from './components/SourcePanel'
-import { TopBar } from './components/TopBar'
-import { Viewport } from './components/Viewport'
-import { openCamera } from './source/camera'
-import { connectRos, type CameraCalibration, type RosOptions } from './source/rosbridge'
+import { unavailableAnalyzer, type Analyzer } from '../analysis/analyzer'
+import { useFreshness } from '../analysis/freshness'
+import { RosPerception } from '../analysis/ros-analyzer'
+import { openCamera } from './camera'
+import { connectRos, type CameraCalibration, type RosOptions } from './rosbridge'
 import {
   assumedIntrinsics, type Analysis, type FrameMeta, type Intrinsics, type Layers, type SourceKind, type Status,
-} from './types'
+} from '../types'
 
 const FRAME_INTERVAL_MS = 250
 
-// ROS 2 frames are analysed by Dev 1's Perception Port outputs received over rosbridge. Uploads and the browser
-// camera have no perception backend (no REST analyzer yet), so they stay unavailable rather than faked.
+// ROS 2 frames are analysed from Dev 1's Perception Port outputs received over rosbridge. Uploads and the browser
+// camera have no perception backend, so they stay unavailable rather than faked.
 const rosPerception = new RosPerception()
-const analyzerFor = (src: SourceKind): Analyzer => (src === 'ros2' ? rosPerception : unavailableAnalyzer)
+export const analyzerFor = (src: SourceKind): Analyzer => (src === 'ros2' ? rosPerception : unavailableAnalyzer)
 
-export default function App() {
-  const [source, setSource] = useState<SourceKind>('upload')
+// CameraInfo K scaled to the received image. null when the frame isn't the calibrated camera's.
+function scaledK(calib: CameraCalibration | null, frameId: string, w: number, h: number): Intrinsics | null {
+  if (!calib) return null
+  const norm = (s: string) => s.replace(/^\//, '')
+  if (norm(calib.frameId) && norm(calib.frameId) !== norm(frameId)) return null
+  if (!(calib.width > 0 && calib.height > 0)) return calib.K
+  const sx = w / calib.width
+  const sy = h / calib.height
+  return { fx: calib.K.fx * sx, fy: calib.K.fy * sy, cx: calib.K.cx * sx, cy: calib.K.cy * sy }
+}
+
+// The camera view's state: which source feeds it (robot camera over rosbridge by default, the browser camera or
+// an uploaded photo), the latest frame and its Perception Port analysis. Read only: nothing here publishes.
+export function useCameraSource() {
+  const [source, setSource] = useState<SourceKind>('ros2')
   const [frame, setFrame] = useState<ImageBitmap | null>(null)
   const [analysis, setAnalysis] = useState<Analysis | null>(null)
   const [layers, setLayers] = useState<Layers>({ image: true, mask: true, depth: false, path: true })
@@ -28,9 +37,10 @@ export default function App() {
   const [note, setNote] = useState('')
   const [fps, setFps] = useState(0)
   const [live, setLive] = useState(false)
-  const [rosOn, setRosOn] = useState(false)
+  const [rosOn, setRosOn] = useState(true)
+  const [rosConnected, setRosConnected] = useState(false)
   const [rosCfg, setRosCfg] = useState<RosOptions>({
-    url: 'ws://localhost:9090',
+    url: `ws://${window.location.hostname || 'localhost'}:9090`,
     // Dev 5's camera driver publishes a rate-limited JPEG stream for web UIs on /image_raw/compressed, with
     // CameraInfo on /camera_info (ugv_bringup README); /camera/image_raw itself is raw rgb8.
     imageTopic: '/image_raw/compressed',
@@ -38,14 +48,12 @@ export default function App() {
   })
   const lastFrameAt = useRef(0)
   const rosInfo = useRef<CameraCalibration | null>(null)
-  const freshness = useFreshness(analysis)
   const ingestSeq = useRef(0)
-  const [rosConnected, setRosConnected] = useState(false)
+  const freshness = useFreshness(analysis)
 
   const ingest = useCallback(async (bmp: ImageBitmap, src: SourceKind, stamp: number, frameId: string, streaming: boolean, K?: Intrinsics | null) => {
-    const receivedAt = Date.now()
     const meta: FrameMeta = {
-      source: src, frameId, stamp, receivedAt, width: bmp.width, height: bmp.height,
+      source: src, frameId, stamp, receivedAt: Date.now(), width: bmp.width, height: bmp.height,
       K: K ?? assumedIntrinsics(bmp.width, bmp.height), kAssumed: !K, streaming,
     }
     const now = performance.now()
@@ -65,14 +73,15 @@ export default function App() {
 
   useEffect(() => () => frame?.close(), [frame])
 
-  const stopLive = () => { setLive(false); setRosOn(false) }
   const afterStop = frame ? 'still' : 'idle'
+  const stopLive = () => { setLive(false); setRosOn(false) }
 
   const pickSource = (s: SourceKind) => {
     stopLive()
     setSource(s)
     setNote('')
     setStatus(afterStop)
+    if (s === 'ros2') setRosOn(true)
   }
 
   const upload = async (file: File) => {
@@ -107,6 +116,7 @@ export default function App() {
     }
   }
 
+  // Browser camera, live.
   useEffect(() => {
     if (!live) return
     let cancelled = false
@@ -139,32 +149,19 @@ export default function App() {
     }
   }, [live, ingest])
 
+  // Robot camera + Dev 1's Perception Port over rosbridge.
   useEffect(() => {
     if (!rosOn) return
     const disconnect = connectRos(rosCfg, {
       onInfo: (calib) => { rosInfo.current = calib },
       onFrame: (bmp, stamp, frameId) => {
-        let resolvedK: Intrinsics | null = null
-        const calib = rosInfo.current
-        if (calib) {
-          const normFrameId = frameId.replace(/^\//, '')
-          const normCalibId = calib.frameId.replace(/^\//, '')
-          if (!normCalibId || normFrameId === normCalibId) {
-            if (calib.width > 0 && calib.height > 0) {
-              const scaleX = bmp.width / calib.width
-              const scaleY = bmp.height / calib.height
-              resolvedK = {
-                fx: calib.K.fx * scaleX,
-                fy: calib.K.fy * scaleY,
-                cx: calib.K.cx * scaleX,
-                cy: calib.K.cy * scaleY,
-              }
-            } else {
-              resolvedK = calib.K
-            }
-          }
+        const K = scaledK(rosInfo.current, frameId, bmp.width, bmp.height)
+        if (!K) {
+          bmp.close() // no CameraInfo for this frame yet: never draw geometry with an assumed K
+          setNote('waiting for CameraInfo')
+          return
         }
-        void ingest(bmp, 'ros2', stamp, frameId, true, resolvedK)
+        void ingest(bmp, 'ros2', stamp, frameId, true, K)
         setStatus('live')
       },
       onStatus: (text, ok) => {
@@ -194,18 +191,11 @@ export default function App() {
     }
   }
 
-  return (
-    <div className="app">
-      <TopBar status={status} fps={fps} note={note} analyzerOnline={analyzerFor(source).available} />
-      <SourcePanel
-        source={source} onSource={pickSource}
-        layers={layers} onLayers={setLayers}
-        live={live} onLive={setLiveCamera} onPhoto={takePhoto} onUpload={upload}
-        rosCfg={rosCfg} onRosCfg={setRosCfg} rosOn={rosOn} onRosOn={toggleRos}
-        rosConnected={rosConnected}
-      />
-      <Viewport frame={frame} analysis={analysis} layers={layers} freshness={freshness} />
-      <Inspector analysis={analysis} freshness={freshness} />
-    </div>
-  )
+  return {
+    source, pickSource, frame, analysis, freshness, layers, setLayers, status, note, fps,
+    live, setLiveCamera, takePhoto, upload,
+    rosCfg, setRosCfg, rosOn, toggleRos, rosConnected,
+  }
 }
+
+export type CameraSource = ReturnType<typeof useCameraSource>

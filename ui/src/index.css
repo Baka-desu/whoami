@@ -56,7 +56,7 @@ button, input { font: inherit; color: inherit; }
 
 .app {
   display: grid;
-  grid-template: 48px minmax(0, 1fr) / 264px minmax(0, 1fr) 420px;
+  grid-template: 48px minmax(0, 1fr) / 300px minmax(0, 1fr) 400px;
   grid-template-areas: 'top top top' 'source view inspect';
   height: 100vh;
 }
@@ -357,16 +357,25 @@ input:disabled { opacity: 0.5; }
 .btn.estop { width: 100%; padding: 18px 0; font-size: 16px; letter-spacing: 0.24em; font-weight: 700; }
 code { font-size: 10px; color: var(--text); overflow-wrap: anywhere; }
 
-/* Centre column: live camera + perception overlay on top, safety board below. */
-.center { grid-area: view; display: grid; grid-template-rows: minmax(320px, 1fr) auto; min-height: 0; overflow: auto; }
-.center > .viewport { grid-area: auto; }
-.livefeed { display: grid; grid-template-rows: auto minmax(0, 1fr); min-height: 0; border-bottom: 1px solid var(--line-strong); }
-.livefeed > .viewport { padding: 12px; }
-.livefeed-bar { display: flex; align-items: center; gap: 10px; padding: 8px 14px; font-size: 11px; border-bottom: 1px solid var(--line); }
-.livefeed-bar .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dim); }
+/* Main page = the camera view; the console lives in the two sidebars. */
+.camera { grid-area: view; display: grid; grid-template-rows: auto minmax(0, 1fr); min-height: 0; }
+.camera > .viewport { grid-area: auto; padding: 12px; }
+.livefeed-bar { display: flex; align-items: center; gap: 10px; padding: 8px 14px; font-size: 11px; border-bottom: 1px solid var(--line); min-width: 0; }
+.livefeed-bar > span:nth-child(2) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.livefeed-bar .dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--dim); }
 .livefeed-bar .dot.ok { background: var(--accent, #6ee7b7); }
 .livefeed-bar .dot.bad { background: #f87171; }
-.livefeed-layers { margin-left: auto; display: flex; gap: 6px; }
+.livefeed-bar .flag { flex: none; font-size: 10px; letter-spacing: 0.12em; color: var(--orange); border: 1px solid var(--orange); padding: 1px 6px; }
+.livefeed-layers { margin-left: auto; display: flex; gap: 6px; flex: none; }
 .livefeed-layers button { font: inherit; font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; padding: 3px 10px; background: none; color: var(--dim); border: 1px solid var(--line-strong); cursor: pointer; }
 .livefeed-layers button.on { color: inherit; border-color: var(--accent, #6ee7b7); }
-@media (max-width: 900px) { .center { grid-template-rows: minmax(280px, 55vh) auto; } }
+
+/* Right sidebar: §12 board, then the robot and perception widget grids. */
+.inspector .board { padding: 4px 4px 16px; margin-bottom: 12px; }
+.board .verdict { padding: 12px 14px; margin-bottom: 10px; }
+.board .verdict b { font-size: 18px; }
+.board .watch-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-bottom: 10px; }
+.board .watch { min-height: 0; padding: 10px 12px; }
+.board .watch b { font-size: 14px; }
+.sidegroup { margin-bottom: 16px; }
+.sidegroup-title { margin: 4px 2px 8px; font-size: 11px; font-weight: 500; letter-spacing: 0.22em; color: var(--dim); text-transform: uppercase; }

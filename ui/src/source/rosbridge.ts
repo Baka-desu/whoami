@@ -1,4 +1,4 @@
-// rosbridge v2 client (JSON over WebSocket) for the Dev 1 eval workbench (architecture.md §4 bag / rugd
+// rosbridge v2 client (JSON over WebSocket) for the console camera view (architecture.md §4 live_cam / bag
 // profiles). Reads only the camera and Dev 1's Perception Port outputs. It never publishes anything: no
 // goals, no e-stop, no /cmd_vel* (operator commands live in the Dev 5 operator console, ui/).
 import type { Intrinsics } from '../types'

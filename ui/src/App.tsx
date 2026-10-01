@@ -1,10 +1,13 @@
 import { useEffect, useState } from 'react'
+import { CameraView } from './components/CameraView'
 import { CommandPanel } from './components/CommandPanel'
-import { LiveFeed } from './components/LiveFeed'
+import { Inspector } from './components/Inspector'
 import { SafetyBoard } from './components/SafetyBoard'
+import { SourcePanel } from './components/SourcePanel'
 import { StatusWidgets } from './components/StatusWidgets'
 import { TopBar } from './components/TopBar'
 import { ApiError, api, isLive, subscribeTelemetry, type Mode, type Telemetry } from './source/api'
+import { useCameraSource } from './source/useCameraSource'
 
 const CLOCK_MS = 250 // re-check telemetry freshness at 4 Hz so a dead stream reads NO SIGNAL promptly
 
@@ -15,15 +18,16 @@ const fromError = (e: unknown): Message =>
     ? { text: `${e.problem.title}${e.problem.detail ? `: ${e.problem.detail}` : ''}`, reasons: e.problem.reasons, error: true }
     : { text: String(e), error: true }
 
-// Operator console: the five operator items architecture.md defines (e-stop §3.1, §12 health table, final
-// /cmd_vel, mapping|localize §10, map-frame goal §11), all through Dev 5's gateway (/api/v1). The live camera
-// with Dev 1's mask / depth / path overlay is display-only (components/LiveFeed).
+// Operator console. The camera view (Dev 1's mask / depth / path over the live image, display only) is the main
+// page. Left sidebar: the operator's commands (e-stop §3.1, mapping|localize §10, map-frame goal §11) through Dev 5's
+// gateway (/api/v1), and the camera source. Right sidebar: §12 health table, robot status, perception details.
 export default function App() {
   const [telemetry, setTelemetry] = useState<Telemetry | null>(null)
   const [connected, setConnected] = useState(false)
   const [now, setNow] = useState(() => Date.now())
   const [estopBusy, setEstopBusy] = useState(false)
   const [message, setMessage] = useState<Message>(null)
+  const cam = useCameraSource()
 
   useEffect(() => subscribeTelemetry(setTelemetry, setConnected), [])
   useEffect(() => {
@@ -65,30 +69,35 @@ export default function App() {
   return (
     <div className="app">
       <TopBar connected={connected} live={live} safetyOk={safety?.ok ?? null} />
-      <CommandPanel
-        live={live}
-        estopAsserted={safety?.eStop.asserted ?? false}
-        estopBusy={estopBusy}
-        onEstop={setEstop}
-        mode={live ? telemetry.localization?.requestedMode ?? null : null}
-        onMode={setMode}
-        gateReasons={gateReasons}
-        activeGoal={live ? telemetry.navigation?.activeGoal ?? null : null}
-        onSendGoal={sendGoal}
-        onCancelGoal={cancelGoal}
-        message={message}
-      />
-      <div className="center">
-        <LiveFeed />
+      <aside className="panel source">
+        <CommandPanel
+          live={live}
+          estopAsserted={safety?.eStop.asserted ?? false}
+          estopBusy={estopBusy}
+          onEstop={setEstop}
+          mode={live ? telemetry.localization?.requestedMode ?? null : null}
+          onMode={setMode}
+          gateReasons={gateReasons}
+          activeGoal={live ? telemetry.navigation?.activeGoal ?? null : null}
+          onSendGoal={sendGoal}
+          onCancelGoal={cancelGoal}
+          message={message}
+        />
+        <SourcePanel cam={cam} />
+      </aside>
+      <CameraView cam={cam} />
+      <aside className="panel inspector">
         <SafetyBoard safety={safety} live={live} />
-      </div>
-      <StatusWidgets
-        live={live}
-        command={telemetry?.command}
-        navigation={telemetry?.navigation}
-        localization={telemetry?.localization}
-        eStop={safety?.eStop}
-      />
+        <p className="inspector-hint">drag widgets to rearrange · alt + arrows on keyboard</p>
+        <StatusWidgets
+          live={live}
+          command={telemetry?.command}
+          navigation={telemetry?.navigation}
+          localization={telemetry?.localization}
+          eStop={safety?.eStop}
+        />
+        <Inspector analysis={cam.analysis} freshness={cam.freshness} />
+      </aside>
     </div>
   )
 }

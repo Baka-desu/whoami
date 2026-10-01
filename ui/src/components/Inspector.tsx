@@ -36,7 +36,7 @@ const LABEL: Record<WidgetId, string> = {
   analysis: 'Analysis', ground: 'Ground map',
   classes: 'Classes', depth: 'Depth', health: 'Health', source: 'Source',
 }
-const ORDER_KEY = 'whoami.workbench.inspector.order'
+const ORDER_KEY = 'ugv.console.perception.order'
 
 // The arrangement is a per-browser preference (not app state): saved order, filtered to the widgets
 // that exist right now.
@@ -66,7 +66,7 @@ export function Inspector({ analysis: a, freshness: fr }: Props) {
     if (id === 'analysis') {
       return (
         <Section title="Analysis">
-          <p className="dim">No analysis available. Add a photo or start a source; results appear once a perception backend is connected.</p>
+          <p className="dim">No analysis available. Start a camera source; results appear once Dev 1's Perception Port is publishing.</p>
         </Section>
       )
     }
@@ -82,7 +82,7 @@ export function Inspector({ analysis: a, freshness: fr }: Props) {
               <span><i style={{ background: '#2c2c2c' }} />UNKNOWN / INFLATED</span>
               <span><i style={{ background: '#ff2a2a' }} />LETHAL</span>
             </div>
-            <p className="dim">Costmap, 0.25 m cells. Unknown is never free.</p>
+            <p className="dim">Flat-ground preview from the mask, 0.25 m cells. Not Nav2's costmap. Unknown is never free.</p>
           </Section>
         )
       case 'classes':
@@ -144,19 +144,19 @@ export function Inspector({ analysis: a, freshness: fr }: Props) {
   }
 
   return (
-    <aside className="panel inspector">
-      <p className="inspector-hint">drag widgets to rearrange · alt + arrows on keyboard</p>
+    <div className="sidegroup">
+      <h4 className="sidegroup-title">Perception</h4>
       {/* remount when the set of widgets changes; the grid keeps its own order between changes */}
       <DraggableWidgetGrid
         key={ids.join(',')}
         items={ordered(ids)}
         onChange={remember}
         renderItem={(item) => render(item.id as WidgetId)}
-        maxColumns={3}
+        maxColumns={2}
         cellSize={200}
         gap={12}
         radius={4}
       />
-    </aside>
+    </div>
   )
 }
