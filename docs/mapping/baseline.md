@@ -73,6 +73,80 @@ standard deviation 0.26. Centre-patch median 0.75–2.89 m. Both are DA3's respo
 - Getting every synced frame to visual odometry (Task 5b) is the cheapest improvement: it should raise the
   odometry rate from about 1.3 Hz to the depth rate without touching any model.
 
+## Task 5: before/after (depth for every frame, at a usable rate)
+
+**When:** 2026-10-02, `ugv-run` container, RTX 4060 laptop, branch `mapping-3d`. Target set by the controller:
+**depth >= 5 Hz** (not 8 Hz). Step 3 of the brief (skip the point cloud with no subscriber) was dropped by the
+controller: it saves 1.7 ms and changes a published contract.
+
+### How it was measured
+
+A throwaway benchmark (not committed) builds the real RUGD adapter and the real DA3 channel the way
+`adapter_node.py:main()` does (`build_live_adapter`, `build_depth_channel`, both on the CUDA backend), wraps them in the
+real `PerceptionAdapterNode` and feeds one fixed, textured 640x480 RGB frame with the laptop webcam K, back to back,
+through the node's own image callback: 5 warm-up frames, then 50 timed frames. Back to back means this is the rate the
+node can sustain, not the rate the camera delivers. Stage columns are the mean per frame **on the frames where the
+stage ran** (the same rule as `/ugv/perception/stats`). The mask and the depth image of the last frame are saved and
+compared with the "before (b)" run. Another worker's ROS tests were using the CPU in the same container, so each
+configuration was measured twice.
+
+| Configuration | Run | ms / frame | Mask Hz | Depth Hz | decode | seg | depth_infer | depth_post | cloud | publish |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Before (commit 2734f12) | a | 365.2 | 2.19 (1) | 2.19 (1) | 1.77 | 202.18 | 163.97 | 29.66 | 2.11 | 1.87 |
+| | b | 335.3 | 2.98 | 2.98 | 1.63 | 144.49 | 157.89 | 26.57 | 1.73 | 1.55 |
+| Depth independent of the mask, one decode | a | 301.9 | 3.31 | 3.31 | 1.08 | 123.49 | 150.47 | 22.83 | 1.74 | 1.13 |
+| | b | not taken (2) | | | | | | | | |
+| + DA3 pre/post-processing on the GPU | a | 271.4 | 3.68 | 3.68 | 1.12 | 121.02 | 132.92 | 12.57 | 1.53 | 1.09 |
+| | b | 277.1 | 3.61 | 3.61 | 1.25 | 124.75 | 133.56 | 13.45 | 1.68 | 1.12 |
+| + DA3 under fp16 autocast | a | 204.9 | 4.88 | 4.88 | 1.13 | 122.66 | 65.03 | 12.14 | 1.61 | 1.15 |
+| | b | 208.7 | 4.79 | 4.79 | 1.07 | 125.55 | 66.46 | 11.89 | 1.50 | 1.07 |
+| + scheduler (mask period 0.25 s) | a | 140.4 | 3.56 | **7.12** | 1.08 | 119.06 (3) | 64.41 | 11.96 | 1.56 | 0.91 |
+| | b | 138.0 | 3.62 | **7.24** | 1.00 | 116.36 (3) | 64.27 | 11.42 | 1.42 | 0.86 |
+
+1. Run a had 10 frames of 50 on which no mask was published, and so no depth either (old code ties depth to the mask).
+   Cause not captured: the adapter-error counter was added to the benchmark afterwards. The same thing was seen in
+   the first 25-frame diagnostic run (3 frames) and never again in 9 later runs (more than 450 frames, 0 adapter
+   errors). Both early runs were at process start-up under CPU contention. It is in the segmentation path, which this task
+   does not touch, so it is only recorded here.
+2. The container's Docker engine stopped (host disk full) before the second run of this configuration.
+3. Segmentation ran on 25 of the 50 frames. Depth ran on all 50.
+
+The scheduler row is the answer to the target: **depth 7.1 to 7.2 Hz**, against 3.0 to 3.3 Hz before. The mask rate is
+3.6 Hz, not lower than before (3.0 to 3.3 Hz): with the costs above, every second frame is segmented, 275 to 280 ms
+apart. Without the scheduler the same code reaches 4.8 to 4.9 Hz, just short of 5 Hz, because segmentation (120 ms)
+and depth (about 77 ms now) share one GPU and run one after the other.
+
+Over DDS, with the real node (`main()`), a synthetic camera at 12 Hz and a subscriber for every output, 20 s after
+warm-up: before 3.25 Hz mask and 3.25 Hz depth; after 3.45 Hz mask and 6.7 to 6.8 Hz depth (two runs). The
+`/ugv/perception_degraded` messages, which the safety arbiter times out at 0.5 s, came every 0.29 s on average
+(longest gap 0.34 and 0.40 s; before: 0.30 s, longest 0.75 s). Mask stamps strictly increase. Depth reaches the
+subscriber with a mean age of 0.20 s (before 0.37 s); the mask with 0.17 s (before 0.18 s).
+
+### Numerical checks
+
+- The last mask is **byte-identical** to the one before the changes, in every run.
+- The last depth image against "before (b)": identical NaN mask; largest absolute difference 0.48 mm after the GPU
+  pre/post-processing, 0.89 mm (0.077 % relative) after fp16 as well.
+- Tests with the real DA3 weights on three synthetic frames: GPU against numpy pre/post-processing (fp32) differs by
+  0.2 to 0.7 mm at most; fp16 against fp32 by at most 0.17 % on valid pixels (the gate is 1 %). Both skip when CUDA or the
+  weights are absent.
+- Hole-safe resize on the 2 m plane, GPU against numpy: well under 1 mm.
+- Segmentation never runs under fp16: a test records the autocast state during `run_seg`, `run_decoded` and `run_all`
+  of the RUGD net and requires it off.
+
+### What each stage covers now
+
+| Stage | Covers |
+|---|---|
+| `decode` | ROS `Image` to `ImageView` (`image_msg_to_view`) plus the one `decode_frame` of the tick (view to RGB array, checks on K and frame id). Before: the first, plus a second `decode_frame` inside the depth step, while the decode of the cycle was counted under `seg`. |
+| `seg` | The cycle after the decode, and only on frames that are segmented: freshness check, `adapter.infer` (RUGD preprocess, SegFormer, GPU decode), remap, gates, mask. Before: it included the decode. |
+| `depth_infer` | Backend sizing, DA3 preprocess (on the GPU for CUDA, numpy for OpenVINO), forward pass (fp16 on CUDA). On CUDA the device is synchronised before it closes, so the time is real. |
+| `depth_post` | Metres, hole-safe resize and the copy back (GPU for CUDA, numpy otherwise), then the back-projection to XYZ (numpy). |
+| `cloud` | Building the 32FC1 depth `Image` and the `PointCloud2` messages. |
+| `publish` | All `publish()` calls of the tick. |
+
+Frames on which segmentation is skipped have no `seg` sample, and publish no mask and no degraded flag.
+
 ## Task 23: odometry input QoS, before and after
 
 **When:** 2026-10-02, branch `mapping-3d`. The real stack (`localization.launch.py`: `rgbd_sync`, `rgbd_odometry`, `rtabmap`,
