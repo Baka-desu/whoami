@@ -159,6 +159,9 @@ export function connectRos(opts: RosOptions, cb: RosCallbacks): () => void {
       case '/ugv/nav2_status':
         if (typeof msg.data === 'string') cb.onState?.({ nav2Status: stamped(msg.data) })
         return
+      case '/ugv/safety_status':
+        if (typeof msg.data === 'string') cb.onState?.({ safetyStatus: stamped(msg.data) })
+        return
       case '/ugv/localization_status':
         if (typeof msg.data === 'string') cb.onState?.({ locStatus: stamped(msg.data) })
         return
@@ -267,6 +270,8 @@ export function connectRos(opts: RosOptions, cb: RosCallbacks): () => void {
       // ugv_navigation (Dev 4)
       sub('/ugv/nav2_heartbeat', 'std_msgs/msg/Bool', { throttle_rate: 100 })
       sub('/ugv/nav2_status', 'std_msgs/msg/String')
+      // Dev 5 (safety arbiter): what is actually allowed to reach the base, and why
+      sub('/ugv/safety_status', 'std_msgs/msg/String')
       sub('/cmd_vel_nav2', 'geometry_msgs/msg/Twist', { throttle_rate: 100 })
       sub('/plan', 'nav_msgs/msg/Path', { throttle_rate: 500 })
       sub('/local_costmap/costmap', 'nav_msgs/msg/OccupancyGrid', { throttle_rate: 500 })

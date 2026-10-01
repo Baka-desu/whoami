@@ -39,10 +39,13 @@ export function RobotWidget({ robot: r, estop }: { robot: RobotSnapshot; estop: 
   const cmd = fresh(r.cmdVelNav2, r.now, 2000)
   const loc = r.locStatus?.value
   const nav2 = r.nav2Status?.value
+  const safety = r.safetyStatus?.value // published on change, so shown as last known
+  const safetyLevel = safety ? Number(safety.match(/^L(\d)/)?.[1]) : undefined
 
   return (
     <section className="section wcontent">
       <h3>Robot</h3>
+        <Row k="safety arbiter" v={safety ?? 'NO SIGNAL'} tone={safetyLevel === undefined ? 'warn' : safetyLevel < 4 ? 'trip' : undefined} />
         <Row k="e-stop (sent)" v={estop ? 'ASSERTED' : 'released'} tone={estop ? 'trip' : undefined} />
         <Row k="pose_valid" v={bool(pose)} tone={pose === false ? 'trip' : pose === undefined ? 'warn' : undefined} />
         {loc && loc !== 'valid' && <p className="reason">{loc.split(',').join(' · ')}</p>}
