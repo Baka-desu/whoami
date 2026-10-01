@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react'
-import type { BaseCommand, EStop, Localization, Navigation } from '../source/api'
+import type { BaseCommand, EStop, Localization, MapStatus, Navigation } from '../source/api'
+import { mapRows, placeholderCalibration } from './mapStats'
 import DraggableWidgetGrid, { type WidgetItem, type WidgetSize } from './ui/draggable-widget-grid'
 
 function Section({ title, children }: { title: string; children: ReactNode }) {
@@ -29,12 +30,13 @@ interface Props {
   navigation?: Navigation
   localization?: Localization
   eStop?: EStop
+  map?: MapStatus
 }
 
-type WidgetId = 'command' | 'navigation' | 'localization' | 'estop'
-const SIZE: Record<WidgetId, WidgetSize> = { command: 'wide', navigation: 'lg', localization: 'wide', estop: 'wide' }
-const LABEL: Record<WidgetId, string> = { command: 'Final /cmd_vel', navigation: 'Navigation', localization: 'Localization', estop: 'E-stop' }
-const IDS: WidgetId[] = ['command', 'navigation', 'localization', 'estop']
+type WidgetId = 'command' | 'navigation' | 'localization' | 'estop' | 'map'
+const SIZE: Record<WidgetId, WidgetSize> = { command: 'wide', navigation: 'lg', localization: 'wide', estop: 'wide', map: 'lg' }
+const LABEL: Record<WidgetId, string> = { command: 'Final /cmd_vel', navigation: 'Navigation', localization: 'Localization', estop: 'E-stop', map: 'Map' }
+const IDS: WidgetId[] = ['command', 'navigation', 'localization', 'estop', 'map']
 const ORDER_KEY = 'ugv.console.widgets.order'
 
 function ordered(): WidgetItem[] {
@@ -49,7 +51,7 @@ function remember(items: WidgetItem[]) {
 }
 
 // Read-only views of the gateway resources. A stalled stream shows NO SIGNAL, never the last value.
-export function StatusWidgets({ live, command, navigation: nav, localization: loc, eStop }: Props) {
+export function StatusWidgets({ live, command, navigation: nav, localization: loc, eStop, map }: Props) {
   const render = (id: WidgetId): ReactNode => {
     if (!live) return <Section title={LABEL[id]}><p className="dim">NO SIGNAL</p></Section>
     switch (id) {
@@ -103,6 +105,13 @@ export function StatusWidgets({ live, command, navigation: nav, localization: lo
             <Row k="state" v={eStop?.asserted ? 'ASSERTED' : 'released'} tone={eStop?.asserted ? 'trip' : undefined} />
             <Row k="by this console" v={eStop?.assertedByGateway ? 'YES' : 'no'} />
             <Row k="last on /ugv/e_stop" v={eStop?.lastSeen === null || eStop?.lastSeen === undefined ? 'never' : String(eStop.lastSeen)} />
+          </Section>
+        )
+      case 'map':
+        return (
+          <Section title="Map">
+            {mapRows(map?.stats).map((r) => <Row key={r.k} k={r.k} v={r.v} />)}
+            {placeholderCalibration(map?.stats) && <p className="reason">placeholder calibration</p>}
           </Section>
         )
     }
