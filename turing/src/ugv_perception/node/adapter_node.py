@@ -13,10 +13,11 @@ from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPo
 from sensor_msgs.msg import CameraInfo, Image
 from std_msgs.msg import Bool, Float64MultiArray, String
 
+from ugv_perception.adapter.frame import ImageFrame
 from ugv_perception.compose.load import load_compose_configs
 from ugv_perception.ingest.msgs import CameraInfoView, ImageView
 from ugv_perception.ingest.ros_bridge import camera_info_msg_to_view, image_msg_to_view
-from ugv_perception.node.cycle import perception_cycle
+from ugv_perception.node.cycle import cycle_on_frame, decode_cycle_frame
 from ugv_perception.node.metrics import PerceptionMetrics
 from ugv_perception.node.wire import wire_compose_out
 
@@ -176,10 +177,13 @@ class PerceptionAdapterNode(Node):
         if type(now_ns) is not int or now_ns <= 0:
             raise TypeError("now_ns must be a Python int > 0")
         had_pair = self._last_image is not None and self._last_info is not None
+        info = self._last_info
+        # One decode per frame. `decode` times it, `seg` times the cycle after it; depth reuses the frame.
+        with self.metrics.stage("decode"):
+            frame = decode_cycle_frame(self._last_image, info)
         with self.metrics.stage("seg"):
-            out = perception_cycle(
-                image=self._last_image,
-                camera_info=self._last_info,
+            out = cycle_on_frame(
+                frame=frame,
                 now_ns=now_ns,
                 adapter=self._adapter,
                 remap_table=self._table,
@@ -204,7 +208,9 @@ class PerceptionAdapterNode(Node):
             self._publish(self._pub_meta, wired.port_meta)
             if self._last_camera_info_msg is not None:
                 self._publish(self._pub_cinfo, self._last_camera_info_msg)
-            self._publish_depth()
+        if frame is not None:
+            # Depth does not depend on the mask: a stale or failed mask still gets its depth.
+            self._publish_depth(frame, info.k)
         if had_pair and self._last_image is not None:
             self._inferred_stamp = self._last_image.stamp_ns
         self.metrics.end_frame()
@@ -218,19 +224,14 @@ class PerceptionAdapterNode(Node):
         msg.data = json.dumps(self.metrics.snapshot())
         self._pub_stats.publish(msg)
 
-    def _publish_depth(self) -> None:
-        """After the mask. Failure publishes no cloud and does not touch degraded."""
-        if self._depth is None or self._last_image is None or self._last_info is None:
+    def _publish_depth(self, frame: ImageFrame, k: tuple[float, ...]) -> None:
+        """After the mask, on the frame the cycle decoded. Failure publishes no cloud and does not touch degraded."""
+        if self._depth is None:
             return
         try:
-            from ugv_perception.ingest.decode import decode_frame
             from ugv_perception.node.cloud import depth_to_image, points_to_cloud
 
-            with self.metrics.stage("decode"):
-                frame = decode_frame(self._last_image, self._last_info)
-            depth_m, points = self._depth.maps(
-                frame.rgb, self._last_info.k, stage=self.metrics.stage
-            )
+            depth_m, points = self._depth.maps(frame.rgb, k, stage=self.metrics.stage)
             if self._pub_depth is not None:
                 with self.metrics.stage("cloud"):
                     depth_msg = depth_to_image(depth_m, frame.stamp_ns, frame.frame_id)

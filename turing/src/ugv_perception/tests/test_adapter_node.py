@@ -24,6 +24,7 @@ from rclpy.node import Node
 
 from ugv_perception.ingest.ros_bridge import camera_info_msg_to_view, image_msg_to_view
 from ugv_perception.node.adapter_node import PerceptionAdapterNode, camera_info_qos
+from ugv_perception.node.cycle import decode_cycle_frame
 from ugv_perception.node.metrics import STAGES, PerceptionMetrics
 from ugv_perception.tests.test_node_cycle import SpyAdapter
 
@@ -306,12 +307,12 @@ def test_depth_failure_logs_at_warn_first_then_every_100th() -> None:
     )
     try:
         img, info = _msgs()
-        node._last_image = image_msg_to_view(img)
-        node._last_info = camera_info_msg_to_view(info)
+        info_view = camera_info_msg_to_view(info)
+        frame = decode_cycle_frame(image_msg_to_view(img), info_view)
         spy = _SpyLogger()
         node.get_logger = lambda: spy
         for _ in range(205):
-            node._publish_depth()
+            node._publish_depth(frame, info_view.k)
         assert node.metrics.depth_errors == 205
         assert len(spy.warnings) == 3, spy.warnings
         assert all("RuntimeError: boom" in w for w in spy.warnings)
@@ -365,5 +366,198 @@ def test_stats_topic_publishes_stage_times_rates_and_depth_errors() -> None:
         ex.remove_node(helper)
         node.destroy_node()
         helper.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+
+
+class _RecordingAdapter(SpyAdapter):
+    """Keeps the pixels it was given, so a test can tell whether depth got the very same array."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.rgbs: list[np.ndarray] = []
+
+    def infer(self, frame):
+        self.rgbs.append(frame.rgb)
+        return super().infer(frame)
+
+
+class _RecordingDepth(_FakeDepth):
+    def __init__(self, clock: _Clock) -> None:
+        super().__init__(clock)
+        self.rgbs: list[np.ndarray] = []
+
+    def maps(self, rgb, k, stage=None):
+        self.rgbs.append(rgb)
+        return super().maps(rgb, k, stage)
+
+
+def _node_with_one_pair(clock: _Clock, adapter, depth, *, now_ns: int):
+    """A node that has seen CameraInfo, ready for `_on_image`. No executor, no wall-clock waits."""
+    node = PerceptionAdapterNode(
+        adapter=adapter,
+        adapter_id="yoloe",
+        now_ns_fn=lambda: now_ns,
+        monotonic_ns_fn=clock,
+        depth=depth,
+    )
+    img, info = _msgs()
+    node._on_info(info)
+    return node, img
+
+
+def test_depth_is_published_when_the_mask_is_stale_and_not_published() -> None:
+    rclpy.init()
+    clock = _Clock()
+    depth = _FakeDepth(clock)
+    spy = SpyAdapter()
+    node = PerceptionAdapterNode(
+        adapter=spy,
+        adapter_id="yoloe",
+        now_ns_fn=lambda: _STAMP + 10_000_000_000,  # the image is 10 s old: stale, no mask
+        monotonic_ns_fn=clock,
+        depth=depth,
+    )
+    helper = Node("test_depth_without_mask")
+    pub_i = helper.create_publisher(Image, "/camera/image_raw", 10)
+    pub_c = helper.create_publisher(CameraInfo, "/camera/camera_info", camera_info_qos())
+    masks: list[Image] = []
+    depths: list[Image] = []
+    flags: list[bool] = []
+    helper.create_subscription(Image, "/segmentation/mask", masks.append, 10)
+    helper.create_subscription(Image, "/perception/depth/image", depths.append, 10)
+    helper.create_subscription(Bool, "/ugv/perception_degraded", lambda m: flags.append(m.data), 10)
+    ex = SingleThreadedExecutor()
+    ex.add_node(node)
+    ex.add_node(helper)
+    try:
+        _spin_until(ex, pub_i, pub_c, lambda: bool(depths) and bool(flags))
+        assert depths[0].header.stamp.sec == _STAMP // 1_000_000_000
+        assert depths[0].header.frame_id == "camera_optical"
+        assert not masks, "a stale frame must not produce a mask"
+        assert spy.calls == 0, "a stale frame must not reach the adapter"
+        assert flags and all(flags), "stale perception must still be degraded"
+        assert node.metrics.masks_published == 0
+        assert node.metrics.depth_errors == 0
+    finally:
+        ex.remove_node(node)
+        ex.remove_node(helper)
+        node.destroy_node()
+        helper.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+
+
+def test_depth_still_runs_when_the_adapter_fails_and_the_mask_does_not() -> None:
+    from ugv_perception.adapter.output import AdapterError
+
+    class _FailingAdapter:
+        def infer(self, frame):
+            raise AdapterError("model fell over")
+
+    rclpy.init()
+    clock = _Clock()
+    depth = _FakeDepth(clock)
+    node, img = _node_with_one_pair(
+        clock, _FailingAdapter(), depth, now_ns=_STAMP + 100_000_000
+    )
+    try:
+        node._on_image(img)
+        assert depth.calls == 1
+        assert node.metrics.masks_published == 0
+        assert node.metrics.degraded_true == 1
+        assert node.metrics.depth_errors == 0
+    finally:
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+
+
+def test_depth_does_not_run_when_the_frame_cannot_be_decoded() -> None:
+    """Nothing decoded means nothing to run depth on. That is the mask's degraded case, not a depth error."""
+    rclpy.init()
+    clock = _Clock()
+    depth = _FakeDepth(clock)
+    node = PerceptionAdapterNode(
+        adapter=SpyAdapter(),
+        adapter_id="yoloe",
+        now_ns_fn=lambda: _STAMP + 100_000_000,
+        monotonic_ns_fn=clock,
+        depth=depth,
+    )
+    try:
+        img, info = _msgs()
+        info.k = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]  # the reserved identity K: rejected
+        node._on_info(info)
+        node._on_image(img)
+        assert depth.calls == 0
+        assert node.metrics.depth_errors == 0
+        assert node.metrics.degraded_true == 1
+    finally:
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+
+
+def test_one_frame_is_decoded_once_and_depth_gets_the_cycle_pixels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import ugv_perception.ingest.decode as decode_mod
+    import ugv_perception.node.cycle as cycle_mod
+
+    calls: list[int] = []
+    real = decode_mod.decode_frame
+
+    def counting(image, info):
+        calls.append(1)
+        return real(image, info)
+
+    monkeypatch.setattr(decode_mod, "decode_frame", counting)
+    monkeypatch.setattr(cycle_mod, "decode_frame", counting)
+    rclpy.init()
+    clock = _Clock()
+    adapter = _RecordingAdapter()
+    depth = _RecordingDepth(clock)
+    node, img = _node_with_one_pair(clock, adapter, depth, now_ns=_STAMP + 100_000_000)
+    try:
+        node._on_image(img)
+        assert len(calls) == 1, f"decoded {len(calls)} times for one frame"
+        assert len(adapter.rgbs) == 1 and len(depth.rgbs) == 1
+        assert depth.rgbs[0] is adapter.rgbs[0], "depth must reuse the frame the cycle decoded"
+    finally:
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+
+
+def test_stage_attribution_decode_is_one_frame_decode_and_seg_excludes_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """decode = ROS message to view plus the one frame decode. seg = the cycle without decoding."""
+    import ugv_perception.ingest.decode as decode_mod
+    import ugv_perception.node.cycle as cycle_mod
+
+    rclpy.init()
+    clock = _Clock()
+    real = decode_mod.decode_frame
+
+    def slow_decode(image, info):
+        clock.advance_ms(7)
+        return real(image, info)
+
+    monkeypatch.setattr(decode_mod, "decode_frame", slow_decode)
+    monkeypatch.setattr(cycle_mod, "decode_frame", slow_decode)
+    node, img = _node_with_one_pair(
+        clock, _TimedAdapter(clock), _FakeDepth(clock), now_ns=_STAMP + 100_000_000
+    )
+    try:
+        node._on_image(img)
+        stage_ms = node.metrics.snapshot()["stage_ms"]
+        assert stage_ms["decode"] == pytest.approx(7.0)
+        assert stage_ms["seg"] == pytest.approx(20.0)
+        assert stage_ms["depth_infer"] == pytest.approx(30.0)
+        assert stage_ms["depth_post"] == pytest.approx(4.0)
+    finally:
+        node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
