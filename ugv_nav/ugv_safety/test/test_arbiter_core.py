@@ -255,3 +255,19 @@ def test_config_rejects_unknown_and_missing_keys(tmp_path):
         load_config(bad)
     with pytest.raises(ConfigError):
         load_config(tmp_path / "missing.yaml")
+
+
+def test_setup_py_installs_the_shipped_config_and_launch_file():
+    """setup.py globs ../config/safety/*.yaml relative to the package; an empty match would silently ship
+    the package without its config, so assert the globs find real files from the package directory."""
+    import os
+    from glob import glob
+
+    pkg = CONFIG_YAML.parents[2] / "ugv_safety"
+    cwd = os.getcwd()
+    os.chdir(pkg)
+    try:
+        assert [os.path.basename(p) for p in glob("../config/safety/*.yaml")] == ["safety_timeouts.yaml"]
+        assert glob("launch/*.launch.py")
+    finally:
+        os.chdir(cwd)

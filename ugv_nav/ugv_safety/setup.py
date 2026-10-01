@@ -1,6 +1,10 @@
+import os
 from glob import glob
 
 from setuptools import find_packages, setup
+
+# Every path below is relative to this package; make that true whatever directory the build starts from.
+os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
 package_name = "ugv_safety"
 
