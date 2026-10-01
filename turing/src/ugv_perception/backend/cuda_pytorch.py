@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from contextlib import AbstractContextManager, nullcontext
 from pathlib import Path
 
 import numpy as np
 from numpy.typing import NDArray
 
 from ugv_perception.adapter.output import AdapterError, Instance
+from ugv_perception.depth.geometry import METRIC_SCALE
+
+
+def _no_timing(name: str) -> AbstractContextManager[None]:
+    return nullcontext()
 
 
 class CudaPytorchBackend:
@@ -133,6 +140,49 @@ class CudaPytorchTensorBackend:
                     depth.detach().cpu().numpy(),
                     sky.detach().cpu().numpy(),
                 ]
+        except AdapterError:
+            raise
+        except Exception as exc:
+            raise AdapterError("CUDA run failed") from exc
+
+    def run_depth_metres(
+        self,
+        rgb: NDArray[np.uint8],
+        focal: float,
+        model_size: tuple[int, int],
+        out_hw: tuple[int, int],
+        stage: Callable[[str], AbstractContextManager[None]] | None = None,
+    ) -> NDArray[np.float32]:
+        """DA3 on CUDA with the pre/post-processing on the GPU: camera-sized depth in metres, NaN holes.
+
+        Same maths as geometry.preprocess_nchw, meters_from_raw and hole_safe_resize, in float32 on the
+        device, so only the camera frame goes up and only the camera-sized depth comes back.
+        `stage` is DepthChannel's timing hook: "depth_infer" covers sizing, preprocess and the model (the
+        device is synchronised before it closes), "depth_post" the meters, the resize and the copy back.
+        """
+        if self._model is None or self._kind != "da3":
+            raise AdapterError("run_depth_metres needs a loaded DA3 model")
+        try:
+            import torch
+
+            from ugv_perception.depth import geometry_gpu
+        except ImportError as exc:
+            raise AdapterError("torch is not installed") from exc
+        span = stage if stage is not None else _no_timing
+        try:
+            with span("depth_infer"):
+                self.ensure_hw(*model_size)
+                with torch.inference_mode():
+                    blob, sized = geometry_gpu.preprocess_nchw_gpu(rgb, "cuda")
+                    if sized != tuple(model_size):
+                        raise AdapterError("preprocess size disagrees with K_model")
+                    depth, sky = self._model(blob)
+                torch.cuda.synchronize()
+            with span("depth_post"):
+                with torch.inference_mode():
+                    metres = depth[0].float() * (float(focal) / METRIC_SCALE)
+                    on_camera = geometry_gpu.hole_safe_resize_gpu(metres, sky[0], tuple(out_hw))
+                    return on_camera.cpu().numpy()
         except AdapterError:
             raise
         except Exception as exc:

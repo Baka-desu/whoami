@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -122,3 +124,209 @@ def test_export_wrapper_stops_before_sky_fill() -> None:
     assert "class Da3HeadExport" in text
     assert "_process_depth_head" in text
     assert "_process_mono_sky_estimation(" not in text.split("class Da3HeadExport", 1)[1]
+
+
+# --- GPU twins of the pre/post-processing (torch). Same maths as the numpy reference above. ---------------
+
+
+def _torch_devices() -> list[str]:
+    from ugv_perception.backend.device import cuda_available
+
+    return ["cpu"] + (["cuda"] if cuda_available() else [])
+
+
+@pytest.fixture(params=_torch_devices())
+def device(request: pytest.FixtureRequest) -> str:
+    pytest.importorskip("torch")
+    return request.param
+
+
+def _numpy_depth_for(raw: np.ndarray, sky: np.ndarray, focal: float, out_hw: tuple[int, int]) -> np.ndarray:
+    return hole_safe_resize(meters_from_raw(raw, focal), sky, out_hw).astype(np.float32)
+
+
+def test_gpu_plane_matches_numpy_to_under_a_millimetre(device: str) -> None:
+    import torch
+
+    from ugv_perception.depth.geometry_gpu import hole_safe_resize_gpu
+
+    h, w = 480, 640
+    k_cam = _k(h, w, fx=594.58, fy=596.22)
+    km, (mh, mw) = k_model(k_cam, (h, w))
+    focal = focal_model(km)
+    raw = np.full((mh, mw), 2.0 * 300.0 / focal, dtype=np.float32)
+    sky = np.zeros((mh, mw), dtype=np.float32)
+    want = _numpy_depth_for(raw, sky, focal, (h, w))
+    metres = torch.from_numpy(raw).to(device) * (focal / 300.0)
+    got = hole_safe_resize_gpu(metres, torch.from_numpy(sky).to(device), (h, w)).cpu().numpy()
+    assert got.dtype == np.float32 and got.shape == (h, w)
+    assert np.array_equal(np.isnan(got), np.isnan(want))
+    assert float(np.max(np.abs(got - want))) < 1e-3
+    xyz = backproject(got, k_cam)
+    center = xyz[np.argmin(np.abs(xyz[:, 0]) + np.abs(xyz[:, 1]))]
+    assert abs(float(center[2]) - 2.0) < 1e-3
+
+
+def test_gpu_resize_matches_numpy_with_holes_and_sky(device: str) -> None:
+    import torch
+
+    from ugv_perception.depth.geometry_gpu import hole_safe_resize_gpu
+
+    rng = np.random.default_rng(3)
+    mh, mw = 378, 504
+    metres = rng.uniform(0.5, 9.0, (mh, mw)).astype(np.float32)
+    metres[40:60, 100:140] = np.nan
+    sky = np.zeros((mh, mw), dtype=np.float32)
+    sky[0:90, :] = 0.8
+    sky[200, 200] = SKY_THRESHOLD
+    want = hole_safe_resize(metres, sky, (480, 640)).astype(np.float32)
+    got = hole_safe_resize_gpu(
+        torch.from_numpy(metres).to(device), torch.from_numpy(sky).to(device), (480, 640)
+    ).cpu().numpy()
+    assert np.isnan(want).any() and np.isfinite(want).any()
+    assert np.array_equal(np.isnan(got), np.isnan(want))
+    ok = np.isfinite(want)
+    assert float(np.max(np.abs(got[ok] - want[ok]))) < 1e-3
+
+
+@pytest.mark.parametrize("hw", [(480, 640), (408, 612), (480, 600), (28, 28)])
+def test_gpu_preprocess_matches_numpy(device: str, hw: tuple[int, int]) -> None:
+    from ugv_perception.depth.geometry_gpu import preprocess_nchw_gpu
+
+    rgb = np.random.default_rng(5).integers(0, 256, (hw[0], hw[1], 3), dtype=np.uint8)
+    want, want_hw = preprocess_nchw(rgb)
+    got_t, got_hw = preprocess_nchw_gpu(rgb, device)
+    got = got_t.cpu().numpy()
+    assert got_hw == want_hw
+    assert got.shape == want.shape and got.dtype == np.float32
+    diff = np.abs(got - want)
+    # The reference truncates to 8 bits. Where the exact result is an integer, float64 noise (126.99999999999999)
+    # truncates it down and the float32 path (127.0) does not: one 8-bit step, 1/255/0.225 = 0.0175, on well
+    # under 1 % of the values of a white-noise image (the worst case; a photo has far fewer exact integers).
+    assert float(diff.max()) <= 0.02
+    assert float(np.mean(diff > 1e-4)) < 5e-3
+
+
+def test_depth_channel_uses_the_backends_gpu_path_and_keeps_the_stage_hook() -> None:
+    from contextlib import contextmanager
+
+    from ugv_perception.backend.depth_live import DepthChannel
+
+    class _GpuBackend:
+        def __init__(self) -> None:
+            self.args: tuple | None = None
+
+        def ensure_hw(self, h: int, w: int) -> None:
+            raise AssertionError("the GPU path sizes itself")
+
+        def run_all(self, blob):
+            raise AssertionError("the GPU path must not use the numpy run_all")
+
+        def run_depth_metres(self, rgb, focal, model_hw_, out_hw, stage):
+            self.args = (rgb.shape, round(focal, 3), model_hw_, out_hw)
+            with stage("depth_infer"):
+                pass
+            with stage("depth_post"):
+                return np.full(out_hw, 2.0, dtype=np.float32)
+
+    seen: list[str] = []
+
+    @contextmanager
+    def hook(name: str):
+        seen.append(name)
+        yield
+
+    rgb = np.zeros((28, 28, 3), dtype=np.uint8)
+    k = (200.0, 0.0, 13.5, 0.0, 200.0, 13.5, 0.0, 0.0, 1.0)
+    backend = _GpuBackend()
+    depth_m, points = DepthChannel(backend).maps(rgb, k, stage=hook)
+    km, mhw = k_model(np.asarray(k).reshape(3, 3), (28, 28))
+    assert backend.args == ((28, 28, 3), round(focal_model(km), 3), mhw, (28, 28))
+    assert seen[:2] == ["depth_infer", "depth_post"]
+    assert depth_m.shape == (28, 28) and depth_m.dtype == np.float32
+    assert points.shape == (28 * 28, 3) and np.allclose(points[:, 2], 2.0)
+
+
+# --- Real DA3 weights on CUDA. Skipped when either is missing. ---------------------------------------------
+
+_DA3_DIR = Path(__file__).resolve().parents[3] / "weights" / "da3metric-large"
+_K_WEBCAM = np.array(
+    [[594.58444, 0.0, 311.15451], [0.0, 596.2187, 232.11396], [0.0, 0.0, 1.0]], dtype=np.float64
+)
+
+
+def _synthetic_frames() -> list[np.ndarray]:
+    """Three 640x480 frames with different structure: blocks over noise, a ramp with boxes, smooth colour."""
+    rng = np.random.default_rng(7)
+    yy, xx = np.mgrid[0:480, 0:640]
+
+    def upsampled(grid: np.ndarray) -> np.ndarray:
+        ys = np.linspace(0, grid.shape[0] - 1, 480)
+        xs = np.linspace(0, grid.shape[1] - 1, 640)
+        y0 = np.minimum(ys.astype(int), grid.shape[0] - 2)
+        x0 = np.minimum(xs.astype(int), grid.shape[1] - 2)
+        wy = (ys - y0)[:, None, None]
+        wx = (xs - x0)[None, :, None]
+        rows = grid[y0] * (1 - wy) + grid[y0 + 1] * wy
+        return rows[:, x0] * (1 - wx) + rows[:, x0 + 1] * wx
+
+    blocks = 0.55 * upsampled(rng.random((10, 14, 3))) + 0.45 * np.linspace(0, 1, 480)[:, None, None]
+    for _ in range(14):
+        r, c = int(rng.integers(0, 420)), int(rng.integers(0, 560))
+        blocks[r : r + int(rng.integers(20, 60)), c : c + int(rng.integers(30, 80))] = rng.random(3)
+    blocks = np.clip((blocks + rng.normal(0, 0.03, blocks.shape)) * 255.0, 0, 255)
+
+    ramp = np.stack([xx / 640 * 255, yy / 480 * 255, (xx + yy) / 1120 * 255], axis=2)
+    for _ in range(12):
+        r, c = int(rng.integers(0, 400)), int(rng.integers(0, 540))
+        ramp[r : r + int(rng.integers(30, 80)), c : c + int(rng.integers(40, 100))] = rng.random(3) * 255
+    ramp = np.clip(ramp + rng.normal(0, 4, ramp.shape), 0, 255)
+
+    smooth = upsampled(rng.random((6, 8, 3))) * 255.0
+    return [f.astype(np.uint8) for f in (blocks, ramp, smooth)]
+
+
+@pytest.fixture(scope="module")
+def da3_cuda():
+    from ugv_perception.backend.device import cuda_available
+
+    if not cuda_available():
+        pytest.skip("CUDA missing")
+    if not (_DA3_DIR / "model.safetensors").is_file():
+        pytest.skip("DA3 safetensors missing")
+    from ugv_perception.backend.cuda_pytorch import CudaPytorchTensorBackend
+
+    backend = CudaPytorchTensorBackend()
+    backend.load(str(_DA3_DIR), kind="da3")
+    return backend
+
+
+class _NumpyPath:
+    """Hides run_depth_metres so DepthChannel takes the numpy pre/post-processing."""
+
+    def __init__(self, backend: object) -> None:
+        self._backend = backend
+
+    def ensure_hw(self, h: int, w: int) -> None:
+        self._backend.ensure_hw(h, w)
+
+    def run_all(self, blob):
+        return self._backend.run_all(blob)
+
+
+@pytest.mark.filterwarnings("ignore:.*torch.jit.script.*")  # raised by the DA3 package at import, not by us
+def test_gpu_path_matches_the_numpy_path_on_real_weights(da3_cuda) -> None:
+    from ugv_perception.backend.depth_live import DepthChannel
+
+    for rgb in _synthetic_frames():
+        want, want_pts = DepthChannel(_NumpyPath(da3_cuda)).maps(rgb, _K_WEBCAM)
+        got, got_pts = DepthChannel(da3_cuda).maps(rgb, _K_WEBCAM)
+        assert got.dtype == np.float32 and got.shape == want.shape == (480, 640)
+        assert np.array_equal(np.isnan(got), np.isnan(want))
+        ok = np.isfinite(want)
+        assert ok.sum() > 0.9 * ok.size
+        # Measured on these frames: 0.2 to 0.7 mm. The difference is the 8-bit truncation flips in the
+        # resize, which the model turns into sub-millimetre depth noise. 2 mm and 1 % are the bounds.
+        assert float(np.max(np.abs(got[ok] - want[ok]))) < 2e-3
+        assert float(np.max(np.abs(got[ok] - want[ok]) / want[ok])) < 1e-2
+        assert got_pts.shape == want_pts.shape

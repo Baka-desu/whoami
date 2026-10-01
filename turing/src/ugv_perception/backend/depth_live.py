@@ -40,6 +40,9 @@ class DepthChannel:
         `stage(name)` is an optional timing hook returning a context manager. It sees
         "depth_infer" (backend sizing, preprocess, model run) and "depth_post"
         (meters, hole-safe resize, back-projection). It does not change the result.
+
+        A backend with `run_depth_metres` (CUDA) does the preprocess and the meters/resize on its own
+        device and returns the camera-sized depth; every other backend takes the numpy path below.
         """
         span = stage if stage is not None else _no_timing
         if rgb.dtype != np.uint8 or rgb.ndim != 3 or rgb.shape[2] != 3:
@@ -49,6 +52,11 @@ class DepthChannel:
         k_m, (mh, mw) = k_model(k_cam, (height, width))
         if model_hw(height, width) != (mh, mw):
             raise AdapterError("model size disagrees with K_model")
+        on_device = getattr(self._backend, "run_depth_metres", None)
+        if callable(on_device):
+            on_camera = on_device(rgb, focal_model(k_m), (mh, mw), (height, width), span)
+            with span("depth_post"):
+                return on_camera, backproject(on_camera, k_cam)
         with span("depth_infer"):
             self._backend.ensure_hw(mh, mw)
             blob, sized = preprocess_nchw(rgb)
