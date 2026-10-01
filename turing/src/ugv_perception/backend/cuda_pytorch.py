@@ -39,6 +39,9 @@ class CudaPytorchTensorBackend:
         self._fallback_logits: np.ndarray | None = None
         self.seg_post_disabled = False
         self.device = "cuda"
+        # DA3 only: run the forward pass under fp16 autocast (about 2x faster on the RTX 4060). Never applied
+        # to the RUGD segmentation net. Outputs are cast back to float32 before anything reads them.
+        self.da3_half = True
 
     def load(self, weights_path: str, kind: str = "rugd") -> None:
         path = Path(weights_path)
@@ -120,6 +123,16 @@ class CudaPytorchTensorBackend:
                 self._fallback_logits = logits.detach().cpu().numpy()
             raise AdapterError("CUDA seg decode failed") from exc
 
+    def _da3_forward(self, tensor: object) -> tuple[object, object]:
+        """DA3 depth_raw and sky as float32 tensors, under fp16 autocast when `da3_half` is on."""
+        import torch
+
+        if not self.da3_half:
+            return self._model(tensor)
+        with torch.autocast("cuda", dtype=torch.float16):
+            depth, sky = self._model(tensor)
+        return depth.float(), sky.float()
+
     def run_all(self, blob: NDArray[np.float32]) -> list[np.ndarray]:
         if self._model is None or self._kind is None:
             raise AdapterError("CudaPytorchTensorBackend.load() was not called")
@@ -135,7 +148,7 @@ class CudaPytorchTensorBackend:
                 if self._kind == "rugd":
                     logits = self._model(pixel_values=tensor).logits
                     return [logits.detach().cpu().numpy()]
-                depth, sky = self._model(tensor)
+                depth, sky = self._da3_forward(tensor)
                 return [
                     depth.detach().cpu().numpy(),
                     sky.detach().cpu().numpy(),
@@ -176,7 +189,7 @@ class CudaPytorchTensorBackend:
                     blob, sized = geometry_gpu.preprocess_nchw_gpu(rgb, "cuda")
                     if sized != tuple(model_size):
                         raise AdapterError("preprocess size disagrees with K_model")
-                    depth, sky = self._model(blob)
+                    depth, sky = self._da3_forward(blob)
                 torch.cuda.synchronize()
             with span("depth_post"):
                 with torch.inference_mode():
