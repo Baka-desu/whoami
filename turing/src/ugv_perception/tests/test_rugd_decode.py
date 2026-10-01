@@ -77,6 +77,25 @@ def test_ontology_maps_dirt_and_tree() -> None:
     assert set(CLASS_NAMES) == set(table.name_to_class)
 
 
+def test_infer_falls_back_to_numpy_when_run_seg_fails() -> None:
+    class _Backend:
+        def run_seg(self, blob, out_hw):
+            raise AdapterError("post missing")
+
+        def run(self, blob):
+            logits = np.full((1, 25, 2, 2), -20.0, dtype=np.float32)
+            logits[0, 4] = 8.0
+            return logits
+
+    from ugv_perception.adapter.rugd import RugdSegformerAdapter
+
+    adapter = RugdSegformerAdapter(
+        _Backend(), input_hw=(2, 2), mean=(0.0, 0.0, 0.0), std=(1.0, 1.0, 1.0)
+    )
+    raw = adapter.infer(_frame(4, 6))
+    assert set(int(x) for x in np.unique(raw.label_ids).tolist()) == {4}
+
+
 def test_compose_tick_uses_rugd_table() -> None:
     class _Scripted:
         def infer(self, frame: ImageFrame):

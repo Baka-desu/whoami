@@ -319,6 +319,42 @@ def _masks_from_proto(
     return masks
 
 
+def _compile_seg_post(
+    core: object,
+    device: str,
+    channels: int,
+    in_h: int,
+    in_w: int,
+    out_h: int,
+    out_w: int,
+) -> object:
+    """Bilinear upsample + softmax + argmax on the same OpenVINO device as the net."""
+    from openvino import Model, Type
+    from openvino import opset13 as ops
+
+    logits_p = ops.parameter([1, channels, in_h, in_w], Type.f32, name="logits")
+    interp = ops.interpolate(
+        logits_p,
+        np.array([out_h, out_w], dtype=np.int64),
+        mode="linear",
+        shape_calculation_mode="sizes",
+        coordinate_transformation_mode="half_pixel",
+        axes=np.array([2, 3], dtype=np.int64),
+    )
+    prob = ops.softmax(interp, axis=1)
+    topk = ops.topk(
+        prob, np.int32(1), axis=1, mode="max", sort="none", index_element_type="i32"
+    )
+    axes = np.array([1], dtype=np.int64)
+    labels = ops.squeeze(topk.output(1), axes)
+    scores = ops.squeeze(topk.output(0), axes)
+    model = Model([labels, scores], [logits_p], "rugd_seg_post")
+    try:
+        return core.compile_model(model, device)
+    except Exception as exc:
+        raise AdapterError("OpenVINO seg-post compile failed") from exc
+
+
 class OpenVinoGpuTensorBackend:
     """Compile an IR on GPU and return the first output tensor. No YOLO decode."""
 
@@ -329,6 +365,8 @@ class OpenVinoGpuTensorBackend:
         self._core = None
         self._model = None
         self._hw: tuple[int, int] | None = None
+        self._post = None
+        self._post_key: tuple | None = None
         self.device = _DEVICE
 
     def load(self, weights_path: str, input_hw: tuple[int, int] | None = None) -> None:
@@ -394,6 +432,39 @@ class OpenVinoGpuTensorBackend:
         except Exception as exc:
             raise AdapterError("OpenVINO GPU run failed") from exc
         return out
+
+    def run_seg(
+        self, blob: NDArray[np.float32], out_hw: tuple[int, int]
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Logits on the compiled device, then interpolate+softmax on that same device."""
+        logits = self.run(blob)
+        return self._decode_seg(logits, out_hw)
+
+    def _decode_seg(
+        self, logits: np.ndarray, out_hw: tuple[int, int]
+    ) -> tuple[np.ndarray, np.ndarray]:
+        if self._core is None:
+            raise AdapterError("OpenVinoGpuTensorBackend.load() was not called")
+        a = np.asarray(logits, dtype=np.float32)
+        if a.ndim == 3:
+            a = a[None, ...]
+        if a.ndim != 4 or a.shape[0] != 1:
+            raise AdapterError("RUGD logits for GPU decode must be (1, C, h, w)")
+        _n, channels, lh, lw = a.shape
+        oh, ow = int(out_hw[0]), int(out_hw[1])
+        key = (str(self.device), channels, lh, lw, oh, ow)
+        if self._post is None or self._post_key != key:
+            self._post = _compile_seg_post(self._core, str(self.device), channels, lh, lw, oh, ow)
+            self._post_key = key
+        try:
+            result = self._post([a])
+            labels = np.squeeze(np.asarray(result[self._post.output(0)])).astype(np.int32)
+            scores = np.squeeze(np.asarray(result[self._post.output(1)])).astype(np.float32)
+        except AdapterError:
+            raise
+        except Exception as exc:
+            raise AdapterError("OpenVINO seg decode failed") from exc
+        return labels, scores
 
     def run_all(self, blob: NDArray[np.float32]) -> list[np.ndarray]:
         if self._compiled is None:

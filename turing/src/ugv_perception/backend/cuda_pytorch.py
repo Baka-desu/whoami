@@ -65,6 +65,39 @@ class CudaPytorchTensorBackend:
     def run(self, blob: NDArray[np.float32]) -> np.ndarray:
         return self.run_all(blob)[0]
 
+    def run_seg(
+        self, blob: NDArray[np.float32], out_hw: tuple[int, int]
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Interpolate + softmax on CUDA. Labels/scores copied out once."""
+        if self._model is None or self._kind != "rugd":
+            raise AdapterError("CUDA seg decode requires a loaded RUGD net")
+        if not isinstance(blob, np.ndarray) or blob.dtype != np.float32 or blob.ndim != 4:
+            raise TypeError("blob must be float32 NCHW")
+        oh, ow = int(out_hw[0]), int(out_hw[1])
+        try:
+            import torch
+            import torch.nn.functional as F
+        except ImportError as exc:
+            raise AdapterError("torch is not installed") from exc
+        try:
+            tensor = torch.from_numpy(blob).to("cuda")
+            with torch.inference_mode():
+                logits = self._model(pixel_values=tensor).logits
+                up = F.interpolate(
+                    logits, size=(oh, ow), mode="bilinear", align_corners=False
+                )
+                prob = torch.softmax(up, dim=1)
+                labels = torch.argmax(prob, dim=1)
+                scores = torch.gather(prob, 1, labels.unsqueeze(1)).squeeze(1)
+                return (
+                    labels[0].detach().cpu().numpy().astype(np.int32, copy=False),
+                    scores[0].detach().cpu().numpy().astype(np.float32, copy=False),
+                )
+        except AdapterError:
+            raise
+        except Exception as exc:
+            raise AdapterError("CUDA seg decode failed") from exc
+
     def run_all(self, blob: NDArray[np.float32]) -> list[np.ndarray]:
         if self._model is None or self._kind is None:
             raise AdapterError("CudaPytorchTensorBackend.load() was not called")

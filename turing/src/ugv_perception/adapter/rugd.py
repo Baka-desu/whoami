@@ -157,12 +157,39 @@ class RugdSegformerAdapter:
             blob = preprocess_rgb(
                 frame.rgb, input_hw=self._input_hw, mean=self._mean, std=self._std
             )
+            rh, rw = int(frame.rgb.shape[0]), int(frame.rgb.shape[1])
+            run_seg = getattr(self._backend, "run_seg", None)
+            if callable(run_seg):
+                try:
+                    labels, scores = run_seg(blob, (rh, rw))
+                    return _raw_from_maps(labels, scores, frame)
+                except AdapterError:
+                    pass
             logits = self._backend.run(blob)
         except AdapterError:
             raise
         except Exception as exc:
             raise AdapterError("RUGD backend failed") from exc
         return decode_rugd_logits(logits, frame)
+
+
+def _raw_from_maps(labels: np.ndarray, scores: np.ndarray, frame: ImageFrame) -> RawSemOutput:
+    rh, rw = int(frame.rgb.shape[0]), int(frame.rgb.shape[1])
+    labels_a = np.squeeze(np.asarray(labels, dtype=np.int32))
+    scores_a = np.squeeze(np.asarray(scores, dtype=np.float32))
+    if labels_a.shape != (rh, rw) or scores_a.shape != (rh, rw):
+        raise AdapterError("RUGD GPU decode size must match the camera")
+    if np.any(~np.isfinite(scores_a)) or np.any(scores_a < 0.0) or np.any(scores_a > 1.0):
+        raise AdapterError("RUGD scores are not finite and in [0,1]")
+    return RawSemOutput(
+        adapter_id=ADAPTER_ID,
+        label_ids=labels_a,
+        raw_scores=scores_a,
+        id_to_name={i: CLASS_NAMES[i] for i in range(N_CLASSES)},
+        stamp_ns=frame.stamp_ns,
+        frame_id=frame.frame_id,
+        hw=(rh, rw),
+    )
 
 
 def _resize_map(src: np.ndarray, h: int, w: int) -> np.ndarray:
