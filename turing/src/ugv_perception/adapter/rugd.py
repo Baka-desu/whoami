@@ -159,12 +159,13 @@ class RugdSegformerAdapter:
             )
             rh, rw = int(frame.rgb.shape[0]), int(frame.rgb.shape[1])
             run_seg = getattr(self._backend, "run_seg", None)
-            if callable(run_seg):
+            if callable(run_seg) and not getattr(self._backend, "seg_post_disabled", False):
                 try:
                     labels, scores = run_seg(blob, (rh, rw))
                     return _raw_from_maps(labels, scores, frame)
-                except AdapterError:
-                    pass
+                except AdapterError as exc:
+                    if "not finite" in str(exc):
+                        raise
             logits = self._backend.run(blob)
         except AdapterError:
             raise

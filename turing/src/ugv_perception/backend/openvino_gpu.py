@@ -329,7 +329,7 @@ def _compile_seg_post(
     out_w: int,
 ) -> object:
     """Bilinear upsample + softmax + argmax on the same OpenVINO device as the net."""
-    from openvino import Model, Type
+    from openvino import Model, Type, properties
     from openvino import opset13 as ops
 
     logits_p = ops.parameter([1, channels, in_h, in_w], Type.f32, name="logits")
@@ -350,7 +350,11 @@ def _compile_seg_post(
     scores = ops.squeeze(topk.output(0), axes)
     model = Model([labels, scores], [logits_p], "rugd_seg_post")
     try:
-        return core.compile_model(model, device)
+        return core.compile_model(
+            model, device, {properties.hint.inference_precision: Type.f32}
+        )
+    except AdapterError:
+        raise
     except Exception as exc:
         raise AdapterError("OpenVINO seg-post compile failed") from exc
 
@@ -367,6 +371,8 @@ class OpenVinoGpuTensorBackend:
         self._hw: tuple[int, int] | None = None
         self._post = None
         self._post_key: tuple | None = None
+        self._fallback_logits: np.ndarray | None = None
+        self.seg_post_disabled = False
         self.device = _DEVICE
 
     def load(self, weights_path: str, input_hw: tuple[int, int] | None = None) -> None:
@@ -422,6 +428,10 @@ class OpenVinoGpuTensorBackend:
                 self._hw = (int(dims[2]), int(dims[3]))
 
     def run(self, blob: NDArray[np.float32]) -> np.ndarray:
+        if self._fallback_logits is not None:
+            out = self._fallback_logits
+            self._fallback_logits = None
+            return out
         if self._compiled is None:
             raise AdapterError("OpenVinoGpuTensorBackend.load() was not called")
         if not isinstance(blob, np.ndarray) or blob.dtype != np.float32 or blob.ndim != 4:
@@ -438,7 +448,14 @@ class OpenVinoGpuTensorBackend:
     ) -> tuple[np.ndarray, np.ndarray]:
         """Logits on the compiled device, then interpolate+softmax on that same device."""
         logits = self.run(blob)
-        return self._decode_seg(logits, out_hw)
+        try:
+            return self._decode_seg(logits, out_hw)
+        except AdapterError as exc:
+            if "not finite" in str(exc):
+                raise
+            self.seg_post_disabled = True
+            self._fallback_logits = np.asarray(logits, dtype=np.float32)
+            raise
 
     def _decode_seg(
         self, logits: np.ndarray, out_hw: tuple[int, int]
@@ -450,19 +467,29 @@ class OpenVinoGpuTensorBackend:
             a = a[None, ...]
         if a.ndim != 4 or a.shape[0] != 1:
             raise AdapterError("RUGD logits for GPU decode must be (1, C, h, w)")
+        if not np.isfinite(a).all():
+            raise AdapterError("RUGD logits are not finite")
         _n, channels, lh, lw = a.shape
         oh, ow = int(out_hw[0]), int(out_hw[1])
         key = (str(self.device), channels, lh, lw, oh, ow)
         if self._post is None or self._post_key != key:
-            self._post = _compile_seg_post(self._core, str(self.device), channels, lh, lw, oh, ow)
-            self._post_key = key
+            try:
+                self._post = _compile_seg_post(
+                    self._core, str(self.device), channels, lh, lw, oh, ow
+                )
+                self._post_key = key
+            except AdapterError:
+                self.seg_post_disabled = True
+                raise
         try:
             result = self._post([a])
             labels = np.squeeze(np.asarray(result[self._post.output(0)])).astype(np.int32)
             scores = np.squeeze(np.asarray(result[self._post.output(1)])).astype(np.float32)
         except AdapterError:
+            self.seg_post_disabled = True
             raise
         except Exception as exc:
+            self.seg_post_disabled = True
             raise AdapterError("OpenVINO seg decode failed") from exc
         return labels, scores
 
