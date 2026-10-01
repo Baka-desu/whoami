@@ -15,7 +15,23 @@ const bool = (v: boolean | undefined, yes = 'TRUE', no = 'FALSE') => (v === unde
 
 // Live robot state from ugv_nav (Dev 2) and ugv_navigation (Dev 4). A heartbeat that stops
 // arriving reads NO SIGNAL (fail-closed), never its last value.
-export function RobotPanel({ robot: r, estop }: { robot: RobotSnapshot; estop: boolean }) {
+export function NavMapWidget({ robot }: { robot: RobotSnapshot }) {
+  return (
+    <section className="section wcontent">
+      <h3>Navigation map</h3>
+      <NavMap robot={robot} />
+      <div className="mini-legend">
+        <span><i style={{ background: '#153a4d' }} />FREE</span>
+        <span><i style={{ background: '#2c2c2c' }} />UNKNOWN</span>
+        <span><i style={{ background: '#ff2a2a' }} />LETHAL</span>
+        <span><i style={{ background: '#eafff7' }} />PLAN</span>
+      </div>
+      <p className="dim">Nav2 local costmap, robot heading up.</p>
+    </section>
+  )
+}
+
+export function RobotWidget({ robot: r, estop }: { robot: RobotSnapshot; estop: boolean }) {
   const pose = fresh(r.poseValid, r.now)
   const hb = fresh(r.nav2Heartbeat, r.now)
   const pd = fresh(r.perceptionDegraded, r.now)
@@ -27,21 +43,8 @@ export function RobotPanel({ robot: r, estop }: { robot: RobotSnapshot; estop: b
   const safetyLevel = safety ? Number(safety.match(/^L(\d)/)?.[1]) : undefined
 
   return (
-    <>
-      <section className="section">
-        <h3>Navigation map</h3>
-        <NavMap robot={r} />
-        <div className="mini-legend">
-          <span><i style={{ background: '#153a4d' }} />FREE</span>
-          <span><i style={{ background: '#2c2c2c' }} />UNKNOWN</span>
-          <span><i style={{ background: '#ff2a2a' }} />LETHAL</span>
-          <span><i style={{ background: '#fff' }} />PLAN</span>
-        </div>
-        <p className="dim">Nav2 local costmap, robot heading up.</p>
-      </section>
-
-      <section className="section">
-        <h3>Robot</h3>
+    <section className="section wcontent">
+      <h3>Robot</h3>
         <Row k="safety arbiter" v={safety ?? 'NO SIGNAL'} tone={safetyLevel === undefined ? 'warn' : safetyLevel < 4 ? 'trip' : undefined} />
         <Row k="e-stop (sent)" v={estop ? 'ASSERTED' : 'released'} tone={estop ? 'trip' : undefined} />
         <Row k="pose_valid" v={bool(pose)} tone={pose === false ? 'trip' : pose === undefined ? 'warn' : undefined} />
@@ -53,7 +56,6 @@ export function RobotPanel({ robot: r, estop }: { robot: RobotSnapshot; estop: b
         <Row k="speed (odom)" v={odom ? `${odom.v.toFixed(2)} m/s · ${odom.w.toFixed(2)} rad/s` : 'NO SIGNAL'} />
         <Row k="cmd_vel_nav2" v={cmd ? `${cmd.v.toFixed(2)} m/s · ${cmd.w.toFixed(2)} rad/s` : 'idle'} />
         <p className="dim">Candidate only; the safety authority owns /cmd_vel.</p>
-      </section>
-    </>
+    </section>
   )
 }
