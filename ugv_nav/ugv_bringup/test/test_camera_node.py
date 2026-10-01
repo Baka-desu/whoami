@@ -95,6 +95,40 @@ def test_publishes_system_and_ui_topics_from_one_capture(tmp_path, video):
         rclpy.shutdown()
 
 
+def test_calibration_mode_publishes_raw_images_only(tmp_path, video):
+    node = start(["-p", "calibration_mode:=true", "-p", f"device:={video}", "-p", "width:=640", "-p", "height:=480"])
+    probe = rclpy.create_node("camera_probe")
+    imgs: list = []
+    probe.create_subscription(Image, "/camera/image_raw", imgs.append,
+                              QoSProfile(history=HistoryPolicy.KEEP_LAST, depth=5, reliability=ReliabilityPolicy.RELIABLE))
+    ex = SingleThreadedExecutor()
+    ex.add_node(node)
+    ex.add_node(probe)
+    try:
+        end = time.monotonic() + 2.0
+        while time.monotonic() < end:
+            ex.spin_once(timeout_sec=0.02)
+        assert imgs and imgs[-1].encoding == "rgb8"
+        # nothing that downstream could mistake for a calibrated camera
+        assert probe.count_publishers("/camera/camera_info") == 0
+        assert probe.count_publishers("/camera_info") == 0
+        assert probe.count_publishers("/image_raw/compressed") == 0
+    finally:
+        ex.shutdown()
+        node.close()
+        node.destroy_node()
+        probe.destroy_node()
+        rclpy.shutdown()
+
+
+def test_refuses_cleanly_when_the_calibration_file_is_missing(tmp_path, video):
+    with pytest.raises(RuntimeError, match="refusing to start"):
+        try:
+            start(["-p", f"calibration_file:={tmp_path / 'nope.yaml'}", "-p", f"device:={video}"])
+        finally:
+            rclpy.shutdown()
+
+
 def test_refuses_to_start_without_a_valid_calibration(tmp_path, video):
     bad = calibration_to_yaml_dict(fixture_calibration())
     bad["camera_matrix"]["data"] = [0.0] * 9

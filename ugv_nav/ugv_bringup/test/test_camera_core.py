@@ -5,7 +5,9 @@ from __future__ import annotations
 import pytest
 import yaml
 
-from ugv_bringup.camera_core import CaptureError, RatePacer, camera_info_fields, check_capture_size, parse_device
+from ugv_bringup.camera_core import (
+    CaptureError, RatePacer, camera_info_fields, check_capture_size, load_calibration_or_refuse, parse_device,
+)
 from ugv_localization.camera import CalibrationError, calibration_to_yaml_dict, load_calibration
 from ugv_localization.camera.calib import CameraCalibration
 
@@ -70,3 +72,31 @@ def test_pacer_limits_a_30fps_stream_to_about_5hz():
 def test_pacer_rejects_nonpositive_rate():
     with pytest.raises(ValueError):
         RatePacer(0.0)
+
+
+def test_a_good_calibration_loads_through_the_refusal_wrapper(tmp_path):
+    path = tmp_path / "ok.yaml"
+    path.write_text(yaml.safe_dump(calibration_to_yaml_dict(fixture_calibration())), encoding="utf-8")
+    assert load_calibration_or_refuse(load_calibration, str(path)).width == 640
+
+
+@pytest.mark.parametrize(
+    "content",
+    [None, "", "just a string", "key: [unclosed", "image_width: 640"],
+    ids=["missing", "empty", "not-a-mapping", "malformed-yaml", "missing-keys"],
+)
+def test_every_bad_calibration_file_is_one_clean_refusal(tmp_path, content):
+    path = tmp_path / "bad.yaml"
+    if content is not None:
+        path.write_text(content, encoding="utf-8")
+    with pytest.raises(CaptureError, match="refusing to start"):
+        load_calibration_or_refuse(load_calibration, str(path))
+
+
+def test_a_zero_k_file_is_refused_cleanly(tmp_path):
+    bad = calibration_to_yaml_dict(fixture_calibration())
+    bad["camera_matrix"]["data"] = [0.0] * 9
+    path = tmp_path / "zero.yaml"
+    path.write_text(yaml.safe_dump(bad), encoding="utf-8")
+    with pytest.raises(CaptureError, match="refusing to start"):
+        load_calibration_or_refuse(load_calibration, str(path))

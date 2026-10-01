@@ -37,6 +37,19 @@ def healthy(arb: SafetyArbiter, t: int) -> None:
 def test_shipped_config_loads():
     c = load_config(CONFIG_YAML)
     assert (c.perception_s, c.localization_s, c.nav2_s) == (0.5, 0.5, 0.5)  # dev.md watchdog table
+    assert c.ramp_on_hold is False  # architecture.md §3.1: zero twist, not a ramp
+
+
+def test_shipped_config_drops_to_zero_at_once_on_a_hold():
+    a = SafetyArbiter(load_config(CONFIG_YAML))
+    healthy(a, 0)
+    a.on_candidate(0.4, 0.8, 0)
+    assert a.step(0).linear == 0.4
+    t = int(0.05 * S)
+    healthy(a, t)
+    a.on_pose_valid(False, t)
+    d = a.step(t)
+    assert d.level is Level.DEGRADED and (d.linear, d.angular) == (0.0, 0.0)
 
 
 def test_fresh_arbiter_holds_until_every_source_has_spoken():

@@ -1,7 +1,7 @@
 """Safety arbiter node: the only publisher of the base /cmd_vel (architecture.md §3.1).
 
 Subscribes : /cmd_vel_nav2             geometry_msgs/Twist  Nav2 candidate (Dev 4)
-             /ugv/e_stop               std_msgs/Bool        operator kill, latched until released
+             /ugv/e_stop               std_msgs/Bool        operator kill, latched until released (volatile + transient-local)
              /ugv/pose_valid           std_msgs/Bool        Dev 2, 20 Hz heartbeat
              /ugv/perception_degraded  std_msgs/Bool        Dev 1, every processed frame
              /ugv/nav2_heartbeat       std_msgs/Bool        Dev 4, 20 Hz heartbeat
@@ -39,7 +39,17 @@ class SafetyArbiterNode(Node):
         # A latched CameraInfo must not read as a fresh frame to a late joiner, so volatile here;
         # compatible with the driver's reliable + transient-local publisher.
         self.create_subscription(Twist, "/cmd_vel_nav2", self._on_candidate, reliable)
+        # The kill switch is subscribed twice on purpose. A volatile subscription hears every kind of
+        # publisher (the `ros2 topic pub` CLI, rosbridge). A transient-local one additionally receives
+        # the last latched value from a latching publisher, so an arbiter that (re)starts after an
+        # e-stop was asserted still sees it. A transient-local subscription alone would ignore volatile
+        # publishers. The handler is idempotent, so a message arriving on both is harmless.
         self.create_subscription(Bool, "/ugv/e_stop", self._on_estop, reliable)
+        self.create_subscription(
+            Bool, "/ugv/e_stop", self._on_estop,
+            QoSProfile(history=HistoryPolicy.KEEP_LAST, depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                       durability=DurabilityPolicy.TRANSIENT_LOCAL),
+        )
         self.create_subscription(Bool, "/ugv/pose_valid", self._on_pose, reliable)
         self.create_subscription(Bool, "/ugv/perception_degraded", self._on_perception, reliable)
         self.create_subscription(Bool, "/ugv/nav2_heartbeat", self._on_nav2, reliable)

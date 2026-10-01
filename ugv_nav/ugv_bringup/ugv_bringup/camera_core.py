@@ -7,7 +7,11 @@ that refuses zero / fake K), so a driver can never publish a lying CameraInfo.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
+from typing import TypeVar
+
+T = TypeVar("T")
 
 
 class CaptureError(RuntimeError):
@@ -36,6 +40,15 @@ def camera_info_fields(cal: object) -> CameraInfoFields:
         r=tuple(cal.r),  # type: ignore[attr-defined]
         p=tuple(cal.p),  # type: ignore[attr-defined]
     )
+
+
+def load_calibration_or_refuse(loader: Callable[[str], T], path: str) -> T:
+    """Run Dev 2's calibration loader; whatever goes wrong (missing, empty or malformed file, bad K)
+    becomes one clear refusal to start instead of a raw traceback. Nothing is ever published without it."""
+    try:
+        return loader(path)
+    except Exception as exc:  # any failure to get a real calibration means: do not start
+        raise CaptureError(f"refusing to start: calibration file {path!r}: {type(exc).__name__}: {exc}") from exc
 
 
 def check_capture_size(cal_width: int, cal_height: int, got_width: int, got_height: int) -> None:

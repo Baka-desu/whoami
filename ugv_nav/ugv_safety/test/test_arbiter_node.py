@@ -16,6 +16,7 @@ rclpy = pytest.importorskip("rclpy")
 
 from geometry_msgs.msg import Twist  # noqa: E402
 from rclpy.executors import SingleThreadedExecutor  # noqa: E402
+from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy  # noqa: E402
 from sensor_msgs.msg import CameraInfo  # noqa: E402
 from std_msgs.msg import Bool, String  # noqa: E402
 
@@ -23,15 +24,12 @@ CONFIG = Path(__file__).resolve().parents[2] / "config" / "safety" / "safety_tim
 
 
 class Rig:
-    def __init__(self) -> None:
+    def __init__(self, start_arbiter: bool = True) -> None:
         os.environ["ROS_DOMAIN_ID"] = str(40 + os.getpid() % 50)
         rclpy.init(args=["--ros-args", "-p", f"config_path:={CONFIG}"])
-        from ugv_safety.nodes.safety_arbiter import SafetyArbiterNode
-
-        self.arb = SafetyArbiterNode()
+        self.arb = None
         self.probe = rclpy.create_node("safety_probe")
         self.ex = SingleThreadedExecutor()
-        self.ex.add_node(self.arb)
         self.ex.add_node(self.probe)
         self.cmds: list[Twist] = []
         self.status: list[str] = []
@@ -45,6 +43,12 @@ class Rig:
             "nav2": self.probe.create_publisher(Bool, "/ugv/nav2_heartbeat", 10),
             "cam": self.probe.create_publisher(CameraInfo, "/camera/camera_info", 10),
         }
+
+    def start_arbiter(self) -> None:
+        from ugv_safety.nodes.safety_arbiter import SafetyArbiterNode
+
+        self.arb = SafetyArbiterNode()
+        self.ex.add_node(self.arb)
 
     def run(self, seconds: float, *, silent: tuple[str, ...] = (), pose: bool = True, estop: bool | None = None) -> None:
         end = time.monotonic() + seconds
@@ -76,7 +80,8 @@ class Rig:
 
     def close(self) -> None:
         self.ex.shutdown()
-        self.arb.destroy_node()
+        if self.arb is not None:
+            self.arb.destroy_node()
         self.probe.destroy_node()
         rclpy.shutdown()
 
@@ -84,6 +89,7 @@ class Rig:
 @pytest.fixture
 def rig():
     r = Rig()
+    r.start_arbiter()
     yield r
     r.close()
 
@@ -124,3 +130,19 @@ def test_silent_localization_is_a_health_fault(rig):
 def test_nothing_published_means_a_zero_base_command(rig):
     rig.run(1.0, silent=("cand", "pose", "perc", "nav2", "cam"))
     assert rig.cmds and all(c.linear.x == 0.0 and c.angular.z == 0.0 for c in rig.cmds)
+
+
+def test_estop_asserted_before_the_arbiter_started_is_still_honoured():
+    r = Rig()
+    try:
+        latched = QoSProfile(history=HistoryPolicy.KEEP_LAST, depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                             durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        pub = r.probe.create_publisher(Bool, "/ugv/e_stop", latched)
+        pub.publish(Bool(data=True))  # operator link then goes quiet: nothing re-publishes it
+        r.run(0.3, silent=("cand", "pose", "perc", "nav2", "cam"))
+        r.start_arbiter()
+        r.run(2.0)  # every other source healthy and a candidate on offer
+        assert r.cmds and all(c.linear.x == 0.0 for c in r.cmds)
+        assert r.status[-1].startswith("L1 ESTOP")
+    finally:
+        r.close()
