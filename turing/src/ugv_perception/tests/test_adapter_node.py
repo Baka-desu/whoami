@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import bisect
 import json
 import time
 from collections import deque
@@ -85,6 +86,7 @@ def test_adapter_node_spin_fixture_topics() -> None:
     finally:
         ex.remove_node(node)
         ex.remove_node(helper)
+        ex.shutdown()  # before rclpy.shutdown(): a late Executor.__del__ would raise InvalidHandle
         node.destroy_node()
         helper.destroy_node()
         if rclpy.ok():
@@ -291,6 +293,7 @@ def test_depth_failure_is_counted_and_never_degrades_the_mask() -> None:
     finally:
         ex.remove_node(node)
         ex.remove_node(helper)
+        ex.shutdown()  # before rclpy.shutdown(): a late Executor.__del__ would raise InvalidHandle
         node.destroy_node()
         helper.destroy_node()
         if rclpy.ok():
@@ -364,6 +367,7 @@ def test_stats_topic_publishes_stage_times_rates_and_depth_errors() -> None:
     finally:
         ex.remove_node(node)
         ex.remove_node(helper)
+        ex.shutdown()  # before rclpy.shutdown(): a late Executor.__del__ would raise InvalidHandle
         node.destroy_node()
         helper.destroy_node()
         if rclpy.ok():
@@ -442,6 +446,7 @@ def test_depth_is_published_when_the_mask_is_stale_and_not_published() -> None:
     finally:
         ex.remove_node(node)
         ex.remove_node(helper)
+        ex.shutdown()  # before rclpy.shutdown(): a late Executor.__del__ would raise InvalidHandle
         node.destroy_node()
         helper.destroy_node()
         if rclpy.ok():
@@ -563,7 +568,7 @@ def test_stage_attribution_decode_is_one_frame_decode_and_seg_excludes_it(
             rclpy.shutdown()
 
 
-# --- Segmentation scheduling: depth on every frame, a mask at least every mask_period_s. ----------------
+# --- Segmentation scheduling: depth on every frame, segmentation while the mask gap allows. -------------
 
 
 def _image_at(stamp_ns: int) -> Image:
@@ -591,6 +596,24 @@ def _capture(node: PerceptionAdapterNode) -> dict[str, list]:
     return got
 
 
+def _log_publications(node: PerceptionAdapterNode, clock: "_Clock") -> list[tuple[str, int, object]]:
+    """(kind, monotonic time, message) for every mask, degraded flag and depth image, in publication order."""
+    log: list[tuple[str, int, object]] = []
+    for kind, pub in (
+        ("mask", node._pub_mask),
+        ("degraded", node._pub_degraded),
+        ("depth", node._pub_depth),
+    ):
+        original = pub.publish
+
+        def publish(msg, _kind=kind, _original=original) -> None:
+            log.append((_kind, clock.ns, msg))
+            _original(msg)
+
+        pub.publish = publish
+    return log
+
+
 class _Wall:
     """Injected wall clock for freshness. A test sets it relative to the stamp of the frame it feeds."""
 
@@ -601,7 +624,20 @@ class _Wall:
         return self.ns
 
 
-def _scheduled_node(clock: _Clock, wall: _Wall, adapter, depth, **kwargs):
+_MONO0 = 1_000_000_000  # where _Clock starts
+
+
+class _LiveWall:
+    """Wall clock that follows the injected monotonic clock: the camera and the node share a time base."""
+
+    def __init__(self, clock: _Clock) -> None:
+        self._clock = clock
+
+    def __call__(self) -> int:
+        return _STAMP + (self._clock.ns - _MONO0)
+
+
+def _scheduled_node(clock: _Clock, wall, adapter, depth, **kwargs):
     node = PerceptionAdapterNode(
         adapter=adapter,
         adapter_id="yoloe",
@@ -619,37 +655,236 @@ def _stamp_of(msg: Image) -> int:
     return int(msg.header.stamp.sec) * 1_000_000_000 + int(msg.header.stamp.nanosec)
 
 
-def test_depth_runs_on_every_frame_and_segmentation_waits_for_the_mask_period() -> None:
+def _feed(node, clock: _Clock, wall: _Wall, t_ms: float, *, age_ms: float = 50.0) -> int:
+    """Deliver the frame stamped `_STAMP + t_ms` the way the executor would, at monotonic `t_ms` after the start.
+
+    The monotonic clock only moves forward (a tick that ran long keeps it ahead). The wall clock is `age_ms`
+    after the stamp. Returns the stamp."""
+    stamp = _STAMP + int(t_ms * _MS)
+    clock.ns = max(clock.ns, _MONO0 + int(t_ms * _MS))
+    wall.ns = stamp + int(age_ms * _MS)
+    node._on_image(_image_at(stamp))
+    return stamp
+
+
+def _prime(node, clock: _Clock, wall: _Wall) -> None:
+    """Two frames 100 ms apart. The first is segmented (nothing is known yet), the second because the first
+    depth sample is not trusted. After them the camera interval (100 ms) and the depth tick (34 ms) are known,
+    so a frame at 200 ms is depth-only."""
+    _feed(node, clock, wall, 0)
+    _feed(node, clock, wall, 100)
+
+
+def _tear_down(node, *others) -> None:
+    node.destroy_node()
+    for other in others:
+        other.destroy_node()
+    if rclpy.ok():
+        rclpy.shutdown()
+
+
+class _FlakyAdapter(SpyAdapter):
+    """Raises on the nth call, like a model that fell over once."""
+
+    def __init__(self, fail_on: int) -> None:
+        super().__init__()
+        self._fail_on = fail_on
+        self.attempts = 0
+
+    def infer(self, frame):
+        from ugv_perception.adapter.output import AdapterError
+
+        self.attempts += 1
+        if self.attempts == self._fail_on:
+            raise AdapterError("model fell over")
+        return super().infer(frame)
+
+
+class _FlakyDepth(_FakeDepth):
+    def __init__(self, clock: _Clock, fail_on: int) -> None:
+        super().__init__(clock)
+        self._fail_on = fail_on
+
+    def maps(self, rgb, k, stage=None):
+        if self.calls + 1 == self._fail_on:
+            self.calls += 1
+            raise RuntimeError("boom")
+        return super().maps(rgb, k, stage)
+
+
+def test_the_first_two_frames_are_segmented_and_the_third_is_depth_only() -> None:
     rclpy.init()
     clock, wall = _Clock(), _Wall()
     spy, depth = SpyAdapter(), _FakeDepth(clock)
     node = _scheduled_node(clock, wall, spy, depth)
     got = _capture(node)
     try:
-        first, second, third = _STAMP, _STAMP + 100_000_000, _STAMP + 200_000_000
-        wall.ns = first + 50_000_000
-        node._on_image(_image_at(first))
-        assert (spy.calls, depth.calls, len(got["mask"]), len(got["depth"])) == (1, 1, 1, 1)
-        assert _stamp_of(got["mask"][0]) == first
-        degraded_after_first = len(got["degraded"])
-        clock.advance_ms(100)  # 134 ms after the first segmentation started: not due
-        wall.ns = second + 50_000_000
-        node._on_image(_image_at(second))
-        assert spy.calls == 1, "segmentation must wait for the mask period"
-        assert depth.calls == 2 and len(got["depth"]) == 2
-        assert _stamp_of(got["depth"][1]) == second
-        assert len(got["mask"]) == 1
-        assert len(got["degraded"]) == degraded_after_first, "a skipped frame publishes no degraded flag"
-        clock.advance_ms(100)  # 268 ms: due
-        wall.ns = third + 50_000_000
-        node._on_image(_image_at(third))
-        assert (spy.calls, depth.calls, len(got["mask"])) == (2, 3, 2)
-        assert _stamp_of(got["mask"][1]) == third, "the mask carries the stamp of the image it came from"
+        s1 = _feed(node, clock, wall, 0)
+        assert (spy.calls, depth.calls) == (1, 1), "nothing is known yet: segment"
+        s2 = _feed(node, clock, wall, 100)
+        assert (spy.calls, depth.calls) == (2, 2), "the first depth sample is not trusted: segment"
+        s3 = _feed(node, clock, wall, 200)
+        assert (spy.calls, depth.calls) == (2, 3), "interval and depth tick are known: depth only"
+        assert [_stamp_of(m) for m in got["mask"]] == [s1, s2]
+        assert [_stamp_of(m) for m in got["depth"]] == [s1, s2, s3]
         assert node.metrics.masks_published == 2 and node.metrics.depth_errors == 0
     finally:
-        node.destroy_node()
-        if rclpy.ok():
-            rclpy.shutdown()
+        _tear_down(node)
+
+
+def test_a_depth_only_frame_publishes_the_degraded_flag_before_its_depth() -> None:
+    rclpy.init()
+    clock, wall = _Clock(), _Wall()
+    node = _scheduled_node(clock, wall, SpyAdapter(), _FakeDepth(clock))
+    log = _log_publications(node, clock)
+    try:
+        _prime(node, clock, wall)
+        log.clear()
+        _feed(node, clock, wall, 200)
+        kinds = [k for k, _, _ in log]
+        assert kinds == ["degraded", "depth"], "no mask, but the flag still goes out, ahead of the depth"
+        assert log[0][2].data is False
+        assert node.metrics.degraded_false == 3 and node.metrics.degraded_true == 0
+    finally:
+        _tear_down(node)
+
+
+def test_a_depth_only_frame_carries_a_degraded_last_decision() -> None:
+    rclpy.init()
+    clock, wall = _Clock(), _Wall()
+    flaky = _FlakyAdapter(fail_on=2)  # the second segmentation fails: degraded, no mask
+    node = _scheduled_node(clock, wall, flaky, _FakeDepth(clock))
+    got = _capture(node)
+    try:
+        _prime(node, clock, wall)
+        assert got["degraded"][-1].data is True and len(got["mask"]) == 1
+        _feed(node, clock, wall, 200)
+        assert flaky.attempts == 2, "the third frame is depth only"
+        assert got["degraded"][-1].data is True, "never less conservative than the last segmented decision"
+        assert len(got["degraded"]) == 3
+    finally:
+        _tear_down(node)
+
+
+def test_a_depth_only_frame_is_degraded_when_the_newest_mask_is_older_than_the_max_age() -> None:
+    rclpy.init()
+    clock, wall = _Clock(), _Wall()
+    node = _scheduled_node(clock, wall, SpyAdapter(), _FakeDepth(clock))
+    got = _capture(node)
+    try:
+        _prime(node, clock, wall)  # the newest mask is stamped 100 ms
+        assert got["degraded"][-1].data is False
+        # The frame itself is fresh (450 ms old) but the mask from the 100 ms frame is 550 ms old.
+        _feed(node, clock, wall, 200, age_ms=450)
+        assert len(got["mask"]) == 2, "still depth only"
+        assert got["degraded"][-1].data is True
+        # The next frame sees a mask that is 240 ms old: the flag is not latched.
+        _feed(node, clock, wall, 290, age_ms=50)
+        assert len(got["mask"]) == 2, "still depth only"
+        assert got["degraded"][-1].data is False
+    finally:
+        _tear_down(node)
+
+
+def test_a_depth_only_frame_with_no_mask_ever_published_is_degraded() -> None:
+    from ugv_perception.adapter.output import AdapterError
+
+    class _AlwaysFails:
+        def infer(self, frame):
+            raise AdapterError("model fell over")
+
+    rclpy.init()
+    clock, wall = _Clock(), _Wall()
+    node = _scheduled_node(clock, wall, _AlwaysFails(), _FakeDepth(clock))
+    got = _capture(node)
+    try:
+        _prime(node, clock, wall)
+        _feed(node, clock, wall, 200)
+        assert not got["mask"]
+        assert len(got["degraded"]) == 3 and all(m.data is True for m in got["degraded"])
+    finally:
+        _tear_down(node)
+
+
+def test_a_depth_failure_on_a_depth_only_frame_does_not_touch_the_flag() -> None:
+    rclpy.init()
+    clock, wall = _Clock(), _Wall()
+    node = _scheduled_node(clock, wall, SpyAdapter(), _FlakyDepth(clock, fail_on=3))
+    log = _log_publications(node, clock)
+    try:
+        _prime(node, clock, wall)
+        log.clear()
+        _feed(node, clock, wall, 200)
+        assert node.metrics.depth_errors == 1
+        assert [k for k, _, _ in log] == ["degraded"], "the flag went out, then the depth failed"
+        assert log[0][2].data is False
+    finally:
+        _tear_down(node)
+
+
+def test_a_stale_frame_inside_the_gap_is_never_skipped_and_publishes_degraded_at_once() -> None:
+    rclpy.init()
+    clock, wall = _Clock(), _Wall()
+    spy, depth = SpyAdapter(), _FakeDepth(clock)
+    node = _scheduled_node(clock, wall, spy, depth)
+    got = _capture(node)
+    try:
+        _prime(node, clock, wall)
+        flags = len(got["degraded"])
+        _feed(node, clock, wall, 200, age_ms=2_000)  # the frame is 2 s old
+        assert len(got["degraded"]) == flags + 1 and got["degraded"][-1].data is True
+        assert spy.calls == 2, "a stale frame costs no inference"
+        assert len(got["mask"]) == 2
+        assert depth.calls == 3, "depth is independent of the mask"
+        # The stale frame did not count as a segmentation: the gap still runs from the one at 100 ms.
+        _feed(node, clock, wall, 290, age_ms=50)
+        assert spy.calls == 2, "a fresh frame that fits the bound is depth only"
+        assert got["degraded"][-1].data is True, "carried from the stale frame's decision"
+        _feed(node, clock, wall, 420, age_ms=50)  # 320 ms after the segmentation at 100 ms
+        assert spy.calls == 3
+        assert got["degraded"][-1].data is False and _stamp_of(got["mask"][-1]) == _STAMP + 420 * _MS
+    finally:
+        _tear_down(node)
+
+
+def test_an_undecodable_frame_inside_the_gap_publishes_degraded_at_once() -> None:
+    rclpy.init()
+    clock, wall = _Clock(), _Wall()
+    spy, depth = SpyAdapter(), _FakeDepth(clock)
+    node = _scheduled_node(clock, wall, spy, depth)
+    got = _capture(node)
+    try:
+        _prime(node, clock, wall)
+        _, bad_info = _msgs()
+        bad_info.k = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]  # the reserved identity K: rejected
+        node._on_info(bad_info)
+        _feed(node, clock, wall, 200)
+        assert got["degraded"][-1].data is True
+        assert spy.calls == 2 and depth.calls == 2
+    finally:
+        _tear_down(node)
+
+
+def test_after_a_long_gap_and_a_stale_burst_the_first_fresh_frame_is_segmented() -> None:
+    rclpy.init()
+    clock, wall = _Clock(), _Wall()
+    spy, depth = SpyAdapter(), _FakeDepth(clock)
+    node = _scheduled_node(clock, wall, spy, depth)
+    got = _capture(node)
+    try:
+        _prime(node, clock, wall)
+        _feed(node, clock, wall, 200)  # depth only
+        assert spy.calls == 2
+        # The camera goes quiet for 3 s, then hands over frames it captured earlier: all stale.
+        for t_ms in (3_210, 3_310, 3_410):
+            _feed(node, clock, wall, t_ms, age_ms=2_500)
+        assert spy.calls == 2, "stale frames reach no model"
+        assert got["degraded"][-1].data is True
+        _feed(node, clock, wall, 3_600, age_ms=50)
+        assert spy.calls == 3, "the first fresh frame after the gap is segmented"
+        assert got["degraded"][-1].data is False
+    finally:
+        _tear_down(node)
 
 
 def test_without_a_depth_channel_every_frame_is_segmented_as_before() -> None:
@@ -662,109 +897,230 @@ def test_without_a_depth_channel_every_frame_is_segmented_as_before() -> None:
     _, info = _msgs()
     node._on_info(info)
     try:
-        for i in range(3):
-            stamp = _STAMP + i * 10_000_000
-            wall.ns = stamp + 50_000_000
-            node._on_image(_image_at(stamp))
-            clock.advance_ms(10)
-        assert spy.calls == 3
+        for i in range(6):
+            _feed(node, clock, wall, i * 10)
+        assert spy.calls == 6
     finally:
-        node.destroy_node()
-        if rclpy.ok():
-            rclpy.shutdown()
+        _tear_down(node)
 
 
-def test_a_mask_period_of_zero_segments_every_frame() -> None:
+def test_a_tiny_mask_max_gap_segments_every_frame() -> None:
     rclpy.init()
     clock, wall = _Clock(), _Wall()
     spy, depth = SpyAdapter(), _FakeDepth(clock)
-    node = _scheduled_node(clock, wall, spy, depth, mask_period_s=0.0)
+    node = _scheduled_node(clock, wall, spy, depth, mask_max_gap_s=0.001)
     try:
-        for i in range(3):
-            stamp = _STAMP + i * 10_000_000
-            wall.ns = stamp + 50_000_000
-            node._on_image(_image_at(stamp))
-        assert spy.calls == 3 and depth.calls == 3
+        for i in range(6):
+            _feed(node, clock, wall, i * 100)
+        assert spy.calls == 6 and depth.calls == 6
     finally:
-        node.destroy_node()
-        if rclpy.ok():
-            rclpy.shutdown()
+        _tear_down(node)
 
 
-def test_a_stale_frame_inside_the_period_still_publishes_degraded_at_once() -> None:
-    rclpy.init()
-    clock, wall = _Clock(), _Wall()
-    spy, depth = SpyAdapter(), _FakeDepth(clock)
-    node = _scheduled_node(clock, wall, spy, depth)
-    got = _capture(node)
-    try:
-        wall.ns = _STAMP + 50_000_000
-        node._on_image(_image_at(_STAMP))
-        assert got["degraded"][-1].data is False
-        clock.advance_ms(10)  # well inside the mask period
-        stale_stamp = _STAMP + 10_000_000
-        wall.ns = stale_stamp + 2_000_000_000  # the frame is 2 s old
-        node._on_image(_image_at(stale_stamp))
-        assert got["degraded"][-1].data is True, "a stale frame must degrade perception immediately"
-        assert spy.calls == 1, "a stale frame costs no inference"
-        assert len(got["mask"]) == 1
-        assert len(got["depth"]) == 2, "depth is independent of the mask"
-        # The stale frame did not use up the mask period, and the period still counts from the first mask.
-        clock.advance_ms(10)
-        fresh = _STAMP + 20_000_000
-        wall.ns = fresh + 50_000_000
-        node._on_image(_image_at(fresh))
-        assert spy.calls == 1, "still inside the period that started with the first segmentation"
-        clock.advance_ms(300)
-        fresh2 = _STAMP + 400_000_000
-        wall.ns = fresh2 + 50_000_000
-        node._on_image(_image_at(fresh2))
-        assert spy.calls == 2 and _stamp_of(got["mask"][-1]) == fresh2
-    finally:
-        node.destroy_node()
-        if rclpy.ok():
-            rclpy.shutdown()
+# --- R-d: what the parameter guarantees, and what it does not. ----------------------------------------
 
 
-def test_an_undecodable_frame_inside_the_period_still_publishes_degraded_at_once() -> None:
-    rclpy.init()
-    clock, wall = _Clock(), _Wall()
-    spy, depth = SpyAdapter(), _FakeDepth(clock)
-    node = _scheduled_node(clock, wall, spy, depth)
-    got = _capture(node)
-    try:
-        wall.ns = _STAMP + 50_000_000
-        node._on_image(_image_at(_STAMP))
-        clock.advance_ms(10)
-        _, bad_info = _msgs()
-        bad_info.k = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]  # the reserved identity K: rejected
-        node._on_info(bad_info)
-        node._on_image(_image_at(_STAMP + 10_000_000))
-        assert got["degraded"][-1].data is True
-        assert spy.calls == 1 and depth.calls == 1
-    finally:
-        node.destroy_node()
-        if rclpy.ok():
-            rclpy.shutdown()
-
-
-@pytest.mark.parametrize("period", [0.3, 1.0, -0.1])
-def test_a_mask_period_that_would_let_the_mask_go_stale_is_rejected(period: float) -> None:
+@pytest.mark.parametrize("gap", [0.0, -0.1, 0.5, 0.75, 2.0])
+def test_a_mask_max_gap_that_is_not_inside_zero_and_the_max_age_is_rejected(gap: float) -> None:
     rclpy.init()
     try:
-        with pytest.raises(ValueError):
-            PerceptionAdapterNode(adapter=SpyAdapter(), adapter_id="yoloe", mask_period_s=period)
+        with pytest.raises(ValueError, match="mask_max_gap_s"):
+            PerceptionAdapterNode(adapter=SpyAdapter(), adapter_id="yoloe", mask_max_gap_s=gap)
     finally:
         if rclpy.ok():
             rclpy.shutdown()
 
 
-def test_the_default_mask_period_is_declared_as_a_parameter() -> None:
+@pytest.mark.parametrize("gap", [0.01, 0.3, 0.45, 0.499])
+def test_any_mask_max_gap_inside_zero_and_the_max_age_is_accepted(gap: float) -> None:
+    rclpy.init()
+    node = PerceptionAdapterNode(adapter=SpyAdapter(), adapter_id="yoloe", mask_max_gap_s=gap)
+    try:
+        assert node.get_parameter("mask_max_gap_s").value == pytest.approx(gap)
+    finally:
+        _tear_down(node)
+
+
+def test_the_default_mask_max_gap_is_declared_as_a_parameter() -> None:
     rclpy.init()
     node = PerceptionAdapterNode(adapter=SpyAdapter(), adapter_id="yoloe")
     try:
-        assert node.get_parameter("mask_period_s").value == 0.25
+        assert node.get_parameter("mask_max_gap_s").value == 0.30
+        assert not node.has_parameter("mask_period_s"), "the old minimum-spacing parameter is gone"
     finally:
-        node.destroy_node()
-        if rclpy.ok():
-            rclpy.shutdown()
+        _tear_down(node)
+
+
+# --- R-b: the watchdog also watches the newest mask. --------------------------------------------------
+
+
+def test_the_watchdog_raises_degraded_when_the_newest_mask_is_too_old_even_while_images_are_fresh() -> None:
+    rclpy.init()
+    clock, wall = _Clock(), _Wall()
+    node = _scheduled_node(clock, wall, SpyAdapter(), _FakeDepth(clock))
+    node._stop.set()  # no background thread: the check is called directly, with a time we choose
+    got = _capture(node)
+    try:
+        _prime(node, clock, wall)  # newest mask 100 ms
+        _feed(node, clock, wall, 200)  # depth only: the newest IMAGE is 200 ms
+        got["degraded"].clear()
+        # 400 ms: image 200 ms old, mask 300 ms old. Nothing to report.
+        node._watchdog_check(_STAMP + 400 * _MS)
+        assert got["degraded"] == []
+        # 650 ms: image 450 ms old (fresh, the old rule is quiet), mask 550 ms old.
+        node._watchdog_check(_STAMP + 650 * _MS)
+        assert [m.data for m in got["degraded"]] == [True]
+        # 750 ms: the image itself is 550 ms old: the existing rule still fires too.
+        node._watchdog_check(_STAMP + 750 * _MS)
+        assert [m.data for m in got["degraded"]] == [True, True]
+    finally:
+        _tear_down(node)
+
+
+def test_the_watchdog_is_quiet_before_any_mask_while_images_are_fresh() -> None:
+    rclpy.init()
+    clock, wall = _Clock(), _Wall()
+    node = _scheduled_node(clock, wall, SpyAdapter(), _FakeDepth(clock))
+    node._stop.set()
+    got = _capture(node)
+    try:
+        node._last_image_stamp = _STAMP  # an image has arrived; no mask yet
+        node._watchdog_check(_STAMP + 100 * _MS)
+        assert got["degraded"] == []
+        node._last_image_stamp = None  # no image at all: the existing rule
+        node._watchdog_check(_STAMP + 100 * _MS)
+        assert [m.data for m in got["degraded"]] == [True]
+    finally:
+        _tear_down(node)
+
+
+def test_the_watchdog_thread_still_publishes_degraded_when_no_image_ever_arrived() -> None:
+    rclpy.init()
+    node = PerceptionAdapterNode(
+        adapter=SpyAdapter(), adapter_id="yoloe", now_ns_fn=lambda: _STAMP + 100_000_000
+    )
+    flags: list[bool] = []
+    original = node._pub_degraded.publish
+    node._pub_degraded.publish = lambda msg: (flags.append(msg.data), original(msg))[1]
+    try:
+        deadline = time.monotonic() + 3.0
+        while not flags and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert flags and all(flags), "the thread keeps calling the check every perception_max_age / 2"
+    finally:
+        _tear_down(node)
+
+
+# --- R-e: the real node, a camera at a fixed interval, injected clocks. -------------------------------
+
+
+class _CostAdapter(SpyAdapter):
+    """Segmentation that takes `ms` of the injected clock and remembers when it started."""
+
+    def __init__(self, clock: _Clock, ms: float) -> None:
+        super().__init__()
+        self._clock, self._ms = clock, ms
+        self.starts: list[int] = []
+
+    def infer(self, frame):
+        self.starts.append(self._clock.ns)
+        self._clock.advance_ms(self._ms)
+        return super().infer(frame)
+
+
+class _CostDepth:
+    def __init__(self, clock: _Clock, ms: float) -> None:
+        self._clock, self._ms = clock, ms
+        self.calls = 0
+
+    def maps(self, rgb, k, stage=None):
+        self.calls += 1
+        with stage("depth_infer"):
+            self._clock.advance_ms(self._ms - 4)
+        with stage("depth_post"):
+            self._clock.advance_ms(4)
+        return np.ones((2, 2), dtype=np.float32), np.zeros((4, 3), dtype=np.float32)
+
+
+def _simulate_node(
+    interval_ms: float,
+    *,
+    seg_ms: float = 123,
+    depth_ms: float = 80,
+    seconds: float = 20,
+    stall_ms: tuple[float, float] | None = None,
+):
+    """The real node, fed by a camera at a fixed interval, on injected clocks.
+
+    The node takes the newest frame that has arrived (queue depth 1) or waits for the next one; the camera
+    does not wait for it. `stall_ms` removes the frames inside that window. Returns the publication log,
+    the adapter, the depth channel and the monotonic start (ms) of every processed frame."""
+    rclpy.init()
+    clock = _Clock()
+    adapter, depth = _CostAdapter(clock, seg_ms), _CostDepth(clock, depth_ms)
+    node = _scheduled_node(clock, _LiveWall(clock), adapter, depth)
+    node._stop.set()  # the background watchdog reads real time; its rules are tested directly
+    log = _log_publications(node, clock)
+    arrivals = [
+        k * interval_ms
+        for k in range(int(seconds * 1000 / interval_ms) + 2)
+        if stall_ms is None or not (stall_ms[0] <= k * interval_ms < stall_ms[1])
+    ]
+    processed: list[float] = []
+    try:
+        free_ms, last = 0.0, -1
+        while True:
+            newest = bisect.bisect_right(arrivals, free_ms + 1e-9) - 1
+            k = newest if newest > last else last + 1
+            if k >= len(arrivals):
+                break
+            start = max(free_ms, arrivals[k])
+            if start >= seconds * 1000:
+                break
+            last = k
+            clock.ns = max(clock.ns, _MONO0 + int(round(start * _MS)))
+            node._on_image(_image_at(_STAMP + int(round(arrivals[k] * _MS))))
+            processed.append(start)
+            free_ms = (clock.ns - _MONO0) / _MS
+    finally:
+        _tear_down(node)
+    return log, adapter, depth, processed
+
+
+def _ms_between(times_ns: list[int]) -> list[float]:
+    return [(b - a) / _MS for a, b in zip(times_ns, times_ns[1:])]
+
+
+@pytest.mark.parametrize("interval", [83, 135, 200, 240])
+def test_the_real_node_keeps_the_flag_the_mask_gap_and_the_depth_within_the_ruled_bounds(
+    interval: int,
+) -> None:
+    log, adapter, depth, processed = _simulate_node(interval)
+    assert len(processed) > 40
+    flags = [(t, m.data) for kind, t, m in log if kind == "degraded"]
+    # The flag goes out on every processed frame, so its gaps are at most one frame interval plus one tick.
+    assert len(flags) == len(processed)
+    assert max(_ms_between([t for t, _ in flags])) <= interval + 123 + 80
+    # The start-to-start gap between segmentations stays within the bound plus one frame interval.
+    assert max(_ms_between(adapter.starts)) <= 300 + interval
+    # Depth is produced for every frame the node takes.
+    assert depth.calls == len(processed)
+    assert len([1 for kind, _, _ in log if kind == "depth"]) == len(processed)
+    # A healthy run is never degraded: the carried value does not flicker.
+    assert all(value is False for _, value in flags)
+
+
+@pytest.mark.parametrize("interval", [83, 135, 200, 240])
+def test_the_node_schedules_exactly_like_the_scheduler_alone(interval: int) -> None:
+    from ugv_perception.tests.test_schedule import _simulate
+
+    expected = [t.start_ms for t in _simulate(interval, seconds=20) if t.segmented]
+    _, adapter, _, _ = _simulate_node(interval)
+    assert [(s - _MONO0) / _MS for s in adapter.starts] == pytest.approx(expected)
+
+
+@pytest.mark.parametrize("interval", [83, 135])
+def test_after_a_quiet_camera_the_first_frame_is_segmented_in_the_real_node(interval: int) -> None:
+    _, adapter, _, processed = _simulate_node(interval, seconds=30, stall_ms=(10_000, 13_000))
+    first_after = next(t for t in processed if t >= 13_000)
+    assert first_after * _MS + _MONO0 in adapter.starts
