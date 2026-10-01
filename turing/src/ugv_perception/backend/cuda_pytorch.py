@@ -29,6 +29,8 @@ class CudaPytorchTensorBackend:
         self._model = None
         self._kind: str | None = None
         self._hw: tuple[int, int] | None = None
+        self._fallback_logits: np.ndarray | None = None
+        self.seg_post_disabled = False
         self.device = "cuda"
 
     def load(self, weights_path: str, kind: str = "rugd") -> None:
@@ -63,7 +65,53 @@ class CudaPytorchTensorBackend:
         self._hw = (int(height), int(width))
 
     def run(self, blob: NDArray[np.float32]) -> np.ndarray:
+        if self._fallback_logits is not None:
+            out = self._fallback_logits
+            self._fallback_logits = None
+            return out
         return self.run_all(blob)[0]
+
+    def run_seg(
+        self, blob: NDArray[np.float32], out_hw: tuple[int, int]
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Interpolate + softmax on CUDA. Labels/scores copied out once."""
+        if self._model is None or self._kind != "rugd":
+            raise AdapterError("CUDA seg decode requires a loaded RUGD net")
+        if not isinstance(blob, np.ndarray) or blob.dtype != np.float32 or blob.ndim != 4:
+            raise TypeError("blob must be float32 NCHW")
+        oh, ow = int(out_hw[0]), int(out_hw[1])
+        try:
+            import torch
+            import torch.nn.functional as F
+        except ImportError as exc:
+            raise AdapterError("torch is not installed") from exc
+        logits = None
+        try:
+            tensor = torch.from_numpy(blob).to("cuda")
+            with torch.inference_mode():
+                logits = self._model(pixel_values=tensor).logits
+                if not torch.isfinite(logits).all():
+                    raise AdapterError("RUGD logits are not finite")
+                up = F.interpolate(
+                    logits, size=(oh, ow), mode="bilinear", align_corners=False
+                )
+                prob = torch.softmax(up, dim=1)
+                labels = torch.argmax(prob, dim=1)
+                scores = torch.gather(prob, 1, labels.unsqueeze(1)).squeeze(1)
+                return (
+                    labels[0].detach().cpu().numpy().astype(np.int32, copy=False),
+                    scores[0].detach().cpu().numpy().astype(np.float32, copy=False),
+                )
+        except AdapterError as exc:
+            if "not finite" in str(exc):
+                raise
+            self.seg_post_disabled = True
+            raise
+        except Exception as exc:
+            self.seg_post_disabled = True
+            if logits is not None:
+                self._fallback_logits = logits.detach().cpu().numpy()
+            raise AdapterError("CUDA seg decode failed") from exc
 
     def run_all(self, blob: NDArray[np.float32]) -> list[np.ndarray]:
         if self._model is None or self._kind is None:
