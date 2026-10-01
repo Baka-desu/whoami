@@ -116,7 +116,7 @@ Same as `architecture.md` §6. This add-on does not swap adapters or engines.
 | Layer | Choice | Notes |
 |---|---|---|
 | Middleware | ROS 2 Lyrical | |
-| Vision recommended / minimum | Stereo·RGB-D / mono | `architecture.md` §10. Current hardware: mono + DA3 pseudo-depth (minimum tier) |
+| Vision recommended / minimum | Stereo·RGB-D / mono | `architecture.md` §10. Current hardware: mono + DA3 pseudo-depth (large tier) |
 | **Brain** | RTAB-Map + Nav2 (Smac2D + RPP) | Goal may be off the current map |
 | **Perception Port** | Canonical mask + conf + freshness + frame | `architecture.md` §8 |
 | Adapter default outdoor | RUGD SegFormer-B5 | Intel OpenVINO GPU, CPU fallback. NVIDIA CUDA PyTorch (no OpenVINO). YOLOE selectable, not live |
