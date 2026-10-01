@@ -244,9 +244,9 @@ def test_sse_stream_emits_each_resource(graph):
                 event = line[7:]
             elif line.startswith("data: ") and event:
                 got[event] = json.loads(line[6:])
-            if len(got) == 4:
+            if len(got) == 6:
                 break
-    assert set(got) == {"safety", "command", "localization", "navigation"}
+    assert set(got) == {"safety", "command", "localization", "navigation", "map", "pose"}
     assert "watches" in got["safety"] and "heartbeat" in got["navigation"]
 
 

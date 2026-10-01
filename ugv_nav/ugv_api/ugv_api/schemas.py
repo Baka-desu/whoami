@@ -110,3 +110,41 @@ class Navigation(Model):
     status: str | None = Field(description="Last /ugv/nav2_status text")
     action_server_ready: bool
     active_goal: GoalOut | None
+
+
+U32 = Annotated[int, Field(ge=0, le=0xFFFFFFFF)]
+StatValue = bool | int | float | str | None
+
+
+class MapSeq(Model):
+    """Per-layer change counter. Field order is MapStore.LAYERS; the viewer requires all seven."""
+
+    cloud: U32
+    elevation: U32
+    trajectory: U32
+    grid: U32
+    live: U32
+    depth: U32
+    camera: U32
+
+
+class MapStatus(Model):
+    epoch: U32 = Field(description="Random per gateway process: a change means every layer's seq restarted")
+    seq: MapSeq = Field(description="0 = that layer has received nothing yet")
+    stats: dict[str, StatValue] = Field(
+        description="Flat scalars, snake_case keys exactly as the ROS stats nodes publish them (not camelCased)"
+    )
+
+
+class Pose(Model):
+    """map -> base_link from TF. When no transform has been seen: available false, every other field null."""
+
+    available: bool
+    x: float | None
+    y: float | None
+    z: float | None
+    qx: float | None
+    qy: float | None
+    qz: float | None
+    qw: float | None
+    age_s: float | None
