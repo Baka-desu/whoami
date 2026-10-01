@@ -1,0 +1,28 @@
+name: dev5
+
+# Pure-Python tests for the camera driver helpers and the safety arbiter. The ROS-level tests skip
+# here (no ROS 2 on the runner) and run under `colcon test` on a Lyrical machine.
+on:
+  pull_request:
+    paths:
+      - 'ugv_nav/ugv_safety/**'
+      - 'ugv_nav/ugv_bringup/**'
+      - 'ugv_nav/config/safety/**'
+      - 'ugv_nav/ugv_localization/ugv_localization/camera/**'
+      - '.github/workflows/dev5.yml'
+
+jobs:
+  core:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install pytest pyyaml
+      - name: ugv_safety
+        working-directory: ugv_nav/ugv_safety
+        run: python -m pytest -rs
+      - name: ugv_bringup
+        working-directory: ugv_nav/ugv_bringup
+        run: python -m pytest -rs

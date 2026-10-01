@@ -1,0 +1,27 @@
+# Safety arbiter timeout table (architecture.md §3.1, §12; dev.md Dev 5).
+# Any signal older than its limit, or never received, is a health failure -> zero /cmd_vel.
+# Timeouts are seconds; limits are m/s and rad/s.
+
+publish_rate_hz: 20.0
+
+timeouts:
+  # dev.md: perception mask 0.5 s, localization/TF 0.5 s, Nav2 heartbeat 0.5 s
+  perception_s: 0.5      # /ugv/perception_degraded (Dev 1 publishes it on every processed frame)
+  localization_s: 0.5    # /ugv/pose_valid (Dev 2, 20 Hz; also covers the TF row: invalid pose when TF is missing)
+  nav2_s: 0.5            # /ugv/nav2_heartbeat (Dev 4, 20 Hz)
+  # The spec gives the camera row no number. 1.0 s is a choice, so a 5 Hz camera does not false-trip.
+  camera_s: 1.0          # /camera/camera_info (one per image)
+  # Candidate property, not a health fault (DEV4_INTERFACES.md §2): a /cmd_vel_nav2 older than this is zero.
+  candidate_s: 0.5       # /cmd_vel_nav2
+
+limits:
+  # Clamp on whatever Nav2 asks for. Matches the Nav2 placeholders (DEV4_INTERFACES.md §5); Dev 5 owns the real values.
+  max_linear: 0.4
+  max_angular: 0.8
+  # architecture.md §3.1 says Level 2 and 3 give a zero twist, and it wins over dev.md. So the default is an
+  # immediate zero. A smooth stop (dev.md Dev 5 task 3) is available with ramp_on_hold: true, but only turn it
+  # on with the owner's agreement (about 8 cm of extra travel from 0.4 m/s at decel_linear 1.0). Level 1 (e-stop)
+  # is always an immediate zero.
+  ramp_on_hold: false
+  decel_linear: 1.0
+  decel_angular: 2.0
