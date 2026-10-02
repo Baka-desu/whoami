@@ -40,9 +40,10 @@ class CudaPytorchTensorBackend:
         self.seg_post_disabled = False
         # Every tensor this backend creates, and the model it loads, goes to this device.
         self.device = "cuda"
-        # DA3 only: run the forward pass under fp16 autocast (about 2x faster on the RTX 4060). Never applied
-        # to the RUGD segmentation net. Outputs are cast back to float32 before anything reads them.
-        self.da3_half = True
+        # DA3 only, off by default: FP32 is the policy on every backend. Set (via the node's `da3_fp16`
+        # parameter) only where FP32 was measured to miss the latency budget; the forward pass then runs under
+        # fp16 autocast and its outputs are cast back to float32. Never applied to the RUGD segmentation net.
+        self.da3_half = False
 
     def load(self, weights_path: str, kind: str = "rugd") -> None:
         path = Path(weights_path)

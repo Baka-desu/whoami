@@ -318,7 +318,7 @@ class _NumpyPath:
 def test_gpu_path_matches_the_numpy_path_on_real_weights(da3_cuda) -> None:
     from ugv_perception.backend.depth_live import DepthChannel
 
-    da3_cuda.da3_half = False  # isolate the pre/post-processing; fp16 has its own test below
+    assert da3_cuda.da3_half is False, "FP32 is the default for DA3 on every backend"
     try:
         for rgb in _synthetic_frames():
             want, want_pts = DepthChannel(_NumpyPath(da3_cuda)).maps(rgb, _K_WEBCAM)
@@ -333,10 +333,10 @@ def test_gpu_path_matches_the_numpy_path_on_real_weights(da3_cuda) -> None:
             assert float(np.max(np.abs(got[ok] - want[ok]) / want[ok])) < 1e-2
             assert got_pts.shape == want_pts.shape
     finally:
-        da3_cuda.da3_half = True
+        da3_cuda.da3_half = False
 
 
-# --- fp16 for DA3 only. The segmentation path never sees autocast. -----------------------------------------
+# --- fp16: a DA3-only opt-in (da3_fp16). The segmentation path never sees autocast. ------------------------
 
 
 @pytest.mark.filterwarnings("ignore:.*torch.jit.script.*")  # raised by the DA3 package at import, not by us
@@ -344,7 +344,6 @@ def test_fp16_depth_matches_fp32_within_one_percent_on_valid_pixels(da3_cuda) ->
     from ugv_perception.backend.depth_live import DepthChannel
 
     channel = DepthChannel(da3_cuda)
-    assert da3_cuda.da3_half is True, "fp16 is the default for DA3 on CUDA once this test holds"
     try:
         for rgb in _synthetic_frames():
             da3_cuda.da3_half = False
@@ -359,7 +358,7 @@ def test_fp16_depth_matches_fp32_within_one_percent_on_valid_pixels(da3_cuda) ->
             # Measured on these frames: at most 0.17 %. The gate is 1 %.
             assert float(rel.max()) < 0.01
     finally:
-        da3_cuda.da3_half = True
+        da3_cuda.da3_half = False
 
 
 class _StubOut:

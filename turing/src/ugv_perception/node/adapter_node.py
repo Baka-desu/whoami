@@ -392,7 +392,10 @@ def main() -> None:
     rclpy.init()
     boot = rclpy.create_node("ugv_perception_boot")
     boot.declare_parameter("adapter", "rugd")
+    # DA3 runs FP32 unless this is set: an opt-in for a target where FP32 was measured to miss the latency budget.
+    boot.declare_parameter("da3_fp16", False)
     selected = boot.get_parameter("adapter").get_parameter_value().string_value
+    da3_fp16 = boot.get_parameter("da3_fp16").get_parameter_value().bool_value
     boot.destroy_node()
     if selected == "onnx":
         from ugv_perception.backend.onnx_live import build_onnx_adapter
@@ -412,8 +415,10 @@ def main() -> None:
         adapter = YoloeAdapter(backend, prompts)
     else:
         adapter = build_live_adapter(_ROOT)
-    depth = build_depth_channel(_ROOT)
+    depth = build_depth_channel(_ROOT, fp16=da3_fp16)
     node = PerceptionAdapterNode(adapter=adapter, depth=depth, adapter_id=selected)
+    if depth is not None:
+        node.get_logger().info(f"DA3 precision: {'fp16 (da3_fp16 opt-in)' if da3_fp16 else 'fp32'}")
     try:
         rclpy.spin(node)
     finally:

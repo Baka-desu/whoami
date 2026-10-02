@@ -76,10 +76,11 @@ class DepthChannel:
         return self.maps(rgb, k)[1]
 
 
-def build_depth_channel(root: Path) -> DepthChannel | None:
+def build_depth_channel(root: Path, *, fp16: bool = False) -> DepthChannel | None:
+    """DA3 on the best backend found, FP32 unless `fp16` (the node's `da3_fp16` opt-in) is set."""
     xml = root / "weights" / "da3metric-large.xml"
     folder = root / "weights" / "da3metric-large"
-    backend = pick_tensor_backend(ir_xml=xml, safetensors_dir=folder, kind="da3")
+    backend = pick_tensor_backend(ir_xml=xml, safetensors_dir=folder, kind="da3", fp16=fp16)
     if backend is None:
         return None
     return DepthChannel(backend)
