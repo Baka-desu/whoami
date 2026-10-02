@@ -171,7 +171,6 @@ export class PathHold {
         this.farStreak = 0
         next = ease(this.shown, candidate)
         this.settling--
-        if (this.settling === 0) next = candidate
       }
     } else {
       this.farStreak = 0
