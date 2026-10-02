@@ -1,0 +1,22 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>ugv_robot_description</name>
+  <version>0.1.0</version>
+  <description>
+    Dev 5 robot description: base_link -> camera_link -> camera_optical_frame from the measured camera mount,
+    published by robot_state_publisher (architecture.md §8.5 spatial contract).
+  </description>
+  <maintainer email="jeswin@neogenmedia.com">dev5</maintainer>
+  <license>Proprietary</license>
+
+  <exec_depend>robot_state_publisher</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

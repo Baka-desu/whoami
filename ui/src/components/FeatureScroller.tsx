@@ -1,77 +1,71 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import MagnetLines from './ui/magnet-lines'
 
-// Scroll-driven tour of what this workbench actually does. A pinned stage steps through the real
+// Scroll-driven tour of what the operator console actually does. A pinned stage steps through the real
 // features: the section is tall, scroll progress picks the active one, the others recede.
 // The visuals are small illustrations, not live data.
 
-const CELL = ['#2c4a40', '#8fd3ff', '#ff2a2a'] // unknown / traversable / hazard (same hues as the viewport)
-
-function maskCells() {
-  // fixed, hand-laid 16x7 pattern: hazard blob on the left, free ground in the middle, unknown at the far edge
-  const rows = ['2200111111111000', '2200111111111100', '2000111111111100', '0001111111111100', '0011111111111110', '0111111111111110', '1111111111111110']
-  return rows.join('').split('').map((c, i) => <i key={i} style={{ background: CELL[+c] }} />)
-}
-
 const STEPS: { id: string; title: string; body: string; visual: ReactNode; caption: string }[] = [
   {
-    id: 'port',
-    title: 'Perception port',
-    body: 'Every frame is judged as a canonical mask: 0 unknown, 1 traversable, 2 hazard. Unknown is never free, and a mask older than 500 ms is stale and shown as such.',
-    caption: 'mask {0,1,2} · freshness',
-    visual: <div className="fs-cells">{maskCells()}</div>,
-  },
-  {
-    id: 'loc',
-    title: 'Localization and pose validity',
-    body: 'The map → odom → base_link TF chain and the pose_valid heartbeat come from the localization stack. A heartbeat that stops reads NO SIGNAL, never its last value.',
-    caption: 'tf · /ugv/pose_valid',
+    id: 'health',
+    title: 'The §12 health table',
+    body: 'Camera, perception port, localization, TF, Nav2 heartbeat and e-stop, each with its age. A watch whose input stops arriving trips, it never keeps its last good value.',
+    caption: 'six watches · fail closed',
     visual: (
-      <div className="fs-chain">
-        <span className="fs-node">map</span><span className="fs-arrow">→</span>
-        <span className="fs-node">odom</span><span className="fs-arrow">→</span>
-        <span className="fs-node hot">base_link</span>
-        <span className="fs-node hot" style={{ flexBasis: '100%', textAlign: 'center' }}>pose_valid</span>
+      <div className="fs-ladder">
+        <div>camera <b>ok</b></div>
+        <div>perception <b>ok</b></div>
+        <div>localization <b>trip</b></div>
+        <div>nav2 <b>ok</b></div>
       </div>
     ),
   },
   {
-    id: 'nav',
-    title: 'Nav2 costmap and plan',
-    body: 'The local costmap and the planned path from Nav2 are drawn around the robot, heading up, so you see what the planner sees. The candidate velocity is shown, but it is only a candidate.',
-    caption: 'costmap · /plan · /cmd_vel_nav2',
+    id: 'estop',
+    title: 'E-stop',
+    body: 'Level 1 of the safety precedence. The console asks the gateway to publish /ugv/e_stop, latched and repeated while asserted, so an arbiter that restarts still sees it.',
+    caption: '/ugv/e_stop · latched',
     visual: (
-      <svg width="260" height="200" viewBox="0 0 260 200" role="img" aria-label="Plan around an obstacle">
-        <rect width="260" height="200" fill="#0a2a22" stroke="#2b5f4c" />
-        <rect x="150" y="60" width="44" height="50" fill="#ff2a2a" opacity="0.9" />
-        <rect x="140" y="50" width="64" height="70" fill="#ffb36b" opacity="0.18" />
-        <path d="M110 190 C110 140 100 110 120 70 S 130 20 130 8" stroke="#eafff7" strokeWidth="3" fill="none" />
-        <path d="M130 190 l-8 -14 h16 z" fill="#86f0cf" transform="translate(-20,0)" />
-      </svg>
+      <div className="fs-chain">
+        <span className="fs-node hot">console</span><span className="fs-arrow">→</span>
+        <span className="fs-node">gateway</span><span className="fs-arrow">→</span>
+        <span className="fs-node hot">/ugv/e_stop</span>
+      </div>
+    ),
+  },
+  {
+    id: 'cmd',
+    title: 'Final /cmd_vel',
+    body: 'Shows what the safety authority actually let through to the base, read only. The console never publishes a drive command.',
+    caption: '/cmd_vel · read only',
+    visual: (
+      <div className="fs-chain">
+        <span className="fs-node">Nav2 candidate</span><span className="fs-arrow">→</span>
+        <span className="fs-node hot">safety authority</span><span className="fs-arrow">→</span>
+        <span className="fs-node">/cmd_vel</span>
+      </div>
     ),
   },
   {
     id: 'goal',
-    title: 'Localized goal',
-    body: 'Freeze a start pose, then give a distance and bearing or local x / y. The goal becomes one map-frame pose for Nav2, and it is blocked unless the pose is valid, Nav2 is alive, perception is healthy and e-stop is off.',
-    caption: '50 m @ 20° from the start',
+    title: 'Mode and map-frame goal',
+    body: 'Switch RTAB-Map between mapping and localize, and send a map-frame goal to Nav2. The gateway refuses a goal with the tripped watches as reasons while any §12 row is tripped.',
+    caption: 'PUT mode · POST goal · 409 when held',
     visual: (
-      <svg width="260" height="200" viewBox="0 0 260 200" role="img" aria-label="Start pose and goal at a bearing">
-        <circle cx="70" cy="160" r="6" fill="#86f0cf" />
-        <line x1="70" y1="160" x2="70" y2="40" stroke="#2b5f4c" strokeDasharray="4 4" />
-        <line x1="70" y1="160" x2="152" y2="52" stroke="#eafff7" strokeWidth="2" />
-        <path d="M70 100 A60 60 0 0 1 100 108" stroke="#f2e17c" fill="none" />
-        <text x="104" y="104" fill="#f2e17c" fontSize="11" fontFamily="monospace">20°</text>
-        <circle cx="152" cy="52" r="9" fill="none" stroke="#86f0cf" strokeWidth="2" />
-        <text x="80" y="178" fill="#6c9f8c" fontSize="11" fontFamily="monospace">start</text>
-        <text x="164" y="46" fill="#6c9f8c" fontSize="11" fontFamily="monospace">goal</text>
+      <svg width="260" height="200" viewBox="0 0 260 200" role="img" aria-label="Goal in the map frame">
+        <line x1="30" y1="170" x2="230" y2="170" stroke="#2b5f4c" />
+        <line x1="30" y1="170" x2="30" y2="20" stroke="#2b5f4c" />
+        <circle cx="70" cy="140" r="6" fill="#86f0cf" />
+        <line x1="70" y1="140" x2="180" y2="60" stroke="#eafff7" strokeWidth="2" strokeDasharray="5 4" />
+        <circle cx="180" cy="60" r="9" fill="none" stroke="#86f0cf" strokeWidth="2" />
+        <text x="190" y="54" fill="#6c9f8c" fontSize="11" fontFamily="monospace">goal (map)</text>
       </svg>
     ),
   },
   {
     id: 'safe',
     title: 'Safety first',
-    body: 'Precedence is fixed: e-stop, then health faults, then degraded perception or invalid pose, then the Nav2 candidate. This UI can assert e-stop but never publishes a drive command.',
+    body: 'Precedence is fixed: e-stop, then health faults, then degraded perception or invalid pose, then the Nav2 candidate. The Dev 5 ugv_safety arbiter enforces it; this console only shows and asks.',
     caption: 'e-stop > health > degraded > nav2',
     visual: (
       <div className="fs-ladder">
@@ -120,7 +114,7 @@ export default function FeatureScroller() {
   }
 
   return (
-    <section ref={section} id="features" className="features" style={{ ['--steps' as string]: n }} aria-label="What WHOAMI does">
+    <section ref={section} id="features" className="features" style={{ ['--steps' as string]: n }} aria-label="What the operator console does">
       <div className="fs-stage">
         <div className="fs-list">
           <p className="fs-kicker">/ what it does</p>

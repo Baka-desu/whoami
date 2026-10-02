@@ -1,0 +1,39 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>ugv_api</name>
+  <version>0.1.0</version>
+  <description>
+    Dev 5 operator gateway: versioned REST API (/api/v1) + SSE telemetry at the operator boundary.
+    Exposes only the operator items architecture.md defines: e-stop (§3.1), the §12 health table /
+    safety status, the final /cmd_vel, mapping|localize mode (§10) and map-frame NavigateToPose goals
+    (§10, §11). Inter-dev links stay ROS 2 topics. Never publishes /cmd_vel or /cmd_vel_nav2.
+  </description>
+  <maintainer email="dev@neogenmedia.com">jeswin-christie</maintainer>
+  <license>Proprietary</license>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>std_srvs</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>action_msgs</exec_depend>
+  <exec_depend>nav2_msgs</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>python3-fastapi</exec_depend>
+  <exec_depend>python3-uvicorn</exec_depend>
+  <exec_depend>python3-pydantic</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+
+  <test_depend>python3-pytest</test_depend>
+  <test_depend>python3-httpx</test_depend>
+  <test_depend>python3-yaml</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

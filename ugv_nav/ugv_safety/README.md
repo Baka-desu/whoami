@@ -25,6 +25,9 @@ ros2 launch ugv_safety safety.launch.py [config_path:=...]
 - It subscribes twice: volatile (every publisher, including the CLI, may assert or release) and transient-local
   (a still-living latching publisher's last value). The replayed one may only **assert**: it can be older than
   the stored state, so it never releases an e-stop.
+- Operator paths: the web console's E-stop goes through the `ugv_api` gateway (`PUT /api/v1/safety/e-stop`,
+  latched and repeated while asserted). If the gateway is down, use the CLI:
+  `ros2 topic pub --once /ugv/e_stop std_msgs/msg/Bool "{data: true}"` (release: `"{data: false}"`).
 
 A fresh arbiter holds at level 2 until every watched source has spoken. The zero is immediate by default, as
 architecture.md §3.1 says; `ramp_on_hold: true` in the config adds a smooth stop on levels 2 and 3 (dev.md Dev 5

@@ -3,6 +3,7 @@ ros2 launch ugv_bringup camera.launch.py calibration_mode:=true [width:=640 heig
 
 calibration_file has no default on purpose: a camera YAML must come from a real calibration, never be
 invented. Calibration mode publishes raw images only (no CameraInfo) so `camera_calibration` can produce it.
+A YAML flagged `placeholder: true` is refused unless allow_placeholder_calibration:=true (bring-up only).
 """
 
 from launch import LaunchDescription
@@ -25,6 +26,8 @@ _ARGS: dict[str, tuple[str, type]] = {
     "calibration_mode": ("false", bool),
     "width": ("640", int),
     "height": ("480", int),
+    "transport_latency_s": ("0.0", float),  # measured delay of a network stream; stamp = arrival - this
+    "allow_placeholder_calibration": ("false", bool),  # load a `placeholder: true` YAML (bring-up only, WARNs)
 }
 
 

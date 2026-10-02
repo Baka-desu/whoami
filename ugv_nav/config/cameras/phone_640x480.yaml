@@ -1,0 +1,41 @@
+# Camera: phone streaming 640x480 video to the laptop over a network tunnel (MJPEG over HTTP or RTSP,
+# opened by URL with the driver's `device` argument). K is valid only at 640x480.
+#
+# THIS IS NOT A CALIBRATION OF THE PHONE. The intrinsics below are copied unchanged from
+# laptop_webcam_640x480.yaml so that the driver can start and the rest of the stack can be brought up and
+# checked while the phone is not yet calibrated. They belong to a different camera with a different lens.
+# Used as they are, they stretch depth along the viewing axis in proportion to the focal-length error: DA3
+# converts depth to metres with fx and RTAB-Map back-projects it with K, so every metric distance and the map
+# scale come out wrong by that factor, with full confidence.
+#
+# `placeholder: true` makes the camera driver log a WARN at start-up and every 10 s while this file is loaded.
+# Replace this file, and remove the `placeholder` line, before any mapping run that counts:
+# lock the phone's focus and exposure, run the driver with calibration_mode:=true, calibrate at 640x480 with
+# cameracalibrator, and save the result as this file (steps in config/cameras/README.md).
+placeholder: true
+image_width: 640
+image_height: 480
+camera_name: phone
+camera_matrix:
+  rows: 3
+  cols: 3
+  data: [594.58444,   0.     , 311.15451,
+           0.     , 596.2187 , 232.11396,
+           0.     ,   0.     ,   1.     ]
+distortion_model: plumb_bob
+distortion_coefficients:
+  rows: 1
+  cols: 5
+  data: [0.033570, -0.132296, -0.003104, 0.001760, 0.000000]
+rectification_matrix:
+  rows: 3
+  cols: 3
+  data: [1., 0., 0.,
+         0., 1., 0.,
+         0., 0., 1.]
+projection_matrix:
+  rows: 3
+  cols: 4
+  data: [593.94919,   0.     , 311.87159,   0.     ,
+           0.     , 597.38709, 231.14419,   0.     ,
+           0.     ,   0.     ,   1.     ,   0.     ]

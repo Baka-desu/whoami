@@ -87,10 +87,13 @@ def test_s4_launch_nodes_per_odom_source(odom_source: str, expect_vo: bool, dept
             "depth_cloud_topic": "/perception/depth_cloud",
             "depth_topic": "/camera/depth/image_raw",
             "wheel_odom_topic": "/wheel/odom",
+            "timing": "default",
+            "map_assembler": "false",
+            "calibration_file": "",
         }
     )
     execs = [a.node_executable for a in mod._setup(ctx) if isinstance(a, Node)]
-    expected = {"rgbd_sync", "odom_selector", "rtabmap", "pose_validity_node", "distance_tracker"}
+    expected = {"rgbd_sync", "odom_selector", "rtabmap", "pose_validity_node", "distance_tracker", "map_stats_node"}
     expected |= {"rgbd_odometry"} if expect_vo else set()
     expected |= {"pointcloud_to_depthimage"} if depth_input == "cloud" else set()
     assert set(execs) == expected
@@ -107,3 +110,16 @@ def test_s5_no_logger_severity_switch_on_one_call_site() -> None:
         p.name for p in (_PKG / "ugv_localization" / "nodes").glob("*.py") if pattern.search(p.read_text(encoding="utf-8"))
     ]
     assert offenders == []
+
+
+def test_s6_rtabmap_3d_map_outputs_pinned() -> None:
+    # Task 8: the 3D map outputs are on (Grid/3D) and the node parameters behind them are explicit, so a rtabmap upgrade
+    # cannot change what the viewer and the elevation mapper receive. The real stack is test_ros_stack.py::test_x4.
+    import yaml
+
+    params = yaml.safe_load((_PKG / "config" / "rtabmap_rgbd.yaml").read_text(encoding="utf-8"))["/**"]["ros__parameters"]
+    assert params["Grid/3D"] == "true"  # library params are strings
+    assert params["cloud_output_voxelized"] is True  # node params are plain values
+    assert params["cloud_subtract_filtering"] is False
+    assert params["map_always_update"] is False
+    assert params["latch"] is True

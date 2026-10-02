@@ -2,7 +2,7 @@ name: ui
 
 on:
   pull_request:
-    paths: ['ui/**', '.github/workflows/ui.yml']
+    paths: ['ui/**', 'ugv_nav/ugv_api/test/fixtures/map/**', '.github/workflows/ui.yml']
 
 jobs:
   check:

@@ -1,0 +1,6 @@
+# LAPTOP timing overlay on odom_select.yaml (localization.launch.py timing:=laptop; launch passes it as
+# profile_overlay_path, every other key comes from the base file). On an RTX 4060 laptop DA3 depth arrives
+# ~1 Hz and ~0.7 s after the image, so the 0.5 s visual timeout drops a tracking robot's odometry.
+# Not for a deployed robot. Keys must exist in the base file (a typo fails at load).
+selector:
+  visual_timeout_s: 1.5       # visual silent this long -> dead (depth rate = DA3 rate; keep > 1/fps)

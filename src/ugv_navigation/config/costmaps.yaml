@@ -1,0 +1,134 @@
+# Dev 3 costmap configuration (the product costmaps; navigation.launch.py loads this by default).
+#
+# Layers, in order:
+#   semantic_layer  nav2_costmap_2d::StaticLayer on /semantic_costmap/grid (ugv_costmap semantic_costmap_node,
+#                   Dev 1 mask projected by costmap_core). Overwrites: it is the first layer.
+#   voxel_layer     nav2_costmap_2d::VoxelLayer on /perception/depth_cloud (Depth Anything 3 Metric Large,
+#                   architecture §6, §9 geometry side-channel). combination_method 1 = Max, so a geometric
+#                   lethal cell always wins over semantic traversable, and a geometrically free cell never
+#                   lowers a semantic hazard (architecture §9: semantic never clears geometry, and vice versa
+#                   free geometry never clears a semantic hazard).
+#   inflation_layer inflates semantic and geometry lethal alike.
+#
+# Never-observed space: this robot sees only its camera wedge, so both costmaps run with
+# track_unknown_space: false (unseen = free for planning, Smac2D allow_unknown is false). Observed class 0
+# ("unknown") is NOT unseen: the semantic node publishes it as a non-free cost (architecture §8.1). Accepted
+# §8.1 exception for never-observed cells only, owner 2026-10-02 (mindmap D22).
+#
+# Footprint: Dev 5's config/robots/footprint_<robot>.yaml overrides this when present (navigation.launch.py).
+# PLACEHOLDER below: a standard small UGV (Clearpath Jackal class, 0.50 x 0.43 m, base_link at the centre),
+# chosen by the owner on 2026-10-01 until the real platform is measured. Replace it with Dev 5's footprint
+# before any outdoor run (mindmap D25); navigation.launch.py logs a WARNING while it is in use.
+
+global_costmap:
+  global_costmap:
+    ros__parameters:
+      global_frame: map
+      robot_base_frame: base_link
+      update_frequency: 2.0
+      publish_frequency: 1.0
+      transform_tolerance: 0.5
+      # Wait for map/odom -> base_link at activation: live_cam starts Nav2 together with RTAB-Map, which has
+      # no pose until DA3 depth flows (model load ~1 min). Nav2's 60 s default aborts the whole bringup first.
+      initial_transform_timeout: 600.0
+      resolution: 0.1
+      rolling_window: true
+      width: 30
+      height: 30
+      track_unknown_space: false
+      footprint: "[[0.25, 0.215], [0.25, -0.215], [-0.25, -0.215], [-0.25, 0.215]]"
+      footprint_padding: 0.03
+      plugins: ["semantic_layer", "voxel_layer", "inflation_layer"]
+      semantic_layer:
+        plugin: "nav2_costmap_2d::StaticLayer"
+        map_topic: /semantic_costmap/grid
+        map_subscribe_transient_local: true
+        subscribe_to_updates: false
+        use_maximum: false
+        trinary_costmap: false
+        lethal_cost_threshold: 100
+        transform_tolerance: 0.5
+      voxel_layer:
+        plugin: "nav2_costmap_2d::VoxelLayer"
+        enabled: true
+        combination_method: 1
+        publish_voxel_map: false
+        origin_z: 0.0
+        z_resolution: 0.1
+        z_voxels: 16
+        mark_threshold: 1
+        observation_sources: depth_cloud
+        depth_cloud:
+          topic: /perception/depth_cloud
+          data_type: "PointCloud2"
+          marking: true
+          clearing: true
+          # Ground returns below min_obstacle_height are not obstacles (mono metric depth is noisy near 0).
+          min_obstacle_height: 0.15
+          max_obstacle_height: 1.5
+          obstacle_min_range: 0.0
+          obstacle_max_range: 4.0
+          raytrace_min_range: 0.0
+          raytrace_max_range: 5.0
+          expected_update_rate: 0.0
+          inf_is_valid: false
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        inflation_radius: 0.6
+        cost_scaling_factor: 3.0
+
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      global_frame: odom
+      robot_base_frame: base_link
+      update_frequency: 5.0
+      publish_frequency: 2.0
+      transform_tolerance: 0.5
+      # Wait for map/odom -> base_link at activation: live_cam starts Nav2 together with RTAB-Map, which has
+      # no pose until DA3 depth flows (model load ~1 min). Nav2's 60 s default aborts the whole bringup first.
+      initial_transform_timeout: 600.0
+      resolution: 0.1
+      rolling_window: true
+      width: 6
+      height: 6
+      track_unknown_space: false
+      footprint: "[[0.25, 0.215], [0.25, -0.215], [-0.25, -0.215], [-0.25, 0.215]]"
+      footprint_padding: 0.03
+      plugins: ["semantic_layer", "voxel_layer", "inflation_layer"]
+      semantic_layer:
+        plugin: "nav2_costmap_2d::StaticLayer"
+        map_topic: /semantic_costmap/grid
+        map_subscribe_transient_local: true
+        subscribe_to_updates: false
+        use_maximum: false
+        trinary_costmap: false
+        lethal_cost_threshold: 100
+        transform_tolerance: 0.5
+      voxel_layer:
+        plugin: "nav2_costmap_2d::VoxelLayer"
+        enabled: true
+        combination_method: 1
+        publish_voxel_map: false
+        origin_z: 0.0
+        z_resolution: 0.1
+        z_voxels: 16
+        mark_threshold: 1
+        observation_sources: depth_cloud
+        depth_cloud:
+          topic: /perception/depth_cloud
+          data_type: "PointCloud2"
+          marking: true
+          clearing: true
+          min_obstacle_height: 0.15
+          max_obstacle_height: 1.5
+          obstacle_min_range: 0.0
+          obstacle_max_range: 4.0
+          raytrace_min_range: 0.0
+          raytrace_max_range: 5.0
+          expected_update_rate: 0.0
+          inf_is_valid: false
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        inflation_radius: 0.6
+        cost_scaling_factor: 3.0
