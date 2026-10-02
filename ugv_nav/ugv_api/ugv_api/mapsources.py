@@ -6,9 +6,7 @@ ros_node.py copies the few fields it needs out of a message and calls one of the
   cloud       cloud_source          {"fields", "point_step", "n_points", "is_bigendian", "data"}
   trajectory  trajectory_source     (N, 7) float32 x y z qx qy qz qw
   grid        grid_source           {"cells", "resolution", "origin_xy", "origin_yaw"}
-  depth       depth_source          {"depth_m": (H, W) float32}
   live        backproject + transform_points -> {"xyz": (N, 3) float32}   (built by the caller)
-  camera      jpeg_source           bytes
 
 A source is immutable once it is in the store. What a message hands over is therefore either copied or a
 read-only view of a buffer nobody writes again (rclpy builds a fresh message, and a fresh `data` buffer, for
@@ -35,7 +33,6 @@ __all__ = [
     "depth_source",
     "grid_source",
     "intrinsics",
-    "jpeg_source",
     "parse_stats",
     "quaternion_yaw",
     "stamp_seconds",
@@ -70,8 +67,6 @@ class MapConfig:
     # --- what the HTTP layer encodes with (create_app tunables)
     cloud_point_budget: int = 500_000
     cloud_spacing_m: float = 0.05
-    depth_stride: int = 2
-    depth_max_range_m: float = 8.0
     # --- the live scan built from the depth image
     live_stride: int = 4
     live_range_min_m: float = 0.3
@@ -85,7 +80,6 @@ class MapConfig:
     trajectory_topic: str = "/rtabmap/mapPath"
     grid_topic: str = "/global_costmap/costmap"
     depth_topic: str = "/perception/depth/image"
-    camera_topic: str = "/image_raw/compressed"
     map_stats_topic: str = "/ugv/map/stats"
     perception_stats_topic: str = "/ugv/perception/stats"
 
@@ -93,8 +87,6 @@ class MapConfig:
         if not isinstance(self.cloud_point_budget, int) or self.cloud_point_budget < 0:
             raise ValueError(f"cloud_point_budget must be an integer >= 0, got {self.cloud_point_budget!r}")
         _finite_positive("cloud_spacing_m", self.cloud_spacing_m)
-        _int_at_least("depth_stride", self.depth_stride, 1)
-        _finite_positive("depth_max_range_m", self.depth_max_range_m)
         _int_at_least("live_stride", self.live_stride, 1)
         _finite_positive("live_range_max_m", self.live_range_max_m)
         if not (isinstance(self.live_range_min_m, (int, float)) and math.isfinite(self.live_range_min_m)
@@ -112,8 +104,6 @@ class MapConfig:
         return {
             "cloud_point_budget": self.cloud_point_budget,
             "cloud_spacing_m": self.cloud_spacing_m,
-            "depth_stride": self.depth_stride,
-            "depth_max_range_m": self.depth_max_range_m,
         }
 
 
@@ -220,7 +210,7 @@ def grid_source(*, data: Any, width: int, height: int, resolution: float, origin
 
 def depth_source(*, encoding: str, height: int, width: int, step: int, is_bigendian: bool,
                  data: Any) -> dict[str, np.ndarray]:
-    """`depth` source from a 32FC1 image in metres (NaN = hole): a native-order (H, W) float32 copy."""
+    """A 32FC1 depth image in metres (NaN = hole) as a native-order (H, W) float32 copy, for the live scan."""
     if encoding != "32FC1":
         raise ValueError(f"depth image encoding must be 32FC1 (metres), got {encoding!r}")
     height, width, step = int(height), int(width), int(step)
@@ -283,16 +273,7 @@ def transform_points(xyz: np.ndarray, translation: Sequence[float], quaternion: 
     return (xyz.astype(np.float64) @ rot.T + t).astype(np.float32)
 
 
-# ----------------------------------------------------------------------------------------- camera, stats
-
-
-def jpeg_source(data: Any) -> bytes:
-    """`camera` source: the JPEG as immutable bytes. Anything that does not start like a JPEG is refused,
-    because the route serves it as image/jpeg."""
-    frame = bytes(data)
-    if frame[:3] != b"\xff\xd8\xff":
-        raise ValueError("camera frame is not a JPEG (no FF D8 FF start)")
-    return frame
+# ------------------------------------------------------------------------------------------------- stats
 
 
 def parse_stats(text: str) -> dict[str, Any] | None:

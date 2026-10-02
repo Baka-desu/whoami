@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { DepthFrame, GridFrame } from './codec'
+import type { GridFrame } from './codec'
 import { buildGridTexture, colorByHeight, depthToRgba, writeRamp } from './geometry'
 
 const NaN_ = Number.NaN
@@ -175,26 +175,23 @@ describe('buildGridTexture', () => {
   })
 })
 
-function depth(width: number, height: number, counts: number[], over: Partial<DepthFrame> = {}): DepthFrame {
-  return { epoch: 1, seq: 1, stampS: 0, width, height, unitM: 0.001, maxRangeM: 8, counts: Uint16Array.from(counts), ...over }
-}
+const metres = (...m: number[]) => Float32Array.from(m)
 
 describe('depthToRgba', () => {
   it('is RGBA, width * height * 4, as a Uint8ClampedArray', () => {
-    const t = depthToRgba(depth(3, 2, [1, 2, 3, 4, 5, 6]))
+    const t = depthToRgba(metres(1, 2, 3, 4, 5, 6), 3, 2, 8)
     expect(t).toBeInstanceOf(Uint8ClampedArray)
     expect(t.length).toBe(24)
   })
 
-  it('makes holes (count 0) fully transparent', () => {
-    const t = depthToRgba(depth(2, 1, [0, 1000]))
-    expect(texel(t, 0)).toEqual([0, 0, 0, 0])
-    expect(texel(t, 1)[3]).toBe(255)
+  it('makes holes (NaN, infinite, zero or negative) fully transparent', () => {
+    const t = depthToRgba(metres(NaN_, Infinity, 0, -1, 1), 5, 1, 8)
+    for (let i = 0; i < 4; i++) expect(texel(t, i)).toEqual([0, 0, 0, 0])
+    expect(texel(t, 4)[3]).toBe(255)
   })
 
   it('is a grey ramp over 0..maxRangeM, near bright and far dark', () => {
-    // 0.5 m, 2 m, 4 m, 8 m, with 8 m max range and 1 mm counts
-    const t = depthToRgba(depth(4, 1, [500, 2000, 4000, 8000]))
+    const t = depthToRgba(metres(0.5, 2, 4, 8), 4, 1, 8)
     const greys = [0, 1, 2, 3].map((i) => texel(t, i))
     for (const [r, g, b, a] of greys) {
       expect(r).toBe(g)
@@ -208,33 +205,25 @@ describe('depthToRgba', () => {
     expect(greys[2][0]).toBeCloseTo(128, -1) // half range, about mid grey
   })
 
-  it('converts counts to metres with unitM, not with a fixed 1 mm', () => {
-    const a = depthToRgba(depth(1, 1, [100], { unitM: 0.01 })) // 1 m
-    const b = depthToRgba(depth(1, 1, [1000], { unitM: 0.001 })) // 1 m
-    expect(texel(a, 0)).toEqual(texel(b, 0))
-  })
-
   it('clamps beyond the maximum range to the far colour and keeps the pixel visible', () => {
-    const t = depthToRgba(depth(1, 1, [65535], { maxRangeM: 8 })) // 65.5 m
-    expect(texel(t, 0)).toEqual([0, 0, 0, 255])
+    expect(texel(depthToRgba(metres(65.5), 1, 1, 8), 0)).toEqual([0, 0, 0, 255])
   })
 
   it('stays row-major: image row 0 first', () => {
-    const t = depthToRgba(depth(2, 2, [0, 0, 0, 1000]))
+    const t = depthToRgba(metres(NaN_, NaN_, NaN_, 1), 2, 2, 8)
     expect(texel(t, 3)[3]).toBe(255)
     for (let i = 0; i < 3; i++) expect(texel(t, i)[3]).toBe(0)
   })
 
   it('does not throw on a degenerate range and still marks holes transparent', () => {
-    const t = depthToRgba(depth(2, 1, [0, 1000], { maxRangeM: 0 }))
+    const t = depthToRgba(metres(NaN_, 1), 2, 1, 0)
     expect(texel(t, 0)[3]).toBe(0)
-    expect(texel(t, 1)[3]).toBe(255)
+    expect(texel(t, 1)).toEqual([128, 128, 128, 255])
   })
 
-  it('returns an empty array for an empty frame and handles 640 x 480', () => {
-    expect(depthToRgba(depth(0, 0, [])).length).toBe(0)
-    const counts = new Uint16Array(640 * 480).fill(2500)
-    const t = depthToRgba({ ...depth(640, 480, []), counts })
-    expect(t.length).toBe(640 * 480 * 4)
+  it('leaves pixels the data does not reach transparent and handles 640 x 480', () => {
+    expect(depthToRgba(metres(), 0, 0, 8).length).toBe(0)
+    expect(texel(depthToRgba(metres(1), 2, 1, 8), 1)).toEqual([0, 0, 0, 0])
+    expect(depthToRgba(new Float32Array(640 * 480).fill(2.5), 640, 480, 8).length).toBe(640 * 480 * 4)
   })
 })

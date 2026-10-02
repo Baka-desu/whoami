@@ -10,7 +10,7 @@ export interface MapToggles {
   live: boolean // current depth scan
   trajectory: boolean
   grid: boolean // cost grid
-  images: boolean // the depth and camera panels
+  images: boolean // the depth and camera panels (fed by the camera feed, not fetched from the map endpoints)
 }
 
 export type ToggleKey = keyof MapToggles
@@ -42,9 +42,7 @@ export const toggled = (t: MapToggles, key: ToggleKey): MapToggles => ({ ...t, [
 
 // The layers the data hook fetches: a layer that is toggled off is not requested at all.
 export function enabledLayers(t: MapToggles): Enabled {
-  return {
-    cloud: t.cloud, live: t.live, trajectory: t.trajectory, grid: t.grid, depth: t.images, camera: t.images,
-  }
+  return { cloud: t.cloud, live: t.live, trajectory: t.trajectory, grid: t.grid }
 }
 
 // ---- the main view ---------------------------------------------------------------------------------

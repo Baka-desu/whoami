@@ -32,12 +32,8 @@ from ugv_api.watches import Timeouts  # noqa: E402
 
 PROBLEM = "application/problem+json"
 OCTET = "application/octet-stream"
-LAYERS = ("cloud", "trajectory", "grid", "live", "depth", "camera")
-BINARY_LAYERS = tuple(name for name in LAYERS if name != "camera")
+LAYERS = ("cloud", "trajectory", "grid", "live")
 NOW_NS = 1_000 * 1_000_000_000
-JPEG = b"\xff\xd8\xff\xe0\x00\x10JFIF-pretend-picture\xff\xd9"
-
-
 class FakeRobot:
     """Implements app.Robot with a clock the test moves by hand."""
 
@@ -109,19 +105,12 @@ def trajectory_source() -> np.ndarray:
     return np.array([[0, 0, 0, 0, 0, 0, 1], [3, 4, 0, 0, 0, 1, 0], [3, 4, 12, 0.5, 0.5, 0.5, 0.5]], np.float32)
 
 
-def depth_source() -> dict:
-    d = np.full((4, 6), 2.0, np.float32)
-    d[0, 2] = 9.0  # beyond the 8 m range: a hole once decimated onto it
-    return {"depth_m": d}
-
-
 def live_source(n: int = 6) -> dict:
     return {"xyz": np.arange(3 * n, dtype=np.float32).reshape(n, 3)}
 
 
 SOURCES = {
     "cloud": cloud_source, "trajectory": trajectory_source, "grid": grid_source, "live": live_source,
-    "depth": depth_source, "camera": lambda: JPEG,
 }
 assert tuple(SOURCES) == LAYERS
 
@@ -165,10 +154,10 @@ def test_an_unknown_layer_is_a_404_problem(rig):
 # ----------------------------------------------------------------------- after put: decoded bodies
 
 
-def get_binary(rig: Rig, layer: str, media: str = OCTET):
+def get_binary(rig: Rig, layer: str):
     r = rig.get(f"/map/{layer}")
     assert r.status_code == 200, r.text
-    assert r.headers["content-type"] == media
+    assert r.headers["content-type"] == OCTET
     assert r.headers["cache-control"] == "no-store"
     assert int(r.headers["content-length"]) == len(r.content)
     return r
@@ -223,27 +212,6 @@ def test_grid_decodes(rig):
     assert (d["resolution_m"], d["origin_x"], d["origin_y"], d["origin_yaw"]) == (0.25, -0.5, 1.0, 0.5)
 
 
-def test_depth_is_decimated_and_range_limited_with_the_configured_values():
-    rig = Rig(MapStore(), depth_stride=2, depth_max_range_m=8.0)
-    rig.maps.put("depth", depth_source(), 8.0)
-    d = codec.decode_depth(get_binary(rig, "depth").content)
-    assert (d["width"], d["height"]) == (3, 2) and d["max_range_m"] == 8.0
-    assert d["counts"].tolist() == [[2000, 0, 2000], [2000, 2000, 2000]]  # [0, 2] was 9 m: a hole
-
-
-def test_depth_stride_one_keeps_every_pixel():
-    rig = Rig(MapStore(), depth_stride=1)
-    rig.maps.put("depth", depth_source(), 8.0)
-    d = codec.decode_depth(get_binary(rig, "depth").content)
-    assert (d["width"], d["height"]) == (6, 4)
-
-
-def test_camera_is_the_stored_jpeg_untouched(rig):
-    rig.maps.put("camera", JPEG, 9.0)
-    r = get_binary(rig, "camera", media="image/jpeg")
-    assert r.content == JPEG
-
-
 def test_each_layer_has_its_own_route_and_none_serves_another_layers_data(rig):
     rig.maps.put("grid", grid_source(), 1.0)
     for layer in LAYERS:
@@ -265,8 +233,8 @@ def test_a_source_the_codec_rejects_is_a_500_problem_and_does_not_poison_the_lay
 def test_status_reports_the_new_seq_after_a_put(rig):
     rig.maps.put("cloud", cloud_source(), 1.0)
     rig.maps.put("cloud", cloud_source(), 2.0)
-    rig.maps.put("camera", JPEG, 2.0)
-    assert rig.get("/map").json()["seq"] == {**{name: 0 for name in LAYERS}, "cloud": 2, "camera": 1}
+    rig.maps.put("grid", grid_source(), 2.0)
+    assert rig.get("/map").json()["seq"] == {**{name: 0 for name in LAYERS}, "cloud": 2, "grid": 1}
 
 
 def test_the_body_header_agrees_with_the_status(rig):
@@ -299,9 +267,9 @@ def test_the_status_is_cheap_and_does_not_encode(rig, monkeypatch):
     def forbidden(*_a, **_kw):
         raise AssertionError("GET /map must not encode a layer")
 
-    for name in ("encode_cloud", "encode_trajectory", "encode_grid", "encode_depth"):
+    for name in ("encode_cloud", "encode_trajectory", "encode_grid"):
         monkeypatch.setattr(codec, name, forbidden)
-    for layer in BINARY_LAYERS:
+    for layer in LAYERS:
         rig.maps.put(layer, SOURCES[layer](), 1.0)
     assert rig.get("/map").status_code == 200
 
@@ -330,7 +298,7 @@ def test_get_map_is_the_demand_heartbeat_and_the_layer_routes_are_not(rig):
     rig.maps.put("cloud", cloud_source(), 1.0)
     rig.get("/map/cloud")
     rig.get("/map/pose")
-    rig.get("/map/camera")  # a 503, still no touch
+    rig.get("/map/grid")  # a 503, still no touch
     assert not rig.maps.wanted(now_s, 5.0)
 
     rig.get("/map")
@@ -420,7 +388,6 @@ def test_map_handlers_are_sync_so_encoding_runs_in_the_threadpool(rig):
 
 @pytest.mark.parametrize("tunable,value", [
     ("cloud_point_budget", -1), ("cloud_spacing_m", 0.0), ("cloud_spacing_m", float("nan")),
-    ("depth_stride", 0), ("depth_max_range_m", 0.0), ("depth_max_range_m", -1.0),
 ])
 def test_bad_tunables_fail_at_construction(tunable, value):
     with pytest.raises(ValueError, match=tunable):

@@ -46,10 +46,10 @@ describe('persisted toggles', () => {
     expect(DEFAULT_TOGGLES.cloud).toBe(true) // never mutated
   })
 
-  it('turns toggles into the layers to fetch: the image panels switch depth and camera together', () => {
+  it('turns toggles into the layers to fetch; the image panels fetch nothing', () => {
     const t: MapToggles = { ...DEFAULT_TOGGLES, cloud: false, live: true, trajectory: false, grid: false, images: false }
-    expect(enabledLayers(t)).toEqual({ cloud: false, live: true, trajectory: false, grid: false, depth: false, camera: false })
-    expect(enabledLayers({ ...t, images: true })).toMatchObject({ depth: true, camera: true })
+    expect(enabledLayers(t)).toEqual({ cloud: false, live: true, trajectory: false, grid: false })
+    expect(enabledLayers({ ...t, images: true })).toEqual(enabledLayers(t))
   })
 })
 

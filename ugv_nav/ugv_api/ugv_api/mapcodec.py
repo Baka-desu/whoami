@@ -11,7 +11,6 @@ little-endian:
     UGVT trajectory  header 32  u32 count, f32 length_m; body f32 x,y,z,qx,qy,qz,qw per pose
     UGVG cost grid   header 48  u32 width, u32 height, f32 resolution_m, f32 origin_x, f32 origin_y,
                                 f32 origin_yaw; body i8 cell[w*h]
-    UGVD depth       header 40  u32 width, u32 height, f32 unit_m, f32 max_range_m; body u16 count[w*h]
 
 2-D layers are row-major with row = y index and column = x index; the origin is the world position of the
 corner of cell (0, 0). `epoch` (random per gateway process) and `seq` let the viewer tell a restarted
@@ -31,17 +30,14 @@ FORMAT = 1
 MAGIC_CLOUD = b"UGVC"
 MAGIC_TRAJECTORY = b"UGVT"
 MAGIC_GRID = b"UGVG"
-MAGIC_DEPTH = b"UGVD"
 
 PRELUDE_BYTES = 24
 CLOUD_HEADER_BYTES = 64
 TRAJECTORY_HEADER_BYTES = 32
 GRID_HEADER_BYTES = 48
-DEPTH_HEADER_BYTES = 40
 
 FLAG_RGB = 1  # UGVC flags bit0
 
-DEPTH_UNIT_M = 0.001  # one depth count = 1 mm
 
 # sensor_msgs/msg/PointField datatype codes
 POINTFIELD_UINT32 = 6
@@ -51,24 +47,20 @@ _PRELUDE = struct.Struct("<4sHHIId")
 _CLOUD = struct.Struct("<IIfI3f3f")
 _TRAJECTORY = struct.Struct("<If")
 _GRID = struct.Struct("<IIffff")
-_DEPTH = struct.Struct("<IIff")
 
 assert _PRELUDE.size == PRELUDE_BYTES
 assert PRELUDE_BYTES + _CLOUD.size == CLOUD_HEADER_BYTES
 assert PRELUDE_BYTES + _TRAJECTORY.size == TRAJECTORY_HEADER_BYTES
 assert PRELUDE_BYTES + _GRID.size == GRID_HEADER_BYTES
-assert PRELUDE_BYTES + _DEPTH.size == DEPTH_HEADER_BYTES
 
 __all__ = [
     "cloud_view",
     "encode_cloud",
     "encode_trajectory",
     "encode_grid",
-    "encode_depth",
     "decode_cloud",
     "decode_trajectory",
     "decode_grid",
-    "decode_depth",
 ]
 
 
@@ -363,50 +355,5 @@ def decode_grid(b: bytes) -> dict:
         origin_y=origin_y,
         origin_yaw=origin_yaw,
         cells=np.frombuffer(b, dtype=np.int8, count=width * height, offset=GRID_HEADER_BYTES).reshape(height, width),
-    )
-    return d
-
-
-# ------------------------------------------------------------------------------------------- depth
-
-
-def encode_depth(
-    depth_m: np.ndarray, *, epoch: int, seq: int, stamp_s: float, stride: int, max_range_m: float
-) -> bytes:
-    """UGVD from an (H, W) depth image in metres, decimated to every `stride`-th row and column. NaN, values
-    <= 0 and values > `max_range_m` become 0 (hole); the rest become round(metres / 0.001) clipped to
-    1..65535 so a real measurement is never mistaken for a hole."""
-    d = np.asarray(depth_m)
-    if d.ndim != 2:
-        raise ValueError(f"depth_m must be a 2-D (rows, columns) array, got shape {d.shape}")
-    stride = int(stride)
-    if stride < 1:
-        raise ValueError("stride must be >= 1")
-    max_range = _positive_finite(max_range_m, "max_range_m")
-    d = d[::stride, ::stride].astype(np.float64)
-    with np.errstate(invalid="ignore"):
-        valid = np.isfinite(d) & (d > 0.0) & (d <= max_range)
-    counts = np.zeros(d.shape, dtype=np.uint16)
-    counts[valid] = np.clip(np.rint(d[valid] / DEPTH_UNIT_M), 1, 65535).astype(np.uint16)
-    rows, cols = counts.shape
-    return b"".join(
-        (
-            _prelude(MAGIC_DEPTH, DEPTH_HEADER_BYTES, epoch, seq, stamp_s),
-            _DEPTH.pack(cols, rows, DEPTH_UNIT_M, max_range),
-            np.ascontiguousarray(counts, dtype="<u2").tobytes(),
-        )
-    )
-
-
-def decode_depth(b: bytes) -> dict:
-    d = _decode_prelude(b, MAGIC_DEPTH, DEPTH_HEADER_BYTES, "depth")
-    width, height, unit_m, max_range_m = _DEPTH.unpack_from(b, PRELUDE_BYTES)
-    _require_length(b, DEPTH_HEADER_BYTES + 2 * width * height, "depth")
-    d.update(
-        width=width,
-        height=height,
-        unit_m=unit_m,
-        max_range_m=max_range_m,
-        counts=np.frombuffer(b, dtype="<u2", count=width * height, offset=DEPTH_HEADER_BYTES).reshape(height, width),
     )
     return d

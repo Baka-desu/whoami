@@ -340,26 +340,6 @@ def test_transform_points_of_nothing_is_nothing_and_a_zero_quaternion_is_refused
         ms.transform_points(np.zeros((1, 3), np.float32), (0, 0, 0), (0, 0, 0, 0))
 
 
-# ------------------------------------------------------------------------------------------- camera
-
-
-JPEG = b"\xff\xd8\xff\xe0\x00\x10JFIF-pretend-picture\xff\xd9"
-
-
-def test_jpeg_source_is_the_frame_as_immutable_bytes():
-    buffer = array.array("B", JPEG)
-    out = ms.jpeg_source(buffer)
-    assert type(out) is bytes and out == JPEG
-    buffer[0] = 0  # the message buffer changing later must not reach the stored frame
-    assert out == JPEG
-
-
-@pytest.mark.parametrize("data", [b"", b"\xff", b"\x89PNG\r\n\x1a\n....", b"\x00" * 16])
-def test_jpeg_source_refuses_what_is_not_a_jpeg(data):
-    with pytest.raises(ValueError):
-        ms.jpeg_source(data)
-
-
 # --------------------------------------------------------------------------------------------- stats
 
 
@@ -388,31 +368,29 @@ def test_stamp_seconds_uses_the_message_stamp_and_falls_back_for_an_unstamped_on
 def test_map_config_defaults_are_the_values_the_gateway_ships_with():
     c = ms.MapConfig()
     assert (c.cloud_point_budget, c.cloud_spacing_m) == (500_000, 0.05)
-    assert (c.depth_stride, c.depth_max_range_m) == (2, 8.0)
     assert (c.live_stride, c.live_range_min_m, c.live_range_max_m) == (4, 0.3, 8.0)
     assert c.idle_timeout_s == 10.0
     assert (c.cloud_topic, c.trajectory_topic, c.grid_topic) == ("/rtabmap/cloud_map", "/rtabmap/mapPath",
                                                                   "/global_costmap/costmap")
-    assert (c.depth_topic, c.camera_topic) == ("/perception/depth/image", "/image_raw/compressed")
+    assert c.depth_topic == "/perception/depth/image"
     assert (c.map_stats_topic, c.perception_stats_topic) == ("/ugv/map/stats", "/ugv/perception/stats")
 
 
 def test_map_config_app_kwargs_are_exactly_the_tunables_create_app_takes():
     accepted = set(inspect.signature(create_app).parameters)
-    kwargs = ms.MapConfig(cloud_point_budget=10, depth_stride=3).app_kwargs()
-    assert set(kwargs) == {"cloud_point_budget", "cloud_spacing_m", "depth_stride", "depth_max_range_m"}
+    kwargs = ms.MapConfig(cloud_point_budget=10, cloud_spacing_m=0.25).app_kwargs()
+    assert set(kwargs) == {"cloud_point_budget", "cloud_spacing_m"}
     assert set(kwargs) <= accepted
-    assert kwargs["cloud_point_budget"] == 10 and kwargs["depth_stride"] == 3
+    assert kwargs["cloud_point_budget"] == 10 and kwargs["cloud_spacing_m"] == 0.25
 
 
 @pytest.mark.parametrize(
     "bad",
     [
         dict(cloud_point_budget=-1), dict(cloud_spacing_m=0.0), dict(cloud_spacing_m=math.nan),
-        dict(depth_stride=0), dict(depth_max_range_m=0.0), dict(depth_max_range_m=math.inf),
         dict(live_stride=0), dict(live_range_min_m=-0.1), dict(live_range_max_m=0.0),
         dict(live_range_min_m=5.0, live_range_max_m=5.0), dict(idle_timeout_s=0.0), dict(idle_timeout_s=math.nan),
-        dict(stats_stale_s=0.0), dict(cloud_topic=""), dict(camera_topic="relative/topic"),
+        dict(stats_stale_s=0.0), dict(cloud_topic=""), dict(depth_topic="relative/topic"),
     ],
 )
 def test_map_config_refuses_a_bad_value_naming_it(bad):

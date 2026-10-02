@@ -1,8 +1,7 @@
 import { useEffect, useState } from 'react'
 import { LAYERS, asMapStatus, getBinary, type Layer, type MapStatus } from '../source/api'
 import {
-  decodeCloud, decodeDepth, decodeGrid, decodeTrajectory,
-  type CloudFrame, type DepthFrame, type GridFrame, type TrajectoryFrame,
+  decodeCloud, decodeGrid, decodeTrajectory, type CloudFrame, type GridFrame, type TrajectoryFrame,
 } from './codec'
 
 // The map view's data. GET /map is both the layer status and the gateway's demand heartbeat, so it is polled once a
@@ -20,7 +19,7 @@ export const STATUS_STALE_MS = 3000
 
 // Minimum time between the starts of two fetches of the same layer.
 export const MIN_INTERVAL_MS: Record<Layer, number> = {
-  cloud: 2000, trajectory: 1000, grid: 1000, live: 500, depth: 500, camera: 500,
+  cloud: 2000, trajectory: 1000, grid: 1000, live: 500,
 }
 
 // A layer's version: a gateway restart changes the epoch while sequences start over, so the pair is the identity.
@@ -61,32 +60,23 @@ export function isStale(lastOkMs: number | null, lastPollFailed: boolean, nowMs:
 
 // ---- frames ---------------------------------------------------------------------------------------
 type FrameOf = {
-  cloud: CloudFrame; trajectory: TrajectoryFrame; grid: GridFrame
-  live: CloudFrame; depth: DepthFrame; camera: ImageBitmap
+  cloud: CloudFrame; trajectory: TrajectoryFrame; grid: GridFrame; live: CloudFrame
 }
 export type Frame = FrameOf[Layer]
 type Frames = { [L in Layer]: FrameOf[L] | null }
 
-const EMPTY_FRAMES: Frames = { cloud: null, trajectory: null, grid: null, live: null, depth: null, camera: null }
+const EMPTY_FRAMES: Frames = { cloud: null, trajectory: null, grid: null, live: null }
 
 // A body becomes a frame, or null when it is not a valid one (the previous frame is then kept). `live` is the same
-// point-cloud format as `cloud`; the camera body is a JPEG, so its decoder is asynchronous and may reject.
-const DECODERS: { [L in Layer]: (buf: ArrayBuffer) => FrameOf[L] | null | Promise<FrameOf[L] | null> } = {
+// point-cloud format as `cloud`.
+const DECODERS: { [L in Layer]: (buf: ArrayBuffer) => FrameOf[L] | null } = {
   cloud: decodeCloud,
   trajectory: decodeTrajectory,
   grid: decodeGrid,
   live: decodeCloud,
-  depth: decodeDepth,
-  camera: (buf) => createImageBitmap(new Blob([buf], { type: 'image/jpeg' })),
 }
 
-const decodeLayer = (layer: Layer, buf: ArrayBuffer): Promise<Frame | null> | Frame | null =>
-  (DECODERS[layer] as (b: ArrayBuffer) => Promise<Frame | null> | Frame | null)(buf)
-
-// A decoded frame that is dropped: only a bitmap holds anything that needs releasing.
-const release = (frame: Frame) => {
-  if (typeof ImageBitmap !== 'undefined' && frame instanceof ImageBitmap) frame.close()
-}
+const decodeLayer = (layer: Layer, buf: ArrayBuffer): Frame | null => (DECODERS[layer] as (b: ArrayBuffer) => Frame | null)(buf)
 
 // ---- the session ----------------------------------------------------------------------------------
 export interface MapSessionOptions {
@@ -95,7 +85,6 @@ export interface MapSessionOptions {
   enabled: Enabled // the layers wanted at the start; changed later with setEnabled
   onStatus: (status: MapStatus) => void // a status document that differs from the previous one
   onFrame: (layer: Layer, frame: Frame) => void
-  discard: (layer: Layer, frame: Frame) => void // decoded, but no longer wanted (stopped, or superseded)
   onStale: (stale: boolean) => void
   now?: () => number // milliseconds on a monotonic clock
 }
@@ -120,7 +109,7 @@ interface Run {
 const perLayer = <T>(v: T): Record<Layer, T> => Object.fromEntries(LAYERS.map((l) => [l, v])) as Record<Layer, T>
 
 export function createMapSession(opts: MapSessionOptions): MapSession {
-  const { getBuffer, decode, onStatus, onFrame, discard, onStale } = opts
+  const { getBuffer, decode, onStatus, onFrame, onStale } = opts
   let enabled = opts.enabled
   const now = opts.now ?? (() => performance.now())
 
@@ -169,15 +158,12 @@ export function createMapSession(opts: MapSessionOptions): MapSession {
       if (buf === null) return // nothing to serve yet: keep what is held, ask again later
       const frame = await decode(layer, buf)
       if (frame === null) return // not a valid body: same
-      if (r.ctl.signal.aborted || id < appliedId[layer]) { // stopped meanwhile, or a newer fetch already landed
-        discard(layer, frame)
-        return
-      }
+      if (r.ctl.signal.aborted || id < appliedId[layer]) return // stopped meanwhile, or a newer fetch already landed
       appliedId[layer] = id
       have[layer] = key
       onFrame(layer, frame)
     } catch {
-      // gateway error, an undecodable image, or the abort from stop(): keep the previous frame; if the layer is
+      // gateway error or the abort from stop(): keep the previous frame; if the layer is
       // still due it is retried after its minimum interval
     } finally {
       r.inFlight[layer] = false
@@ -268,7 +254,6 @@ export function useMapData(active: boolean, enabled: Enabled) {
       enabled: enabledFromKey(key),
       onStatus: setStatus,
       onFrame: (layer, frame) => setFrames((prev) => ({ ...prev, [layer]: frame })),
-      discard: (_layer, frame) => release(frame),
       onStale: setStale,
     }))
 
@@ -283,10 +268,6 @@ export function useMapData(active: boolean, enabled: Enabled) {
   }, [active, map])
 
   useEffect(() => () => map.dispose(), [map])
-
-  // The previous bitmap is released once a new one has replaced it, and the last one on unmount.
-  const camera = frames.camera
-  useEffect(() => () => camera?.close(), [camera])
 
   return { ...frames, status, stale }
 }

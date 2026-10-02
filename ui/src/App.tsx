@@ -74,6 +74,11 @@ export default function App() {
   const [view, setView] = useState<MainView>(savedView)
   const [viewAttempt, setViewAttempt] = useState(0) // bumped by "try again" after a failed view
   const cam = useCameraSource()
+  // The map view's image panels show the robot camera only (not the browser camera or an upload), and its depth only
+  // while that analysis is current: one feed for both views, nothing fetched twice.
+  const onRobot = cam.source === 'ros2'
+  const robotImage = onRobot ? cam.frame : null
+  const robotDepth = onRobot && cam.freshness?.ok ? cam.analysis?.depth ?? null : null
 
   const pickView = (v: MainView) => {
     setView(v)
@@ -166,7 +171,7 @@ export default function App() {
           <CameraView cam={cam} />
         ) : (
           <Suspense fallback={<section className="mapview" aria-busy="true" />}>
-            <MapView telemetry={telemetry} live={live} />
+            <MapView telemetry={telemetry} live={live} image={robotImage} depth={robotDepth} />
           </Suspense>
         )}
       </ViewBoundary>

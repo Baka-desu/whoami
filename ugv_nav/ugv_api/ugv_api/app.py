@@ -14,8 +14,7 @@ Resources (operator items of architecture.md only):
   DELETE /api/v1/navigation/goals/{id}       cancel -> 202
   GET  /api/v1/map                           MapStatus: epoch, per-layer seq, stats (the map view's demand heartbeat)
   GET  /api/v1/map/pose                      map -> base_link from TF
-  GET  /api/v1/map/{cloud|trajectory|grid|live|depth}   Binary format v1, 503 problem until first data
-  GET  /api/v1/map/camera                    image/jpeg
+  GET  /api/v1/map/{cloud|trajectory|grid|live}   Binary format v1, 503 problem until first data
   GET  /api/v1/telemetry/stream              text/event-stream: safety, command, localization, navigation, map, pose
 """
 
@@ -65,7 +64,6 @@ from ugv_api.watches import Timeouts, evaluate, gate_reasons
 PREFIX = "/api/v1"
 PROBLEM = "application/problem+json"
 OCTET = "application/octet-stream"
-JPEG = "image/jpeg"
 
 logger = logging.getLogger(__name__)
 
@@ -118,7 +116,7 @@ def _pose_values(value: Any) -> tuple[float, ...] | None:
 
 
 def _layer_encoders(
-    *, point_budget: int, spacing_m: float, stride: int, max_range_m: float
+    *, point_budget: int, spacing_m: float
 ) -> dict[str, Callable[[Any, int, int, float], bytes]]:
     """layer -> encode(source, epoch, seq, stamp_s) -> bytes, in the form MapStore.blob calls it. The `source`
     each layer takes is what MapStore.put was given (documented per layer below); the ROS side builds exactly
@@ -145,34 +143,19 @@ def _layer_encoders(
         return codec.encode_grid(src["cells"], epoch=epoch, seq=seq, stamp_s=stamp_s, resolution=src["resolution"],
                                  origin_xy=src["origin_xy"], origin_yaw=src["origin_yaw"])
 
-    def depth(src: dict, epoch: int, seq: int, stamp_s: float) -> bytes:
-        # {"depth_m": (H, W) float32}
-        return codec.encode_depth(src["depth_m"], epoch=epoch, seq=seq, stamp_s=stamp_s, stride=stride,
-                                  max_range_m=max_range_m)
-
-    def camera(src: Any, epoch: int, seq: int, stamp_s: float) -> bytes:
-        # JPEG bytes, served as they are (no prelude: the layer's version is its seq in MapStatus)
-        return bytes(src)
-
-    return {"cloud": cloud, "trajectory": trajectory, "grid": grid, "live": live, "depth": depth, "camera": camera}
+    return {"cloud": cloud, "trajectory": trajectory, "grid": grid, "live": live}
 
 
 def create_app(robot: Robot, store: StateStore, goals: GoalRegistry, *, telemetry_hz: float = 5.0,
                cors_origins: list[str] | None = None, maps: MapStore | None = None,
-               cloud_point_budget: int = 500_000, cloud_spacing_m: float = 0.05,
-               depth_stride: int = 2, depth_max_range_m: float = 8.0) -> FastAPI:
+               cloud_point_budget: int = 500_000, cloud_spacing_m: float = 0.05) -> FastAPI:
     if not telemetry_hz > 0:
         raise ValueError("telemetry_hz must be > 0")
     if cloud_point_budget < 0:
         raise ValueError("cloud_point_budget must be >= 0")
     if not (math.isfinite(cloud_spacing_m) and cloud_spacing_m > 0):
         raise ValueError("cloud_spacing_m must be finite and > 0")
-    if depth_stride < 1:
-        raise ValueError("depth_stride must be >= 1")
-    if not (math.isfinite(depth_max_range_m) and depth_max_range_m > 0):
-        raise ValueError("depth_max_range_m must be finite and > 0")
-    encoders = _layer_encoders(point_budget=cloud_point_budget, spacing_m=cloud_spacing_m, stride=depth_stride,
-                               max_range_m=depth_max_range_m)
+    encoders = _layer_encoders(point_budget=cloud_point_budget, spacing_m=cloud_spacing_m)
     app = FastAPI(
         title="UGV operator API",
         version=__version__,
@@ -352,7 +335,6 @@ def create_app(robot: Robot, store: StateStore, goals: GoalRegistry, *, telemetr
 
     def add_layer_route(layer: str) -> None:
         encode = encoders[layer]
-        media = JPEG if layer == "camera" else OCTET
 
         def get_layer() -> Response:
             if maps is None:
@@ -364,12 +346,12 @@ def create_app(robot: Robot, store: StateStore, goals: GoalRegistry, *, telemetr
                 raise Problem(500, "Layer encoding failed", f"The {layer} layer could not be encoded: {exc}") from exc
             if body is None:
                 raise Problem(503, "No data yet", f"The {layer} layer has not received any data yet.")
-            return Response(body, media_type=media, headers={"Cache-Control": "no-store"})
+            return Response(body, media_type=OCTET, headers={"Cache-Control": "no-store"})
 
         app.get(
             f"{PREFIX}/map/{layer}", name=f"map_{layer}", tags=["map"], response_class=Response,
             responses={
-                200: {"content": {media: {"schema": {"type": "string", "format": "binary"}}}},
+                200: {"content": {OCTET: {"schema": {"type": "string", "format": "binary"}}}},
                 503: {"content": {PROBLEM: {}}, "description": "No data for this layer yet"},
             },
         )(get_layer)

@@ -9,7 +9,7 @@ import pytest
 
 from ugv_api.mapstore import MapStore
 
-LAYERS = ("cloud", "trajectory", "grid", "live", "depth", "camera")
+LAYERS = ("cloud", "trajectory", "grid", "live")
 
 
 def encode_text(source, epoch, seq, stamp_s) -> bytes:
@@ -69,9 +69,9 @@ def test_put_bumps_that_layer_by_one_and_leaves_the_others():
     store = MapStore()
     store.put("grid", "g1", 1.0)
     store.put("grid", "g2", 2.0)
-    store.put("depth", "d1", 3.0)
-    assert store.seq("grid") == 2 and store.seq("depth") == 1
-    assert store.seqs() == {**{name: 0 for name in LAYERS}, "grid": 2, "depth": 1}
+    store.put("live", "d1", 3.0)
+    assert store.seq("grid") == 2 and store.seq("live") == 1
+    assert store.seqs() == {**{name: 0 for name in LAYERS}, "grid": 2, "live": 1}
 
 
 def test_seq_wraps_past_zero_because_zero_means_nothing_received():
@@ -135,15 +135,15 @@ def test_layers_do_not_share_a_cache():
 
 def test_an_encoder_that_raises_caches_nothing_and_leaves_the_store_usable():
     store = MapStore()
-    store.put("depth", "bad", 1.0)
+    store.put("live", "bad", 1.0)
 
     def boom(*_args):
         raise ValueError("cannot encode")
 
     with pytest.raises(ValueError, match="cannot encode"):
-        store.blob("depth", boom)
+        store.blob("live", boom)
     enc = Counting()
-    assert store.blob("depth", enc) is not None and len(enc.calls) == 1  # retried, and the lock was released
+    assert store.blob("live", enc) is not None and len(enc.calls) == 1  # retried, and the lock was released
 
 
 # ----------------------------------------------------------------------------------------- threads
@@ -178,7 +178,7 @@ def test_two_concurrent_blob_calls_for_one_seq_encode_once():
 def test_blobs_of_different_layers_encode_in_parallel():
     store = MapStore()
     store.put("cloud", "a", 1.0)
-    store.put("depth", "b", 1.0)
+    store.put("live", "b", 1.0)
     both = threading.Barrier(2, timeout=5)  # each encoder waits for the other: only parallel encodes pass
 
     def meet(source, epoch, seq, stamp_s):
@@ -186,12 +186,12 @@ def test_blobs_of_different_layers_encode_in_parallel():
         return encode_text(source, epoch, seq, stamp_s)
 
     out: dict[str, bytes | None] = {}
-    threads = [threading.Thread(target=lambda n=n: out.__setitem__(n, store.blob(n, meet))) for n in ("cloud", "depth")]
+    threads = [threading.Thread(target=lambda n=n: out.__setitem__(n, store.blob(n, meet))) for n in ("cloud", "live")]
     for t in threads:
         t.start()
     for t in threads:
         t.join(10)
-    assert out["cloud"] and out["depth"], "one layer's encode blocked the other"
+    assert out["cloud"] and out["live"], "one layer's encode blocked the other"
 
 
 def test_a_put_during_an_encode_is_never_served_as_the_new_seq():

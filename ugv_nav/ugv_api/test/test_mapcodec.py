@@ -5,7 +5,7 @@ decoder. `build_golden()` below holds the exact inputs each file is encoded from
 can read what a file must decode to without running Python. Rewrite the files (only when the format
 changes on purpose) with:  python3 test/test_mapcodec.py --write
 
-All four fixtures use epoch=7, seq=3, stamp_s=1234.5. Arrays are row-major, row = y index, column = x
+All three fixtures use epoch=7, seq=3, stamp_s=1234.5. Arrays are row-major, row = y index, column = x
 index. Floats are float32 on the wire, and every value below is exactly representable unless noted.
 
   cloud.bin       UGVC, 184 bytes (64 + 15 * 8)   count 8, source_count 8, spacing_m 0.25, flags 1 (rgb),
@@ -18,10 +18,6 @@ index. Floats are float32 on the wire, and every value below is exactly represen
                   poses (x y z qx qy qz qw):  (0 0 0  0 0 0 1)  (3 4 0  0 0 1 0)  (3 4 12  .5 .5 .5 .5)
   grid.bin        UGVG, 60 bytes (48 + 12)        width 4, height 3, resolution_m 0.25, origin (-0.5, 1),
                   origin_yaw 0.5. cells (int8):   -1 0 10 20 | 30 40 50 60 | 70 80 90 100
-  depth.bin       UGVD, 72 bytes (40 + 2 * 16)    width 4, height 4, unit_m 0.001 (float32), max_range_m 10.
-                  counts (u16, 0 = hole):
-                    500 1000 1500 2000 | 2500 0 3500 4000 | 4500 5000 9500 10000 | 0 0 0 1
-                  (NaN, -1, 0.0 and 10.5 > max range become 0; 0.0004 m clips up to 1.)
 """
 
 from __future__ import annotations
@@ -67,12 +63,7 @@ TRAJ_POSES = np.array(
     [[0, 0, 0, 0, 0, 0, 1], [3, 4, 0, 0, 0, 1, 0], [3, 4, 12, 0.5, 0.5, 0.5, 0.5]], dtype=np.float32
 )
 GRID_CELLS = np.array([[-1, 0, 10, 20], [30, 40, 50, 60], [70, 80, 90, 100]], dtype=np.int8)
-DEPTH_M = np.array(
-    [[0.5, 1.0, 1.5, 2.0], [2.5, NAN, 3.5, 4.0], [4.5, 5.0, 9.5, 10.0], [0.0, -1.0, 10.5, 0.0004]],
-    dtype=np.float32,
-)
-
-GOLDEN_NAMES = ("cloud.bin", "trajectory.bin", "grid.bin", "depth.bin")
+GOLDEN_NAMES = ("cloud.bin", "trajectory.bin", "grid.bin")
 
 
 def build_golden() -> dict[str, bytes]:
@@ -80,7 +71,6 @@ def build_golden() -> dict[str, bytes]:
         "cloud.bin": mc.encode_cloud(CLOUD_XYZ, CLOUD_RGB, budget=100, spacing_m=0.25, **KW),
         "trajectory.bin": mc.encode_trajectory(TRAJ_POSES, **KW),
         "grid.bin": mc.encode_grid(GRID_CELLS, resolution=0.25, origin_xy=(-0.5, 1.0), origin_yaw=0.5, **KW),
-        "depth.bin": mc.encode_depth(DEPTH_M, stride=1, max_range_m=10.0, **KW),
     }
 
 
@@ -464,66 +454,14 @@ def test_grid_empty_and_bad_input():
         mc.encode_grid(np.zeros((2, 2), np.float32), resolution=0.1, origin_xy=(0, 0), origin_yaw=0.0, **KW)
 
 
-# --------------------------------------------------------------------------------------- depth
-
-
-def test_depth_roundtrip_maps_holes_and_millimetres():
-    b = mc.encode_depth(DEPTH_M, stride=1, max_range_m=10.0, **KW)
-    assert len(b) == 40 + 2 * 16
-    assert struct.unpack_from("<IIff", b, 24) == (4, 4, f32(0.001), 10.0)
-    d = mc.decode_depth(b)
-    assert (d["epoch"], d["seq"], d["stamp_s"]) == (7, 3, 1234.5)
-    assert (d["width"], d["height"], d["unit_m"], d["max_range_m"]) == (4, 4, f32(0.001), 10.0)
-    assert d["counts"].dtype == np.uint16
-    expected = np.array(
-        [[500, 1000, 1500, 2000], [2500, 0, 3500, 4000], [4500, 5000, 9500, 10000], [0, 0, 0, 1]], np.uint16
-    )
-    np.testing.assert_array_equal(d["counts"], expected)
-
-
-def test_depth_decimation_takes_every_stride_th_row_and_column():
-    img = np.arange(6 * 8, dtype=np.float32).reshape(6, 8) / 10.0 + 0.1
-    b = mc.encode_depth(img, stride=2, max_range_m=50.0, **KW)
-    d = mc.decode_depth(b)
-    assert (d["width"], d["height"]) == (4, 3) and len(b) == 40 + 2 * 12
-    np.testing.assert_array_equal(d["counts"], np.rint(img[::2, ::2].astype(np.float64) / 0.001).astype(np.uint16))
-    # odd sizes round up: 5 rows / 7 columns at stride 3 keep rows 0,3 and columns 0,3,6
-    d = mc.decode_depth(mc.encode_depth(np.ones((5, 7), np.float32), stride=3, max_range_m=5.0, **KW))
-    assert (d["width"], d["height"]) == (3, 2)
-
-
-def test_depth_rounds_to_the_nearest_millimetre_and_saturates():
-    img = np.array([[0.0014, 0.0016, 1.2344, 1.2346, 60.0, 70.0]], np.float64)
-    d = mc.decode_depth(mc.encode_depth(img, stride=1, max_range_m=100.0, **KW))
-    assert d["counts"][0].tolist() == [1, 2, 1234, 1235, 60000, 65535]
-
-
-def test_depth_range_limit_is_inclusive_and_non_finite_is_a_hole():
-    img = np.array([[10.0, 10.0001, np.inf, -np.inf, NAN, 0.0, -0.001]], np.float64)
-    d = mc.decode_depth(mc.encode_depth(img, stride=1, max_range_m=10.0, **KW))
-    assert d["counts"][0].tolist() == [10000, 0, 0, 0, 0, 0, 0]
-
-
-def test_depth_rejects_bad_arguments():
-    img = np.ones((4, 4), np.float32)
-    with pytest.raises(ValueError):
-        mc.encode_depth(img, stride=0, max_range_m=10.0, **KW)
-    with pytest.raises(ValueError):
-        mc.encode_depth(img.ravel(), stride=1, max_range_m=10.0, **KW)
-    for bad in (0.0, -1.0, NAN):
-        with pytest.raises(ValueError):
-            mc.encode_depth(img, stride=1, max_range_m=bad, **KW)
-
-
 # ------------------------------------------------------------------------------ decoder strictness
 
 LAYERS = {
     "cloud.bin": mc.decode_cloud,
     "trajectory.bin": mc.decode_trajectory,
     "grid.bin": mc.decode_grid,
-    "depth.bin": mc.decode_depth,
 }
-MAGICS = {"cloud.bin": b"UGVC", "trajectory.bin": b"UGVT", "grid.bin": b"UGVG", "depth.bin": b"UGVD"}
+MAGICS = {"cloud.bin": b"UGVC", "trajectory.bin": b"UGVT", "grid.bin": b"UGVG"}
 
 
 @pytest.mark.parametrize("name", GOLDEN_NAMES)
@@ -601,13 +539,6 @@ def test_golden_fixtures_decode_to_the_documented_values():
         4, 3, 0.25, -0.5, 1.0, 0.5,
     )
     assert d["cells"].tolist() == [[-1, 0, 10, 20], [30, 40, 50, 60], [70, 80, 90, 100]]
-
-    d = mc.decode_depth(read("depth.bin"))
-    assert len(read("depth.bin")) == 72
-    assert (d["width"], d["height"], d["unit_m"], d["max_range_m"]) == (4, 4, f32(0.001), 10.0)
-    assert d["counts"].tolist() == [
-        [500, 1000, 1500, 2000], [2500, 0, 3500, 4000], [4500, 5000, 9500, 10000], [0, 0, 0, 1],
-    ]  # fmt: skip
 
 
 def test_fixtures_are_marked_binary_for_git():

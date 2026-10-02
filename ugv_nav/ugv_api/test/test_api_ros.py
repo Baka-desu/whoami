@@ -30,7 +30,7 @@ from rclpy.executors import MultiThreadedExecutor  # noqa: E402
 from rclpy.parameter import Parameter  # noqa: E402
 from rclpy.qos import DurabilityPolicy, QoSProfile  # noqa: E402
 from rclpy.time import Time  # noqa: E402
-from sensor_msgs.msg import CameraInfo, CompressedImage, Image, PointCloud2, PointField  # noqa: E402
+from sensor_msgs.msg import CameraInfo, Image, PointCloud2, PointField  # noqa: E402
 from std_msgs.msg import Bool, String  # noqa: E402
 from tf2_ros import TransformBroadcaster  # noqa: E402
 
@@ -50,9 +50,9 @@ IDLE_S = 1.5
 STATS_STALE_S = 1.5
 
 CLOUD, PATH = "/rtabmap/cloud_map", "/rtabmap/mapPath"
-GRID, DEPTH, CAMERA = "/global_costmap/costmap", "/perception/depth/image", "/image_raw/compressed"
+GRID, DEPTH = "/global_costmap/costmap", "/perception/depth/image"
 MAP_STATS, PERCEPTION_STATS = "/ugv/map/stats", "/ugv/perception/stats"
-HEAVY_TOPICS = (CLOUD, PATH, GRID, DEPTH, CAMERA)
+HEAVY_TOPICS = (CLOUD, PATH, GRID, DEPTH)
 GATEWAY_STAT_KEYS = {"cloud_source_points", "map_inputs_alive", "map_rejects", "map_restarts", "map_last_reject"}
 # A map thread that stopped ticking is reported not alive after MAP_ALIVE_S; the gateway checks every 0.5 s.
 MAP_ALIVE_BOUND = ros_node.MAP_ALIVE_S + 3.0
@@ -117,8 +117,7 @@ class Inputs:
 
 class MapPubs:
     """Publishers for the map inputs, with the durability each real publisher uses: RTAB-Map's cloud and the
-    map stats are latched (transient local); the path, the depth image, the camera stream and the perception
-    stats are volatile."""
+    map stats are latched (transient local); the path, the depth image and the perception stats are volatile."""
 
     def __init__(self, node) -> None:
         latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
@@ -127,7 +126,6 @@ class MapPubs:
         self.cloud = node.create_publisher(PointCloud2, CLOUD, latched)
         self.path = node.create_publisher(Path, PATH, volatile)
         self.depth = node.create_publisher(Image, DEPTH, volatile)
-        self.camera = node.create_publisher(CompressedImage, CAMERA, volatile)
         self.map_stats = node.create_publisher(String, MAP_STATS, latched)
         self.perception_stats = node.create_publisher(String, PERCEPTION_STATS, QoSProfile(depth=10))
 
@@ -629,63 +627,38 @@ def _expected_live_points():
     return in_base @ r_yaw.T + np.array([POSE["x"], POSE["y"], POSE["z"]])
 
 
-def test_depth_and_live_layers_come_from_the_same_image(graph):
+def test_live_layer_is_the_depth_image_in_the_map_frame(graph):
     c, pubs = graph["client"], graph["pubs"]
     depth = np.full((CAM_H, CAM_W), 2.0, dtype=np.float32)
-    depth[0, 6] = np.nan  # a hole on a pixel the depth stride samples (column 6) and the live stride does not
 
     def publish():
         pubs.depth.publish(make_depth("camera_optical_frame", pubs.now(), depth))
 
     with watching(c):
-        d = codec.decode_depth(_fetch(c, "/map/depth", publish=publish).content)
         live = codec.decode_cloud(_fetch(c, "/map/live", publish=publish).content)
-    assert (d["width"], d["height"]) == (4, 3)  # depth_stride 2
-    assert d["counts"][0, 0] == 2000 and d["counts"][0, 3] == 0  # 2 m in mm; the hole at (row 0, col 6) is 0
     assert live["count"] == 4 and not live["has_rgb"]  # live_stride 4: columns 0 4, rows 0 4
     assert np.allclose(live["xyz"], _expected_live_points(), atol=1e-4)
 
 
-def test_live_is_skipped_without_a_transform_but_depth_still_updates(graph):
+def test_live_is_skipped_without_a_transform(graph):
     c, pubs, gw = graph["client"], graph["pubs"], graph["gw"]
     depth = np.full((CAM_H, CAM_W), 2.0, dtype=np.float32)
     with watching(c):
         before = _map_status(c)
         rejects_before = gw.map_rejects.get("live_no_transform", 0)
         deadline = time.monotonic() + 8.0
-        while time.monotonic() < deadline and _map_status(c)["seq"]["depth"] < before["seq"]["depth"] + 3:
+        # frames keep arriving (each one is counted as skipped), none of them becomes a live layer
+        while time.monotonic() < deadline and gw.map_rejects.get("live_no_transform", 0) < rejects_before + 3:
             pubs.depth.publish(make_depth("no_such_frame", pubs.now(), depth))
             time.sleep(0.1)
         after = _map_status(c)
-        assert _wait(lambda: gw.map_rejects.get("live_no_transform", 0) > rejects_before)
         stats = _wait(lambda: (lambda s: s if s["map_rejects"] > before["stats"]["map_rejects"] else None)(
             _map_status(c)["stats"]))
-    assert after["seq"]["depth"] >= before["seq"]["depth"] + 3
+    assert gw.map_rejects.get("live_no_transform", 0) >= rejects_before + 3
     assert after["seq"]["live"] == before["seq"]["live"], "camera-frame points were published as map-frame points"
     # the skipped frames are visible to the operator, not only in a test-only property: counted and named
     assert stats, _map_status(c)["stats"]
     assert "live_no_transform" in stats["map_last_reject"]
-
-
-def test_camera_jpeg_is_served_as_received_and_a_non_jpeg_is_refused(graph):
-    c, pubs, gw = graph["client"], graph["pubs"], graph["gw"]
-    jpeg = b"\xff\xd8\xff\xe0\x00\x10JFIF-pretend-picture\xff\xd9"
-
-    def frame(data):
-        msg = CompressedImage()
-        msg.header.stamp, msg.header.frame_id, msg.format, msg.data = pubs.now(), "camera", "jpeg", data
-        return msg
-
-    with watching(c):
-        r = _fetch(c, "/map/camera", publish=lambda: pubs.camera.publish(frame(jpeg)))
-        rejects_before = gw.map_rejects.get("camera", 0)
-        for _ in range(5):
-            pubs.camera.publish(frame(b"\x89PNG\r\n\x1a\n-not-a-jpeg"))
-            time.sleep(0.1)
-        assert _wait(lambda: gw.map_rejects.get("camera", 0) > rejects_before)
-        again = c.get("/map/camera")
-    assert r.headers["content-type"] == "image/jpeg" and r.content == jpeg
-    assert again.status_code == 200 and again.content == jpeg  # the PNG never replaced the JPEG
 
 
 def test_stats_from_both_sources_merge_malformed_json_is_ignored_and_silence_expires(graph):

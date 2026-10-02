@@ -11,7 +11,7 @@
 //   Colours       one ramp for everything (writeRamp): dark purple (low) through teal to yellow (high). Bytes are
 //                 sRGB, three per vertex or point.
 
-import type { DepthFrame, GridFrame } from './codec'
+import type { GridFrame } from './codec'
 
 // ---- the one colour ramp --------------------------------------------------------------------------
 // A perceptually ordered ramp (the viridis samples at eighths), lightness rising monotonically from low to high.
@@ -98,19 +98,17 @@ export function buildGridTexture(f: GridFrame): Uint8ClampedArray {
   return out
 }
 
-// RGBA grey image of a depth frame, width * height * 4, row 0 first. Brightness falls linearly from white at 0 m to
-// black at maxRangeM and beyond (near = bright). Holes (count 0) are fully transparent; if the frame's range is
-// not usable every valid pixel is mid grey.
-export function depthToRgba(f: DepthFrame): Uint8ClampedArray {
-  const n = f.width * f.height
-  const { counts } = f
-  const out = new Uint8ClampedArray(4 * n)
-  const perCount = f.unitM / f.maxRangeM // fraction of the range one count spans
-  const usable = Number.isFinite(perCount) && perCount > 0
+// RGBA grey image of a depth image in metres (width * height values, row 0 first), width * height * 4. Brightness
+// falls linearly from white at 0 m to black at maxRangeM and beyond (near = bright). Holes (NaN, infinite, <= 0) are
+// fully transparent; if maxRangeM is not usable every valid pixel is mid grey.
+export function depthToRgba(depthM: Float32Array, width: number, height: number, maxRangeM: number): Uint8ClampedArray {
+  const n = Math.min(width * height, depthM.length)
+  const out = new Uint8ClampedArray(4 * width * height)
+  const usable = Number.isFinite(maxRangeM) && maxRangeM > 0
   for (let i = 0; i < n; i++) {
-    const count = counts[i]
-    if (count === 0) continue
-    const grey = usable ? 255 * (1 - Math.min(1, count * perCount)) : 128
+    const m = depthM[i]
+    if (!(m > 0) || !Number.isFinite(m)) continue
+    const grey = usable ? 255 * (1 - Math.min(1, m / maxRangeM)) : 128
     const o = 4 * i
     out[o] = grey
     out[o + 1] = grey

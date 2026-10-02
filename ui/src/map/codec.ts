@@ -1,4 +1,4 @@
-// Decoders for the gateway's binary map layers (cloud, trajectory, cost grid, depth).
+// Decoders for the gateway's binary map layers (cloud, trajectory, cost grid).
 // Wire format v1: little-endian, a 24-byte prelude shared by every layer, then a fixed layer header, then the body.
 // Every decoder returns null, never throws, for anything that is not exactly a v1 message of its own layer: a buffer
 // shorter than the prelude, the wrong magic, a format other than 1, a header_bytes that differs from the spec's value
@@ -7,7 +7,7 @@
 //
 // The bulk arrays are typed-array views onto the input buffer, not copies, so the caller must not mutate or reuse
 // the buffer while it still holds the frame. Alignment never forces a copy: a view onto an ArrayBuffer starts at
-// byte 0, every Float32Array/Uint16Array body starts at its layer's header size (64, 32, 40, all multiples of 4),
+// byte 0, every Float32Array body starts at its layer's header size (64 or 32, both multiples of 4),
 // and the array that follows a float block (cloud rgb) is one byte per element, which has no alignment requirement. The host is little-endian in every supported browser, so the views read the wire
 // values directly; the header fields go through a DataView with littleEndian = true.
 
@@ -46,17 +46,6 @@ export type GridFrame = {
   cells: Int8Array // width * height, row-major, -1 = unknown, 0..100
 }
 
-export type DepthFrame = {
-  epoch: number
-  seq: number
-  stampS: number
-  width: number
-  height: number
-  unitM: number // metres per count
-  maxRangeM: number
-  counts: Uint16Array // width * height, row-major, 0 = hole
-}
-
 const FORMAT = 1
 const PRELUDE_BYTES = 24
 
@@ -65,7 +54,6 @@ const PRELUDE_BYTES = 24
 const CLOUD = { magic: 'UGVC', header: 64 }
 const TRAJECTORY = { magic: 'UGVT', header: 32 }
 const GRID = { magic: 'UGVG', header: 48 }
-const DEPTH = { magic: 'UGVD', header: 40 }
 
 type Layer = { magic: string; header: number }
 
@@ -139,25 +127,5 @@ export function decodeGrid(buf: ArrayBuffer): GridFrame | null {
     originY: dv.getFloat32(40, true),
     originYaw: dv.getFloat32(44, true),
     cells: new Int8Array(buf, GRID.header, cells),
-  }
-}
-
-export function decodeDepth(buf: ArrayBuffer): DepthFrame | null {
-  const p = open(buf, DEPTH)
-  if (!p) return null
-  const { dv } = p
-  const width = dv.getUint32(24, true)
-  const height = dv.getUint32(28, true)
-  const pixels = width * height
-  if (buf.byteLength !== DEPTH.header + 2 * pixels) return null
-  return {
-    epoch: p.epoch,
-    seq: p.seq,
-    stampS: p.stampS,
-    width,
-    height,
-    unitM: dv.getFloat32(32, true),
-    maxRangeM: dv.getFloat32(36, true),
-    counts: new Uint16Array(buf, DEPTH.header, pixels),
   }
 }

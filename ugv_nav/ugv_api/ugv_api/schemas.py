@@ -117,14 +117,12 @@ StatValue = bool | int | float | str | None
 
 
 class MapSeq(Model):
-    """Per-layer change counter. Field order is MapStore.LAYERS; the viewer requires all six."""
+    """Per-layer change counter. Field order is MapStore.LAYERS; the viewer requires every one."""
 
     cloud: U32
     trajectory: U32
     grid: U32
     live: U32
-    depth: U32
-    camera: U32
 
 
 class MapStatus(Model):

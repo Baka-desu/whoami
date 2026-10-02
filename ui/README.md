@@ -28,6 +28,9 @@ height, the trajectory, Nav2's cost grid halo, the robot pose, a depth panel and
   `ugv_nav/ugv_api/test/fixtures/map/` are shared with the gateway's tests) and the pose and map events of the telemetry
   stream. The view never opens rosbridge for map data. While the view is open it calls `GET /api/v1/map` as a heartbeat,
   which keeps the gateway's heavy subscriptions alive; hidden tab or closed view, the gateway drops them after 10 s.
+- **Image panels:** the camera and depth panels show the feed the console already receives for the camera view (App
+  passes the robot camera's latest frame and its current depth to the map view): one path per feed, nothing fetched
+  twice. They stay empty on the browser camera or an upload, and the depth panel empties when the analysis goes stale.
 - **Layers:** buttons for cloud, live, path, cost and img; the set is kept in `localStorage`
   (`ugv.console.map.layers`). A layer that is off is not fetched. Layers are refetched when their sequence number
   changes, and all of them when the gateway's `epoch` changes (a restart).

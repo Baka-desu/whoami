@@ -26,8 +26,8 @@ describe('nextFetches', () => {
   })
 
   it('fetches nothing when every held key matches', () => {
-    const status = mapStatus(5, { cloud: 3, depth: 9 })
-    const have = { ...none<string | null>(null), cloud: '5:3', depth: '5:9' }
+    const status = mapStatus(5, { cloud: 3, grid: 9 })
+    const have = { ...none<string | null>(null), cloud: '5:3', grid: '5:9' }
     expect(nextFetches(status, have, ALL)).toEqual([])
   })
 
@@ -36,12 +36,12 @@ describe('nextFetches', () => {
   })
 
   it('refetches every enabled layer when the epoch changes even though no seq did', () => {
-    const before = mapStatus(5, { cloud: 3, trajectory: 4, grid: 1, live: 8, depth: 6, camera: 9 })
+    const before = mapStatus(5, { cloud: 3, trajectory: 4, grid: 1, live: 8 })
     const have = Object.fromEntries(LAYERS.map((l) => [l, layerKey(before, l)])) as Record<Layer, string | null>
     expect(nextFetches(before, have, ALL)).toEqual([])
     const restarted = { ...before, epoch: 6 }
     expect(nextFetches(restarted, have, ALL)).toEqual([...LAYERS])
-    expect(nextFetches(restarted, have, only('trajectory', 'camera'))).toEqual(['trajectory', 'camera'])
+    expect(nextFetches(restarted, have, only('trajectory', 'live'))).toEqual(['trajectory', 'live'])
   })
 
   it('never fetches a layer whose seq is 0, whatever is held', () => {
@@ -51,14 +51,14 @@ describe('nextFetches', () => {
   })
 
   it('never fetches a disabled layer', () => {
-    const status = mapStatus(5, { cloud: 1, trajectory: 1, camera: 1 })
+    const status = mapStatus(5, { cloud: 1, trajectory: 1, live: 1 })
     expect(nextFetches(status, none<string | null>(null), only('trajectory'))).toEqual(['trajectory'])
     expect(nextFetches(status, none<string | null>(null), none(false))).toEqual([])
   })
 
   it('returns layers in LAYERS order', () => {
-    const status = mapStatus(1, { camera: 1, depth: 1, cloud: 1, live: 1 })
-    expect(nextFetches(status, none<string | null>(null), ALL)).toEqual(['cloud', 'live', 'depth', 'camera'])
+    const status = mapStatus(1, { live: 1, grid: 1, cloud: 1 })
+    expect(nextFetches(status, none<string | null>(null), ALL)).toEqual(['cloud', 'grid', 'live'])
   })
 
   it('does not treat a held key from another epoch with the same seq as current', () => {
@@ -69,7 +69,7 @@ describe('nextFetches', () => {
 
 describe('MIN_INTERVAL_MS', () => {
   it('is the specified minimum between fetch starts of one layer', () => {
-    expect(MIN_INTERVAL_MS).toEqual({ cloud: 2000, trajectory: 1000, grid: 1000, live: 500, depth: 500, camera: 500 })
+    expect(MIN_INTERVAL_MS).toEqual({ cloud: 2000, trajectory: 1000, grid: 1000, live: 500 })
   })
 })
 
@@ -78,7 +78,7 @@ describe('schedule', () => {
   const idle = none(false)
 
   it('starts every wanted layer that has never been started', () => {
-    expect(schedule(['cloud', 'depth'], 10_000, never, idle)).toEqual({ start: ['cloud', 'depth'], retryInMs: null })
+    expect(schedule(['cloud', 'live'], 10_000, never, idle)).toEqual({ start: ['cloud', 'live'], retryInMs: null })
   })
 
   it('does nothing when nothing is wanted', () => {
@@ -100,10 +100,10 @@ describe('schedule', () => {
   })
 
   it('asks to be woken at the earliest moment any held-back layer becomes due', () => {
-    const lastStart = { ...never, cloud: 10_000, live: 10_300, camera: 10_100 }
-    const plan = schedule(['cloud', 'live', 'camera'], 10_400, lastStart, idle)
+    const lastStart = { ...never, cloud: 10_000, live: 10_300, trajectory: 9_600 }
+    const plan = schedule(['cloud', 'live', 'trajectory'], 10_400, lastStart, idle)
     expect(plan.start).toEqual([])
-    expect(plan.retryInMs).toBe(200) // live: 10_300 + 500 - 10_400 = 400, camera: 10_100 + 500 - 10_400 = 200
+    expect(plan.retryInMs).toBe(200) // live: 10_300 + 500 - 10_400 = 400, trajectory: 9_600 + 1000 - 10_400 = 200
   })
 
   it('does not count an in-flight layer toward the wake-up even when its interval has not passed', () => {
@@ -114,8 +114,8 @@ describe('schedule', () => {
 
   it('keeps the order it was given and mixes started and held-back layers', () => {
     const lastStart = { ...never, trajectory: 9_900 }
-    const plan = schedule(['cloud', 'trajectory', 'camera'], 10_000, lastStart, idle)
-    expect(plan).toEqual({ start: ['cloud', 'camera'], retryInMs: 900 })
+    const plan = schedule(['cloud', 'trajectory', 'live'], 10_000, lastStart, idle)
+    expect(plan).toEqual({ start: ['cloud', 'live'], retryInMs: 900 })
   })
 
   it('never waits longer than the layer interval if the clock went backwards', () => {
@@ -157,7 +157,6 @@ const statusBody = (epoch: number, seq: Partial<Record<Layer, number>> = {}, sta
 function harness(initialEnabled: Record<Layer, boolean> = ALL) {
   const pending: Pending[] = []
   const frames: { layer: Layer; text: string }[] = []
-  const discarded: { layer: Layer; text: string }[] = []
   const statuses: MapStatus[] = []
   const stale: boolean[] = []
   const decodeGate: { hold: boolean; waiting: (() => void)[] } = { hold: false, waiting: [] }
@@ -182,7 +181,6 @@ function harness(initialEnabled: Record<Layer, boolean> = ALL) {
     enabled: initialEnabled,
     onStatus: (s) => statuses.push(s),
     onFrame: (layer, frame) => frames.push({ layer, text: (frame as unknown as { text: string }).text }),
-    discard: (layer, frame) => discarded.push({ layer, text: (frame as unknown as { text: string }).text }),
     onStale: (s) => stale.push(s),
     now: () => Date.now(),
   })
@@ -200,7 +198,7 @@ function harness(initialEnabled: Record<Layer, boolean> = ALL) {
   }
 
   return {
-    session, pending, frames, discarded, statuses, stale, paths, count, answer,
+    session, pending, frames, statuses, stale, paths, count, answer,
     holdDecode: (hold: boolean) => {
       decodeGate.hold = hold
       if (!hold) for (const r of decodeGate.waiting.splice(0)) r()
@@ -287,10 +285,10 @@ describe('createMapSession', () => {
   it('does not fetch disabled layers or layers with seq 0, and fetches a layer at once when it is enabled later', async () => {
     const h = harness(only('grid'))
     h.session.start()
-    await h.answer('/map', statusBody(1, { grid: 1, cloud: 1, depth: 0 }))
+    await h.answer('/map', statusBody(1, { grid: 1, cloud: 1, live: 0 }))
     expect(h.paths()).toEqual(['/map', '/map/grid'])
-    h.session.setEnabled(only('grid', 'cloud', 'depth'))
-    expect(h.paths()).toEqual(['/map', '/map/grid', '/map/cloud']) // depth has nothing yet
+    h.session.setEnabled(only('grid', 'cloud', 'live'))
+    expect(h.paths()).toEqual(['/map', '/map/grid', '/map/cloud']) // live has nothing yet
     h.session.dispose()
   })
 
@@ -363,7 +361,6 @@ describe('createMapSession', () => {
     await h.answer('/map', statusBody(1, { grid: 1 }))
     await h.answer('/map/grid', 'bad')
     expect(h.frames).toEqual([])
-    expect(h.discarded).toEqual([])
     await vi.advanceTimersByTimeAsync(1000)
     expect(h.count('/map/grid')).toBe(2)
     await h.answer('/map/grid', 'good')
@@ -372,20 +369,20 @@ describe('createMapSession', () => {
   })
 
   it('survives a failed layer request (gateway error) and retries it', async () => {
-    const h = harness(only('depth'))
+    const h = harness(only('live'))
     h.session.start()
-    await h.answer('/map', statusBody(1, { depth: 1 }))
-    await h.answer('/map/depth', new ApiError({ title: 'Gateway unreachable', status: 0, detail: 'cannot reach /api/v1' }))
+    await h.answer('/map', statusBody(1, { live: 1 }))
+    await h.answer('/map/live', new ApiError({ title: 'Gateway unreachable', status: 0, detail: 'cannot reach /api/v1' }))
     expect(h.frames).toEqual([])
     await vi.advanceTimersByTimeAsync(500)
-    expect(h.count('/map/depth')).toBe(2)
+    expect(h.count('/map/live')).toBe(2)
     h.session.dispose()
   })
 
   it('aborts in-flight layer fetches on stop() and treats the abort as no error, no frame', async () => {
-    const h = harness(only('trajectory', 'camera'))
+    const h = harness(only('trajectory', 'live'))
     h.session.start()
-    await h.answer('/map', statusBody(1, { trajectory: 1, camera: 1 }))
+    await h.answer('/map', statusBody(1, { trajectory: 1, live: 1 }))
     const inFlight = h.pending.filter((p) => p.path.startsWith('/map/'))
     expect(inFlight).toHaveLength(2)
     h.session.stop()
@@ -397,17 +394,16 @@ describe('createMapSession', () => {
     h.session.dispose()
   })
 
-  it('drops a body that finishes decoding after stop(), handing the decoded frame back for disposal', async () => {
-    const h = harness(only('camera'))
+  it('drops a body that finishes decoding after stop()', async () => {
+    const h = harness(only('live'))
     h.holdDecode(true)
     h.session.start()
-    await h.answer('/map', statusBody(1, { camera: 1 }))
-    await h.answer('/map/camera', 'jpeg') // fetched, decode pending
+    await h.answer('/map', statusBody(1, { live: 1 }))
+    await h.answer('/map/live', 'scan') // fetched, decode pending
     h.session.stop()
     h.holdDecode(false)
     await vi.advanceTimersByTimeAsync(0)
     expect(h.frames).toEqual([])
-    expect(h.discarded).toEqual([{ layer: 'camera', text: 'jpeg' }])
     h.session.dispose()
   })
 

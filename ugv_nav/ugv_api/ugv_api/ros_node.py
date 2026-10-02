@@ -14,7 +14,7 @@ Subscribes : /camera/camera_info          sensor_msgs/CameraInfo  stamp only (§
              map viewer inputs, on a node of their own (ugv_api_map) in a second rclpy context (class _MapInputs):
                always on : /ugv/map/stats, /ugv/perception/stats        std_msgs/String (JSON)
                on demand : /rtabmap/cloud_map, /rtabmap/mapPath, /global_costmap/costmap,
-                           /perception/depth/image (depth + live), /image_raw/compressed
+                           /perception/depth/image (live)
 Publishes  : /ugv/e_stop                  std_msgs/Bool           latched; re-published while asserted
 Clients    : /navigate_to_pose            nav2_msgs/action/NavigateToPose (map-frame goals, §11)
              <rtabmap ns>/set_mode_mapping, set_mode_localization  std_srvs/Empty (§10)
@@ -43,7 +43,7 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from rclpy.signals import SignalHandlerOptions
 from rclpy.time import Time
-from sensor_msgs.msg import CameraInfo, CompressedImage, Image, PointCloud2
+from sensor_msgs.msg import CameraInfo, Image, PointCloud2
 from std_msgs.msg import Bool, String
 from std_srvs.srv import Empty
 from tf2_ros import Buffer, TransformException, TransformListener
@@ -424,7 +424,6 @@ class _MapInputs:
                 "trajectory": (c.trajectory_topic, Path, guard("trajectory", self._on_path)),
                 "grid": (c.grid_topic, OccupancyGrid, guard("grid", self._on_grid)),
                 "depth": (c.depth_topic, Image, guard("depth", self._on_depth)),
-                "camera": (c.camera_topic, CompressedImage, guard("camera", self._on_camera)),
             }
             # reliable + volatile matches a latched publisher (/ugv/map/stats) and a plain one alike
             stats_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE)
@@ -649,15 +648,10 @@ class _MapInputs:
             origin_q=(o.orientation.x, o.orientation.y, o.orientation.z, o.orientation.w))
         self._maps.put("grid", source, self._stamp_s(msg))
 
-    def _on_camera(self, msg: CompressedImage) -> None:
-        self._maps.put("camera", ms.jpeg_source(msg.data), self._stamp_s(msg))
-
     def _on_depth(self, msg: Image) -> None:
         depth = ms.depth_source(encoding=msg.encoding, height=msg.height, width=msg.width, step=msg.step,
                                 is_bigendian=msg.is_bigendian, data=msg.data)
-        stamp_s = self._stamp_s(msg)
-        self._maps.put("depth", depth, stamp_s)
-        self._put_live(msg, depth["depth_m"], stamp_s)
+        self._put_live(msg, depth["depth_m"], self._stamp_s(msg))
 
     def _put_live(self, msg: Image, depth_m: Any, stamp_s: float) -> None:
         """The depth image back-projected with CameraInfo K and moved into the map frame. Without K or without

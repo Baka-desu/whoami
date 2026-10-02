@@ -1,19 +1,21 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { DepthFrame } from '../map/codec'
 import { depthToRgba } from '../map/geometry'
 import { enabledLayers, parseToggles, toggled, type MapToggles, type ToggleKey } from '../map/mapToggles'
 import { MapScene } from '../map/scene'
 import { useMapData } from '../map/useMapData'
 import { LAYERS, type MapStatus, type Telemetry } from '../source/api'
+import { GH, GW } from '../types'
 import { mapBanner } from './mapStats'
 
 // The map view, as in the owner's reference picture: the 3D map (accumulated cloud, live depth scan coloured by
 // height, trajectory, the cost grid's halo around obstacles, the robot) with the depth image and the
-// camera image stacked on its left edge. Display only: everything comes from the gateway's map endpoints (GETs) and
-// the telemetry stream's pose; nothing here commands anything.
+// camera image stacked on its left edge. Display only: the 3D layers come from the gateway's map endpoints (GETs) and
+// the telemetry stream's pose; the two image panels show the camera feed the console already receives for the camera
+// view (passed in by App), so no image travels twice. Nothing here commands anything.
 
 const TOGGLES_KEY = 'ugv.console.map.layers'
 const CAMERA_PANEL_MAX_W = 480 // the camera panel is a thumbnail; no need to keep a full-size copy
+const DEPTH_PANEL_MAX_M = 8 // the depth panel's grey ramp: white at 0 m, black from here on
 
 // Short labels keep the bar on one row from a 1280 px window up (the view area is then about 580 px wide); the full
 // name is the accessible name and the tooltip.
@@ -58,9 +60,11 @@ function usePageVisible(): boolean {
 interface Props {
   telemetry: Telemetry | null
   live: boolean // telemetry stream fresh
+  image: ImageBitmap | null // the robot camera's latest frame, null when the console is not on the robot camera
+  depth: Float32Array | null // its current depth, GW x GH metres (NaN = hole), null when there is none or it is stale
 }
 
-export function MapView({ telemetry, live }: Props) {
+export function MapView({ telemetry, live, image, depth }: Props) {
   const [toggles, setToggles] = useState<MapToggles>(loadToggles)
   // Saved only once the operator changed something, so a later change of the defaults still reaches anyone who never
   // touched a toggle.
@@ -104,8 +108,6 @@ export function MapView({ telemetry, live }: Props) {
   const liveCloud = ofEpoch(data.live, status)
   const trajectory = ofEpoch(data.trajectory, status)
   const grid = ofEpoch(data.grid, status)
-  const depth = ofEpoch(data.depth, status)
-  const camera = status && status.seq.camera > 0 ? data.camera : null // a bitmap carries no epoch
 
   // The robot is hidden while telemetry is not live: a pose from a dead stream is not where the robot is. The pose
   // goes first: the first layer to arrive frames the camera on it within the same commit.
@@ -130,7 +132,7 @@ export function MapView({ telemetry, live }: Props) {
   const ok = !noMap && banner === null // the dot follows the banner: green only when nothing says the feed is wrong
   const slamMode = typeof status?.stats.mode === 'string' ? status.stats.mode : null
   const depthPanel = toggles.images ? depth : null // a panel shows only with data and with the images toggle on
-  const cameraPanel = toggles.images ? camera : null
+  const cameraPanel = toggles.images ? image : null
   // Counts sit in the stage, not the bar, so the bar never cuts a number short.
   const info = [
     showCloud && cloud && `${count(cloud.count)} map pts`,
@@ -177,7 +179,7 @@ export function MapView({ telemetry, live }: Props) {
         {banner && <div className="banner stale">{banner}</div>}
         {(depthPanel || cameraPanel) && (
           <div className="mapview-insets">
-            {depthPanel && <DepthPanel frame={depthPanel} />}
+            {depthPanel && <DepthPanel depthM={depthPanel} />}
             {cameraPanel && <CameraPanel frame={cameraPanel} />}
           </div>
         )}
@@ -186,18 +188,18 @@ export function MapView({ telemetry, live }: Props) {
   )
 }
 
-// Depth, grey: near is bright, holes show the panel behind them.
-function DepthPanel({ frame }: { frame: DepthFrame }) {
+// Depth, grey: near is bright, holes show the panel behind them. GW x GH, the camera view's analysis grid.
+function DepthPanel({ depthM }: { depthM: Float32Array }) {
   const ref = useRef<HTMLCanvasElement>(null)
   useEffect(() => {
     const c = ref.current
-    if (!c || frame.width === 0 || frame.height === 0) return
-    if (c.width !== frame.width) c.width = frame.width
-    if (c.height !== frame.height) c.height = frame.height
+    if (!c) return
+    if (c.width !== GW) c.width = GW
+    if (c.height !== GH) c.height = GH
     // depthToRgba allocates a plain ArrayBuffer, which is what ImageData wants; the cast only says so.
-    const rgba = depthToRgba(frame) as Uint8ClampedArray<ArrayBuffer>
-    c.getContext('2d')?.putImageData(new ImageData(rgba, frame.width, frame.height), 0, 0)
-  }, [frame])
+    const rgba = depthToRgba(depthM, GW, GH, DEPTH_PANEL_MAX_M) as Uint8ClampedArray<ArrayBuffer>
+    c.getContext('2d')?.putImageData(new ImageData(rgba, GW, GH), 0, 0)
+  }, [depthM])
   return (
     <figure className="mapview-inset" title="Depth image: near is bright">
       <figcaption>depth</figcaption>

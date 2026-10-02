@@ -54,7 +54,7 @@ def _scalar(value: Any) -> tuple[bool, Any]:
 
 
 class MapStore:
-    LAYERS = ("cloud", "trajectory", "grid", "live", "depth", "camera")
+    LAYERS = ("cloud", "trajectory", "grid", "live")
 
     def __init__(self, *, epoch: int | None = None) -> None:
         """`epoch` is a random uint32 chosen once, so a viewer can tell a restarted gateway (seq starts over)
