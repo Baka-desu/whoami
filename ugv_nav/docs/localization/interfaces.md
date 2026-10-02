@@ -96,8 +96,12 @@ subscribes them.
   the same as with no viewer (docs/mapping/baseline.md "Task 8 fix round 1"). Limits: the assembler's `mapData` subscription keeps 1 message
   (hard-coded in rtabmap_util 0.23.7), so the messages that arrive while it assembles are dropped and those nodes (1-2
   at the first attach, 1-2 at start-up) stay missing from the cloud for the run. The cloud is for display only; the
-  a future elevation mapper would read `mapData` itself. It also holds every node's data plus the grid cache in memory (RSS 0.9-1.1 GB
-  at 460-480 nodes in the synthetic runs, next to rtabmap's 1.2-1.3 GB).
+  a future elevation mapper would read `mapData` itself. It also holds every node's data (about 0.62 MB per node at 640x480) plus,
+  once a viewer has been opened, the grid cache (about 1.9 MB per node in all), and gives none of it back: 1.2 GB at about 530
+  nodes in the synthetic 640x480 run, next to rtabmap's 1.4 GB (0.71 GB + 1.3 MB per node). `map_cleanup: true` was measured and
+  does not lower the peak with a viewer open (docs/mapping/baseline.md "Final review I2"). `map_assembler:=false` (launch argument,
+  default true) does not start it: then nothing publishes `/rtabmap/cloud_map` at all; mission-length guidance in
+  docs/mapping/README.md "Memory and mission length".
 - **`mapPath`**: frame `map`, one pose per graph node (optimised; it changes on loop closure).
 
 ### `/rtabmap/mapData` consumer contract (what a future elevation node would build against)

@@ -13,6 +13,7 @@ x4 (Task 8) moves the robot (wheel odometry + the scene sliding past the camera)
    and checks the 3D map outputs: /rtabmap/cloud_map (from map_assembler), /rtabmap/mapPath, /rtabmap/mapData.
 m1 (Task 8 review I1) is a measurement, skipped unless UGV_MEASURE_LATE_ATTACH is set: a viewer attaching cloud_map
    mid-mission vs the SLAM step rate and /ugv/pose_valid.
+x6 (final review I2) launches with map_assembler:=false: SLAM runs, and nothing publishes /rtabmap/cloud_map.
 x5 (Task 9) checks /ugv/map/stats from the same moving stack: map_stats is launched, reads rtabmap's graph and info,
    and reports the calibration file's placeholder flag.
 Skipped unless ROS 2 + rtabmap_ros + an installed ugv_localization are available (colcon test).
@@ -28,6 +29,7 @@ import re
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -48,7 +50,7 @@ import yaml  # noqa: E402
 from geometry_msgs.msg import TransformStamped  # noqa: E402
 from nav_msgs.msg import OccupancyGrid, Odometry, Path as NavPath  # noqa: E402
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data  # noqa: E402
-from rtabmap_msgs.msg import Info, MapData, OdomInfo, RGBDImage  # noqa: E402
+from rtabmap_msgs.msg import Info, MapData, MapGraph, OdomInfo, RGBDImage  # noqa: E402
 from sensor_msgs.msg import CameraInfo, Image, PointCloud2, PointField  # noqa: E402
 from std_msgs.msg import Bool, Float64, String  # noqa: E402
 from tf2_msgs.msg import TFMessage  # noqa: E402
@@ -106,7 +108,7 @@ class Stack:
     def __init__(
         self, tmp: Path, odom_source: str, depth_input: str, *, timing: str = "default",
         size: tuple[int, int] = (_W, _H), camera_reliable: bool = False, speed: float = 0.0,
-        placeholder_calibration: bool = False, grid_probe: bool = True,
+        placeholder_calibration: bool = False, grid_probe: bool = True, launch_args: tuple[str, ...] = (),
     ) -> None:
         self.depth_input = depth_input
         self.w, self.h = size
@@ -144,7 +146,7 @@ class Stack:
                 "ros2", "launch", "ugv_localization", "localization.launch.py",
                 "mode:=mapping", "fresh_db:=true", f"odom_source:={odom_source}", "profile:=live_cam",
                 f"database_path:={tmp / 'rtabmap.db'}", f"depth_input:={depth_input}", f"timing:={timing}",
-                *calibration_args,
+                *calibration_args, *launch_args,
             ],
             env, self.log_path,
         )
@@ -619,6 +621,58 @@ _ASSEMBLER_LOG = re.compile(  # map_assembler, once per /rtabmap/mapData message
 )
 
 
+_RSS_PROCS = ("map_assembler", "rtabmap")
+
+
+def _rss_mb(root_pid: int) -> dict[str, float]:
+    """Resident memory (MB, VmRSS) of the processes named in _RSS_PROCS that descend from root_pid (the launch), from /proc."""
+    procs: dict[int, tuple[str, int]] = {}  # pid -> (comm, parent pid)
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            stat = Path(f"/proc/{entry}/stat").read_text()
+            comm = stat[stat.index("(") + 1 : stat.rindex(")")]
+            procs[int(entry)] = (comm, int(stat[stat.rindex(")") + 2 :].split()[1]))
+        except (OSError, ValueError, IndexError):
+            continue
+    out: dict[str, float] = {}
+    for pid, (comm, _ppid) in procs.items():
+        if comm not in _RSS_PROCS:
+            continue
+        up, hops = pid, 0
+        while up not in (root_pid, 0, 1) and up in procs and hops < 20:
+            up, hops = procs[up][1], hops + 1
+        if up != root_pid:
+            continue
+        try:
+            for line in Path(f"/proc/{pid}/status").read_text().splitlines():
+                if line.startswith("VmRSS:"):
+                    out[comm] = round(out.get(comm, 0.0) + int(line.split()[1]) / 1024.0, 1)
+        except (OSError, ValueError):
+            continue
+    return out
+
+
+class _RssSampler(threading.Thread):
+    """Samples _rss_mb every period_s on its own thread (no ROS calls), so the probe's publish loop is not delayed."""
+
+    def __init__(self, root_pid: int, period_s: float) -> None:
+        super().__init__(daemon=True)
+        self.root_pid, self.period_s = root_pid, period_s
+        self.samples: list[tuple[int, dict[str, float]]] = []  # (wall time ns, {comm: MB})
+        self._halt = threading.Event()
+
+    def run(self) -> None:
+        while not self._halt.is_set():
+            self.samples.append((time.time_ns(), _rss_mb(self.root_pid)))
+            self._halt.wait(self.period_s)
+
+    def stop(self) -> None:
+        self._halt.set()
+        self.join(timeout=5.0)
+
+
 def _late_attach_window(infos: list, statuses: list, steps: list, assembled: list, t0: int, t1: int) -> dict:
     """Numbers for the arrival-time window [t0, t1) ns: /rtabmap/info steps, the largest gap between consecutive infos whose
     later one arrived in the window (the pair spanning t0 counts), the largest stamp age an info reached before the next one
@@ -662,9 +716,13 @@ def test_m1_measure_late_cloud_map_attach(stack: Stack) -> None:
     /map: nothing subscribes it on the robot), then attach like the gateway, detach and re-attach (UGV_MEASURE_CYCLES,
     default 3). Per attach: the /rtabmap/info gap and stamp age in the 10 s after it vs the 20 s before, pose status
     reasons, cloud size, rtabmap's own map-assembly time, and (since the fix) map_assembler's time and message count,
-    which must equal rtabmap's steps (its mapData subscription keeps 1). Appends one JSON line to UGV_MEASURE_OUT if set."""
+    which must equal rtabmap's steps (its mapData subscription keeps 1). Also samples the RSS of map_assembler and rtabmap
+    every UGV_MEASURE_RSS_PERIOD_S seconds (default 5) with the graph node reached at that time (final review I2).
+    Appends one JSON line to UGV_MEASURE_OUT if set."""
     map_s = float(os.environ.get("UGV_MEASURE_MAP_S", "150"))
     cycles = int(os.environ.get("UGV_MEASURE_CYCLES", "3"))
+    rss = _RssSampler(stack.proc.pid, float(os.environ.get("UGV_MEASURE_RSS_PERIOD_S", "5")))
+    rss.start()
     hz = _X3_HZ if stack.w == _BIG[0] else 10.0  # 640x480: about the live rate (each rgbd_image is 2.1 MB)
     clock, node = stack.node.get_clock(), stack.node
     infos: list[tuple[int, int]] = []  # (arrival ns, header stamp ns)
@@ -698,6 +756,7 @@ def test_m1_measure_late_cloud_map_attach(stack: Stack) -> None:
             "t0": t_attach,
         })
         stack.run(20.0, hz=hz)  # viewer closed: the gateway drops the subscriptions; mapping goes on
+    rss.stop()
     log = stack.log_path.read_text(encoding="utf-8", errors="replace")
     steps = [
         {"t": int(float(m["t"]) * 1e9), "node": int(m["node"]), "core": float(m["core"]), "maps": float(m["maps"]), "pub": float(m["pub"])}
@@ -718,6 +777,10 @@ def test_m1_measure_late_cloud_map_attach(stack: Stack) -> None:
             infos, statuses, steps, assembled, start + 60 * s, start + int(map_s * 1e9)
         ),
         "whole_run": _late_attach_window(infos, statuses, steps, assembled, start, clock.now().nanoseconds),
+        "rss_mb": [
+            {"t_s": round((t - start) / 1e9, 1), "node": max((st["node"] for st in steps if st["t"] < t), default=None), **mb}
+            for t, mb in rss.samples
+        ],
     }
     print(json.dumps(result))
     if out := os.environ.get("UGV_MEASURE_OUT"):
@@ -781,3 +844,22 @@ def test_x5_map_stats_on_the_real_stack(stack: Stack) -> None:
     assert not problems, "; ".join(problems) + f" | stats={last} messages={len(stats)}"
     print(f"map stats moving: {json.dumps(moving)}")
     print(f"map stats parked: {json.dumps(last)}")
+
+
+@pytest.mark.parametrize(
+    "stack", [{"speed": _X4_SPEED, "launch_args": ("map_assembler:=false",)}], ids=["moving-320x240-no-assembler"], indirect=True
+)
+def test_x6_map_assembler_off_leaves_slam_running_and_no_cloud_map(stack: Stack) -> None:
+    """Final review I2: map_assembler:=false (a long mission, its memory not spent) starts no map_assembler, so nothing
+    publishes /rtabmap/cloud_map (rtabmap's own copy stays on /rtabmap/slam/cloud_map); SLAM, mapGraph and the graph
+    still grow."""
+    seen = stack.seen
+    graphs: list = []
+    stack.node.create_subscription(MapGraph, "/rtabmap/mapGraph", graphs.append, _LATCHED)
+    assert stack.run(60.0, until=lambda: len(seen["info"]) >= 8 and graphs and len(graphs[-1].poses) >= 5), (
+        f"SLAM did not run without the assembler: {len(seen['info'])} info, {len(graphs)} graphs"
+    )
+    nodes = set(stack.node.get_node_names())
+    assert "map_assembler" not in nodes and "rtabmap" in nodes, sorted(nodes)
+    assert stack.node.get_publishers_info_by_topic("/rtabmap/cloud_map") == []
+    assert "map_assembler=False" in stack.log_path.read_text(encoding="utf-8", errors="replace")

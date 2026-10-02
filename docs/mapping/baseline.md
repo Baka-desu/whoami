@@ -425,3 +425,75 @@ for the message after the attach.
   the live laptop on a long mission.
 - `localize` mode not measured: the assembler loads the existing map once, 1 s after start, through `/rtabmap/rtabmap/get_map_data`
   (waiting at most 5 s for the service). If rtabmap takes longer to load its database, the assembler has only the nodes it receives later.
+
+## Final review I2: map_assembler memory per node, `map_cleanup` false vs true
+
+**When:** 2026-10-02, branch `mapping-3d`, `ugv-run` container, same harness as above. **Question** (final review I2, ruling R28):
+how much memory do map_assembler and rtabmap take per graph node on the live profile, does `map_cleanup: true` (cache freed when
+the viewer closes) bound it, and what mission length fits the laptop?
+
+**Method:** `test_m1_measure_late_cloud_map_attach`, laptop profile only (`timing:=laptop`, 640x480, reliable camera, 4 frames/s),
+which now also samples the resident memory (VmRSS from `/proc`) of `map_assembler` and `rtabmap` under the launch every 5 s,
+with the graph node rtabmap had reached at that moment (`rss_mb` in the JSON line):
+```
+MSYS_NO_PATHCONV=1 docker exec -e PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 -e UGV_MEASURE_LATE_ATTACH=1 -e UGV_MEASURE_MAP_S=120 \
+  -e UGV_MEASURE_CYCLES=5 -e UGV_MEASURE_OUT=/tmp/i2.jsonl ugv-run bash -lc 'ulimit -c 0; \
+  cd /ws/src/ugv_nav/ugv_localization && source /opt/ros/lyrical/setup.bash && source /ws/install/setup.bash && \
+  python3 -m pytest -p no:cacheprovider test/test_ros_stack.py -k "m1 and laptop" -q'
+```
+120 s of mapping with no viewer, then 5 cycles of viewer attached 15 s / detached 20 s, about 295 s and 530-550 nodes per run.
+One run with `map_cleanup: false` (shipped) and one with `map_cleanup: true` (the launch file's value changed for that run only).
+The texture lasts 300 s of travel, so a run cannot be much longer without changing the harness.
+
+### Memory against graph nodes (MB)
+
+| Node | false: assembler | false: rtabmap | true: assembler | true: rtabmap | Phase (both runs) |
+|---|---|---|---|---|---|
+| ~5 | 193 | 348 | 188 | 289 | start-up, no viewer |
+| ~110 | 266 | 856 | 263 | 862 | no viewer |
+| 224 | 336 | 1008 | 336 | 1019 | no viewer, just before the first attach |
+| ~252 | 716 | 1045 | 712 | 1054 | 1st attach (peak) |
+| 281 | 716 | 1080 | 523 | 1087 | 1st detach |
+| ~318 | 851 | 1128 | 844 | 1123 | 2nd attach (peak) |
+| ~348 | 851 | 1164 | 591 | 1169 | 2nd detach |
+| ~380 | 971 | 1211 | 959 | 1205 | 3rd attach (peak) |
+| ~410 | 971 | 1240 | 697 | 1249 | 3rd detach |
+| ~445 | 1065-1088 | 1272-1284 | 1124-1133 | 1287-1299 | 4th attach (peak) |
+| ~475 | 1088 | 1319 | 782 | 1320 | 4th detach |
+| ~505 | 1189-1205 | 1351-1362 | 1258-1282 | 1366-1381 | 5th attach (peak) |
+| ~535 | 1205 | 1381-1392 | 840 | 1401-1412 | 5th detach |
+
+Linear fits (MB = a + b x node):
+
+| | `map_cleanup: false` | `map_cleanup: true` |
+|---|---|---|
+| map_assembler, no viewer yet (nodes 30-224) | 196 + 0.62/node | 197 + 0.62/node |
+| map_assembler, peak while a viewer is attached | 237 + 1.92/node | 182 + 2.10/node |
+| map_assembler, viewer closed | stays at the last peak (until the next attach adds the new nodes) | about 1.2/node (523 at 281 -> 840 at 549) |
+| rtabmap (nodes >= 50) | 711 + 1.30/node | 714 + 1.30/node |
+| both, peak with a viewer attached | 967 + 3.17/node | 932 + 3.31/node |
+
+### Viewer and SLAM per attach
+
+| Attach | Node false / true | false: first cloud after s | true: first cloud after s | false: assembler s | true: assembler s | false / true: worst `/rtabmap/info` gap after s | rtabmap maps+pub |
+|---|---|---|---|---|---|---|---|
+| 1 | 224 / 224 | 1.78 | 1.65 | 1.17 | 1.31 | 0.69 / 0.59 | 3-5 ms |
+| 2 | 290 / 291 | 0.31 | 1.99 | 0.19 | 1.67 | 1.03 / 0.73 | 3-5 ms |
+| 3 | 356 / 358 | 0.30 | 2.34 | 0.20 | 1.97 | 0.70 / 0.64 | 4-5 ms |
+| 4 | 415 / 425 | 0.24 | 2.11 | 0.18 | 2.05 | 0.71 / 0.63 | 4-5 ms |
+| 5 | 478 / 493 | 0.37 | 3.00 | 0.19 | 2.60 | 0.79 / 0.58 | 4-5 ms |
+
+- `mapData` messages dropped by the assembler over the whole run (rtabmap steps minus messages it processed): **1** of 540 with
+  `false`, **8** of 559 with `true` (1-3 at every re-attach, while it rebuilds the whole map).
+- `slam_stale` in neither run. The 1.03 s gap after the second attach of the `false` run comes with `depth_stale` and the same run
+  shows 1.8-2.2 s gaps with no viewer attached (`camera_stale`): harness input stalls of the 640x480 profile, known since the Task 8
+  risk check. rtabmap's map work stayed at 3-5 ms per step after every attach in both runs.
+
+**Decision (ruling R28 fallback):** `map_cleanup: true` does not bound the memory either. Its peak with a viewer open grows as fast
+as with `false` (2.1 against 1.9 MB/node), and the cache it frees on detach is only partly given back (the assembler still grows
+about 1.2 MB/node with the viewer closed, against 0.62 before any attach). It costs 1.7-3.0 s per re-open (5-10 times slower,
+growing with the map) and 7 more nodes missing from the viewer cloud per run. The figure that limits a mission is the peak with the
+viewer open, which the operator can reach at any time, so **`map_cleanup: false` stays**, and the limit is documented instead:
+`docs/mapping/README.md` "Memory and mission length" (about 1500 nodes, about 12 minutes of continuous driving at 2 nodes/s,
+with the map view; about 4000 nodes, about 30 minutes, with `map_assembler:=false`, the launch argument added for this). The
+figures are from a synthetic plane at 3 m; a real scene may cost more per node, so re-measure in the owner's lit run.
