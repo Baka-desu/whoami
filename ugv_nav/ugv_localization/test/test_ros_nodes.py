@@ -7,6 +7,7 @@ colcon test in WSL Lyrical). Synthetic data here is test input only — never a 
 
 from __future__ import annotations
 
+import dataclasses
 import itertools
 import json
 import os
@@ -23,16 +24,17 @@ pytest.importorskip("rtabmap_msgs")
 
 import numpy as np  # noqa: E402
 import yaml  # noqa: E402
-from geometry_msgs.msg import TransformStamped  # noqa: E402
+from geometry_msgs.msg import Pose, TransformStamped  # noqa: E402
 from nav_msgs.msg import Odometry  # noqa: E402
-from rclpy.qos import DurabilityPolicy, QoSProfile  # noqa: E402
-from rtabmap_msgs.msg import Info  # noqa: E402
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy  # noqa: E402
+from rtabmap_msgs.msg import Info, MapGraph  # noqa: E402
 from sensor_msgs.msg import CameraInfo, Image  # noqa: E402
 from std_msgs.msg import Bool, Float64, String  # noqa: E402
 from std_srvs.srv import Empty  # noqa: E402
 from tf2_msgs.msg import TFMessage  # noqa: E402
 
-from ugv_localization.camera import load_calibration  # noqa: E402
+from ugv_localization.camera import calibration_to_yaml_dict, load_calibration  # noqa: E402
+from ugv_localization.rosconv import calibration_from_camera_info_msg  # noqa: E402
 
 _PKG = Path(__file__).resolve().parents[1]
 _CFG = _PKG / "config"
@@ -417,3 +419,119 @@ def test_n13_distance_tracker_counts_labels_and_resets(h: Harness) -> None:
     assert h.spin(5.0, until=lambda: len(total) > n and total[-1] == 0.0), total[-3:]
     assert basis[-1] == "none"
     assert proc.poll() is None, _output(proc)
+
+
+# ------------------------------------------------------------------------------ map_stats_node
+_STATS_KEYS = {"keyframes", "loop_closures", "path_length_m", "db_bytes", "last_update_age_s", "mode", "calibration_placeholder"}
+_PERIOD_S = 4.0  # publish_rate_hz:=0.25: a latched replay is told apart from a fresh tick by the 4 s between ticks
+
+
+def _stats_node(h: Harness, **params: str) -> subprocess.Popen:
+    args = ["--ros-args"]
+    for name, value in params.items():
+        if value:  # `-p name:=` (empty) is not a valid override: leave the parameter at its default ""
+            args += ["-p", f"{name}:={value}"]
+    return h.start("ugv_localization.nodes.map_stats_node", *args)
+
+
+def _subscribers(h: Harness, topic: str) -> set[str]:
+    """Names of the nodes subscribed to topic (the probe itself subscribes to none of the rtabmap topics)."""
+    return {i.node_name for i in h.node.get_subscriptions_info_by_topic(topic)}
+
+
+def _graph_msg(h: Harness, poses: list[tuple[int, float, float]]) -> MapGraph:
+    m = MapGraph()
+    m.header.stamp = h.now()
+    m.header.frame_id = "map"
+    m.poses_id = [i for i, _, _ in poses]
+    for _, x, y in poses:
+        p = Pose()
+        p.position.x, p.position.y = x, y
+        p.orientation.w = 1.0
+        m.poses.append(p)
+    return m
+
+
+def _calibration_file(h: Harness, path: Path, *, placeholder: bool) -> Path:
+    cal = dataclasses.replace(calibration_from_camera_info_msg(_cinfo(h), "probe_cam"), placeholder=placeholder)
+    path.write_text(yaml.safe_dump(calibration_to_yaml_dict(cal)), encoding="utf-8")
+    return path
+
+
+def test_n14_map_stats_publishes_scalar_json_and_replays_it_to_a_late_subscriber(h: Harness, tmp_path: Path) -> None:
+    db = tmp_path / "rtabmap.db"
+    db.write_bytes(bytes(1234))
+    cal = _calibration_file(h, tmp_path / "cal.yaml", placeholder=True)
+    proc = _stats_node(
+        h, mode="localize", database_path=str(db), calibration_file=str(cal), publish_rate_hz=str(1.0 / _PERIOD_S)
+    )
+    got: list[dict] = []
+    h.node.create_subscription(String, "/ugv/map/stats", lambda m: got.append(json.loads(m.data)), _LATCHED)
+    graph_pub = h.node.create_publisher(MapGraph, "/rtabmap/mapGraph", _LATCHED)  # rtabmap: reliable, transient local
+    info_pub = h.node.create_publisher(Info, "/rtabmap/info", 10)  # rtabmap: reliable, volatile
+    # Ids out of order on purpose: in id order this is the (0,0) -> (3,4) -> (3,10) line, 5 + 6 m.
+    poses = [(3, 3.0, 10.0), (1, 0.0, 0.0), (2, 3.0, 4.0)]
+    ref_ids = itertools.count(10)
+
+    def each() -> None:
+        graph_pub.publish(_graph_msg(h, poses))  # the same graph again and again: a republish is not a change
+        for loop, proximity in ((5, 0), (5, 0), (0, 3)):  # one loop closure reported twice + one proximity detection
+            info = Info()  # a parked robot: a new reference node every step, the same matched node
+            info.header.stamp = h.now()
+            info.ref_id, info.loop_closure_id, info.proximity_detection_id = next(ref_ids), loop, proximity
+            info_pub.publish(info)
+
+    def complete() -> bool:
+        return bool(got) and got[-1]["keyframes"] == 3 and got[-1]["loop_closures"] == 2
+
+    h.spin(40.0, each=each, period=0.1, until=lambda: complete() or proc.poll() is not None)
+    assert proc.poll() is None, _output(proc)
+    assert complete(), got[-3:]
+    assert got[0]["keyframes"] == 0 and got[0]["last_update_age_s"] is None  # the startup sample: nothing seen yet
+
+    latest = got[-1]
+    assert set(latest) == _STATS_KEYS
+    assert all(v is None or type(v) in (bool, int, float, str) for v in latest.values())  # scalars only
+    assert latest["path_length_m"] == pytest.approx(11.0)
+    assert latest["db_bytes"] == 1234
+    assert latest["mode"] == "localize"
+    assert latest["calibration_placeholder"] is True
+    # The graph never changed after it arrived, so republishing it must not have reset its age (it was last
+    # changed when it first arrived, well before this tick; a reset on every message would read ~0.1 s).
+    assert latest["last_update_age_s"] > 0.5, latest
+
+    # A late subscriber gets the stored sample (transient local): the very same message, not a fresh tick.
+    late: list[dict] = []
+    h.node.create_subscription(String, "/ugv/map/stats", lambda m: late.append(json.loads(m.data)), _LATCHED)
+    assert h.spin(_PERIOD_S - 1.0, each=each, period=0.1, until=lambda: bool(late)), "late subscriber got nothing"
+    assert late[0] == latest
+    qos = [(i.node_name, i.qos_profile.reliability, i.qos_profile.durability, i.qos_profile.depth)
+           for i in h.node.get_publishers_info_by_topic("/ugv/map/stats")]
+    assert qos == [("map_stats", ReliabilityPolicy.RELIABLE, DurabilityPolicy.TRANSIENT_LOCAL, 1)]
+
+    # Only the light topics: subscribing to cloud_map or mapData makes rtabmap assemble and send the whole map.
+    assert _subscribers(h, "/rtabmap/mapGraph") == {"map_stats"} and _subscribers(h, "/rtabmap/info") == {"map_stats"}
+    assert _subscribers(h, "/rtabmap/cloud_map") == set() and _subscribers(h, "/rtabmap/mapData") == set()
+    assert proc.poll() is None, _output(proc)
+
+
+@pytest.mark.parametrize("case, warns", [("none", False), ("missing", True), ("genuine", False)])
+def test_n15_map_stats_calibration_flag_is_false_unless_the_file_says_placeholder(
+    h: Harness, tmp_path: Path, case: str, warns: bool
+) -> None:
+    calibration = {
+        "none": "",
+        "missing": str(tmp_path / "no_such_calibration.yaml"),
+        "genuine": str(_calibration_file(h, tmp_path / "cal.yaml", placeholder=False)),
+    }[case]
+    proc = _stats_node(h, mode="mapping", database_path=str(tmp_path / "absent.db"), calibration_file=calibration)
+    got: list[dict] = []
+    h.node.create_subscription(String, "/ugv/map/stats", lambda m: got.append(json.loads(m.data)), _LATCHED)
+    h.spin(30.0, until=lambda: bool(got) or proc.poll() is not None)
+    assert proc.poll() is None, _output(proc)
+    assert got and got[0]["calibration_placeholder"] is False
+    assert (got[0]["mode"], got[0]["db_bytes"]) == ("mapping", None)  # no database file yet: null, not 0
+    proc.send_signal(signal.SIGINT)
+    proc.wait(timeout=10)
+    warnings = [line for line in _output(proc).splitlines() if "WARN" in line and "calibration" in line]
+    assert bool(warnings) is warns, warnings

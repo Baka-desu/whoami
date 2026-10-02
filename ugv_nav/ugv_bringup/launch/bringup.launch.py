@@ -76,7 +76,7 @@ def _setup(context, *args, **kwargs):
         ),
         _include("ugv_localization", "localization.launch.py",
                  {"mode": arg("mode"), "profile": profile, "database_path": arg("database_path"),
-                  "timing": arg("localization_timing")}),
+                  "timing": arg("localization_timing"), "calibration_file": arg("calibration_file")}),
         _include("ugv_costmap", "semantic_costmap.launch.py", {}),
         _include("ugv_navigation", "navigation.launch.py", {"robot": arg("robot")}),
         _include("ugv_safety", "safety.launch.py", {}),

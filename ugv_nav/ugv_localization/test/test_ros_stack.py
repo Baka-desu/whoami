@@ -11,12 +11,16 @@ x3 (Task 23) counts the frames that reach odometry (320x240 in the default case,
    of the rgbd_image subscriptions.
 x4 (Task 8) moves the robot (wheel odometry + the scene sliding past the camera) so RTAB-Map adds graph nodes,
    and checks the 3D map outputs: /rtabmap/cloud_map, /rtabmap/mapPath, /rtabmap/mapData.
+x5 (Task 9) checks /ugv/map/stats from the same moving stack: map_stats is launched, reads rtabmap's graph and info,
+   and reports the calibration file's placeholder flag.
 Skipped unless ROS 2 + rtabmap_ros + an installed ugv_localization are available (colcon test).
 The scene is a static random texture at 3 m: synthetic test input, not a product calibration.
 """
 
 from __future__ import annotations
 
+import dataclasses
+import json
 import os
 import signal
 import subprocess
@@ -35,6 +39,7 @@ except Exception:  # noqa: BLE001
     pytest.skip("ugv_localization / rtabmap_slam not installed (run under colcon test)", allow_module_level=True)
 
 import numpy as np  # noqa: E402
+import yaml  # noqa: E402
 from geometry_msgs.msg import TransformStamped  # noqa: E402
 from nav_msgs.msg import OccupancyGrid, Odometry, Path as NavPath  # noqa: E402
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data  # noqa: E402
@@ -42,6 +47,8 @@ from rtabmap_msgs.msg import Info, MapData, OdomInfo, RGBDImage  # noqa: E402
 from sensor_msgs.msg import CameraInfo, Image, PointCloud2, PointField  # noqa: E402
 from std_msgs.msg import Bool, Float64, String  # noqa: E402
 from tf2_msgs.msg import TFMessage  # noqa: E402
+
+from ugv_localization.camera import calibration_from_camera_info, calibration_to_yaml_dict  # noqa: E402
 
 _W, _H, _FRAME = 320, 240, "camera_optical"
 _BIG = (640, 480)  # the live camera size: one rgbd_image (rgb8 + 32FC1 depth) is ~2.1 MB
@@ -85,6 +92,7 @@ class Stack:
     def __init__(
         self, tmp: Path, odom_source: str, depth_input: str, *, timing: str = "default",
         size: tuple[int, int] = (_W, _H), camera_reliable: bool = False, speed: float = 0.0,
+        placeholder_calibration: bool = False,
     ) -> None:
         self.depth_input = depth_input
         self.w, self.h = size
@@ -106,11 +114,22 @@ class Stack:
         self.ex = rclpy.executors.SingleThreadedExecutor(context=self.ctx)
         self.ex.add_node(self.node)
         env = {**os.environ, "ROS_DOMAIN_ID": str(self.domain)}
+        calibration_args = []
+        if placeholder_calibration:  # a calibration file that says "placeholder": map_stats reports it
+            cal = calibration_from_camera_info(
+                camera_name="stack_probe_cam", width=self.w, height=self.h, distortion_model="plumb_bob", d=[0.0] * 5,
+                k=self.k, r=[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+                p=[self.k[0], 0.0, self.k[2], 0.0, 0.0, self.k[4], self.k[5], 0.0, 0.0, 0.0, 1.0, 0.0],
+            )
+            path = tmp / "placeholder_calibration.yaml"
+            path.write_text(yaml.safe_dump(calibration_to_yaml_dict(dataclasses.replace(cal, placeholder=True))), encoding="utf-8")
+            calibration_args = [f"calibration_file:={path}"]
         self.proc = subprocess.Popen(
             [
                 "ros2", "launch", "ugv_localization", "localization.launch.py",
                 "mode:=mapping", "fresh_db:=true", f"odom_source:={odom_source}", "profile:=live_cam",
                 f"database_path:={tmp / 'rtabmap.db'}", f"depth_input:={depth_input}", f"timing:={timing}",
+                *calibration_args,
             ],
             env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, start_new_session=True,
         )
@@ -460,3 +479,60 @@ def test_x4_rtabmap_3d_map_outputs(stack: Stack) -> None:
     )
     assert not problems, "; ".join(problems) + " | " + summary
     print(summary)
+
+
+_STATS_KEYS = ("keyframes", "loop_closures", "path_length_m", "db_bytes", "last_update_age_s", "mode", "calibration_placeholder")
+
+
+@pytest.mark.parametrize(
+    "stack", [{"speed": _X4_SPEED, "placeholder_calibration": True}], ids=["moving-320x240-placeholder-calibration"], indirect=True
+)
+def test_x5_map_stats_on_the_real_stack(stack: Stack) -> None:
+    """Task 9. localization.launch.py starts map_stats and it works against the real rtabmap publishers: the graph
+    (reliable + transient local) and info (reliable) connect, the keyframe count and path length follow the moving
+    robot, the calibration file passed to the launch reaches the node, and the node never subscribes to cloud_map or
+    mapData (either makes rtabmap assemble and send the whole map). Then the robot stops: rtabmap publishes no new graph
+    (so the age must grow) but keeps reporting a loop closure with the same node in every step (so the count must not)."""
+    stats: list[dict] = []
+    stack.node.create_subscription(String, "/ugv/map/stats", lambda m: stats.append(json.loads(m.data)), _LATCHED)
+    stack.run(90.0, until=lambda: bool(stats) and stats[-1]["keyframes"] >= 3 and stats[-1]["last_update_age_s"] is not None)
+    assert stats, "/ugv/map/stats never published"
+    early = stats[-1]["keyframes"]
+    stack.run(10.0)  # keep moving: the numbers must keep following the graph
+    moving = stats[-1]
+    stack.speed = 0.0  # the robot stops
+    stack.run(3.0)  # frames already in flight may still add a keyframe or a match
+    parked = stats[-1]
+    stack.run(8.0)
+    last = stats[-1]
+
+    problems = []
+    if tuple(last) != _STATS_KEYS:
+        problems.append(f"keys {tuple(last)}")
+    if not all(v is None or type(v) in (bool, int, float, str) for v in last.values()):
+        problems.append("a value is not a JSON scalar")
+    if moving["keyframes"] < early + 3:
+        problems.append(f"keyframes did not follow the graph: {early} early, {moving['keyframes']} after 10 s more")
+    if not last["path_length_m"] or last["path_length_m"] <= 0.0:
+        problems.append(f"path_length_m {last['path_length_m']}")
+    if moving["last_update_age_s"] is None or not 0.0 <= moving["last_update_age_s"] < 5.0:
+        problems.append(f"last_update_age_s {moving['last_update_age_s']} while the graph keeps growing")
+    if last["last_update_age_s"] is None or last["last_update_age_s"] < 7.0:
+        problems.append(f"last_update_age_s {last['last_update_age_s']} after 11 s parked: it did not grow")
+    if last["keyframes"] != parked["keyframes"]:
+        problems.append(f"keyframes {parked['keyframes']} -> {last['keyframes']} with the robot parked")
+    if type(last["loop_closures"]) is not int or last["loop_closures"] > parked["loop_closures"] + 1:
+        problems.append(f"loop_closures {parked['loop_closures']} -> {last['loop_closures']!r} with the robot parked")
+    if last["db_bytes"] is not None and type(last["db_bytes"]) is not int:
+        problems.append(f"db_bytes {last['db_bytes']!r}")
+    if last["mode"] != "mapping":
+        problems.append(f"mode {last['mode']!r}")
+    if last["calibration_placeholder"] is not True:
+        problems.append("calibration_placeholder is not true: calibration_file did not reach map_stats")
+    for topic in ("/rtabmap/cloud_map", "/rtabmap/mapData"):
+        subscribers = {i.node_name for i in stack.node.get_subscriptions_info_by_topic(topic)}
+        if "map_stats" in subscribers:
+            problems.append(f"map_stats subscribes {topic}")
+    assert not problems, "; ".join(problems) + f" | stats={last} messages={len(stats)}"
+    print(f"map stats moving: {json.dumps(moving)}")
+    print(f"map stats parked: {json.dumps(last)}")

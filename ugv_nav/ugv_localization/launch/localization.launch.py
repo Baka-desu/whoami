@@ -12,6 +12,7 @@ Nodes:
   rtabmap        RGB-D SLAM → TF map->odom, /map (occupancy from depth), /rtabmap/info
   pose_validity  /ugv/pose_valid heartbeat
   distance_tracker /ugv/localization/distance_travelled (odometry estimate) + distance_basis label
+  map_stats      /ugv/map/stats JSON (keyframes, loop closures, path length, db size, calibration placeholder)
 
 TF chain owned here (mindmap D6). Camera driver + /wheel/odom come from Dev 5 bringup; DA3 depth
 comes from Dev 1 perception as a 32FC1 depth image on /perception/depth/image (depth_input:=image,
@@ -205,6 +206,20 @@ def _setup(context, *args, **kwargs):
             parameters=[{**common, "profile_path": os.path.join(cfg, "distance.yaml")}],
             remappings=[("odom", "/odom")],
         ),
+        Node(
+            package="ugv_localization",
+            executable="map_stats_node",
+            name="map_stats",
+            output="screen",
+            parameters=[
+                {
+                    **common,
+                    "mode": plan.mode.value,
+                    "database_path": plan.database_path,
+                    "calibration_file": arg("calibration_file"),
+                }
+            ],
+        ),
     ]
     return actions
 
@@ -220,6 +235,11 @@ def generate_launch_description() -> LaunchDescription:
             ),
             DeclareLaunchArgument("database_path", default_value="~/.ros/ugv/rtabmap.db"),
             DeclareLaunchArgument("timing", default_value="default"),
+            DeclareLaunchArgument(
+                "calibration_file",
+                default_value="",
+                description="camera calibration YAML in use; only its `placeholder` flag is read, for /ugv/map/stats ('' = none)",
+            ),
             DeclareLaunchArgument("fresh_db", default_value="false", description="mapping only: delete db at start"),
             DeclareLaunchArgument("profile", default_value="live_cam", description="live_cam | sim | bag"),
             DeclareLaunchArgument("use_sim_time", default_value="auto", description="auto = from profile"),
