@@ -91,6 +91,7 @@ export class PathHold {
   private anchor: { x: number; y: number; yaw: number } | null = null
   private pose: { x: number; y: number; yaw: number } | null = null
   private blockStreak = 0
+  private emptyStreak = 0
   private farStreak = 0
   private settling = 0
   private lastStamp: number | null = null
@@ -110,6 +111,7 @@ export class PathHold {
     this.shown = null
     this.anchor = null
     this.blockStreak = 0
+    this.emptyStreak = 0
     this.farStreak = 0
     this.settling = 0
     this.lastStamp = null
@@ -123,7 +125,8 @@ export class PathHold {
     // The same mask is analysed on every camera frame. Count a mask once.
     if (this.lastStamp === raw.meta.stamp && this.shown) {
       // Later camera frames of this mask must keep the debounced grid the path was searched on.
-      return { ...raw, grid: this.stable.slice(), path: this.shown, pathPx: pathPixels(this.shown, raw.meta) }
+      const path = this.shown.map((p) => ({ ...p }))
+      return { ...raw, grid: this.stable.slice(), path, pathPx: pathPixels(path, raw.meta) }
     }
     this.lastStamp = raw.meta.stamp
 
@@ -135,28 +138,41 @@ export class PathHold {
     const blocked = this.shown !== null && this.shown.length > 0 && pathBlocked(this.shown, grid)
     if (blocked) this.blockStreak++
     else this.blockStreak = 0
+    // No route, and the held cells are not lethal either (inflated or unknown). Drop after the same wait.
+    const routeGone = this.shown !== null && this.shown.length > 0 && candidate.length === 0 && !blocked
+    if (routeGone) this.emptyStreak++
+    else this.emptyStreak = 0
 
     let next: Pt[]
-    if (this.blockStreak >= BLOCK_FRAMES) {
-      // The corridor stayed lethal. Take the new search now, including an empty one.
+    if (this.blockStreak >= BLOCK_FRAMES || this.emptyStreak >= BLOCK_FRAMES) {
+      // The corridor stayed lethal, or the search stayed empty. Take the new search, including an empty one.
       next = candidate
       this.blockStreak = 0
+      this.emptyStreak = 0
       this.settling = 0
       this.farStreak = 0
-    } else if (this.shown === null) {
+    } else if (this.shown === null || this.shown.length === 0) {
       next = candidate
     } else if (candidate.length === 0) {
       next = this.shown
     } else if (this.pose && !moved && this.settling === 0) {
       next = this.shown
       this.farStreak = 0
-    } else if (!this.pose && goalsClose(this.shown, candidate)) {
+    } else if (!this.pose && this.settling === 0 && goalsClose(this.shown, candidate)) {
       next = this.shown
       this.farStreak = 0
-    } else if (!this.pose) {
+    } else if (!this.pose && this.settling === 0) {
       this.farStreak++
-      next = this.farStreak >= FAR_FRAMES ? ease(this.shown, candidate) : this.shown
-      if (this.farStreak >= FAR_FRAMES) this.farStreak = 0
+      if (this.farStreak < FAR_FRAMES) {
+        next = this.shown
+      } else {
+        // A far goal that persists eases, then lands. One ease step used to stop inside GOAL_CLOSE_M.
+        this.settling = SETTLE_FRAMES
+        this.farStreak = 0
+        next = ease(this.shown, candidate)
+        this.settling--
+        if (this.settling === 0) next = candidate
+      }
     } else {
       this.farStreak = 0
       next = ease(this.shown, candidate)

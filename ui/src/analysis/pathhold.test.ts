@@ -88,6 +88,33 @@ describe('PathHold', () => {
     expect(eased.path.length).toBeGreaterThan(1)
   })
 
+  it('does not let a caller mutate the held path', () => {
+    const hold = new PathHold()
+    const first = hold.apply(analysis(open(), 1))
+    first.path[0].x = 99
+    expect(hold.apply(analysis(open(), 1)).path[0].x).not.toBe(99)
+  })
+
+  it('with no pose, lands on a far path instead of stopping short', () => {
+    const hold = new PathHold()
+    hold.apply(analysis(open(), 1))
+    const shifted = open()
+    for (let z = 0; z < TH; z++) for (let x = (TW - 1) / 2; x < TW; x++) shifted[z * TW + x] = 2
+    let last = hold.apply(analysis(shifted, 2))
+    for (let stamp = 3; stamp <= 12; stamp++) last = hold.apply(analysis(shifted, stamp))
+    expect(last.path).toEqual(findPath(shifted))
+  })
+
+  it('drops the line when the search stays empty without a lethal cell', () => {
+    const hold = new PathHold()
+    hold.setPose(pose())
+    const first = hold.apply(analysis(open(), 1))
+    const inflated = new Uint8Array(TW * TH).fill(1)
+    expect(hold.apply(analysis(inflated, 2)).path).toEqual(first.path)
+    expect(hold.apply(analysis(inflated, 3)).path).toEqual([])
+    expect(hold.apply(analysis(open(), 4)).path.length).toBeGreaterThan(1)
+  })
+
   it('does not count the same mask twice', () => {
     const hold = new PathHold()
     hold.setPose(pose())
