@@ -1,7 +1,7 @@
 // Turns a canonical Perception Port mask (GW x GH, classes {0,1,2}) into everything the UI shows beyond
 // the overlay: a flat-ground costmap, a local path preview and the stats. Pure functions, no I/O.
 // Flat-ground projection (camera height CAM_H over level ground) is an approximation, so the ground map
-// and path are previews, not Nav2's plan.
+// and path are previews, not Nav2's plan. The live view holds the line across frames in pathhold.ts.
 import {
   CAM_H, CELL_M, GH, GW, PERCEPTION_MAX_AGE_MS, TH, TW, Z_MIN,
   type Analysis, type FrameMeta,
@@ -14,6 +14,15 @@ export interface CameraGrid {
   fy: number
   cx: number
   vh: number // image row of the horizon / optical centre, in grid space
+}
+
+// Image position of a ground path. z is metres ahead; x is metres to the right.
+export function pathPixels(path: { x: number; z: number }[], meta: FrameMeta): { u: number; v: number }[] {
+  const { fx, fy, cx, vh } = cameraGrid(meta)
+  return path.map(({ x, z }) => ({
+    u: (cx + (fx * x) / z) / GW,
+    v: (vh + (CAM_H * fy) / z) / GH,
+  }))
 }
 
 export function cameraGrid(meta: FrameMeta): CameraGrid {
@@ -90,7 +99,7 @@ function groundGrid(rawMask: Uint8Array, fx: number, fy: number, cx: number, vh:
   return inflated
 }
 
-function findPath(grid: Uint8Array): { x: number; z: number }[] {
+export function findPath(grid: Uint8Array): { x: number; z: number }[] {
   const start = (TW - 1) / 2
   const dist = new Float32Array(TW * TH).fill(Infinity)
   const prev = new Int32Array(TW * TH).fill(-1)
@@ -145,10 +154,7 @@ export function buildAnalysis({ meta, mask, depth, latencyMs, reasons: given = [
   const { fx, fy, cx, vh } = cameraGrid(meta)
   const grid = groundGrid(mask, fx, fy, cx, vh)
   const path = findPath(grid)
-  const pathPx = path.map(({ x, z }) => ({
-    u: (cx + (fx * x) / z) / GW,
-    v: (vh + (CAM_H * fy) / z) / GH,
-  }))
+  const pathPx = pathPixels(path, meta)
 
   const counts = [0, 0, 0]
   for (const c of mask) counts[c]++
