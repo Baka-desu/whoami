@@ -35,9 +35,7 @@ export function mapRows(s: Stats | undefined): MapRow[] {
     { k: 'closure links', v: count(stat(s, 'loop_closures')) },
     { k: 'path length', v: fixed(stat(s, 'path_length_m'), 'm') },
     { k: 'cloud source pts', v: count(stat(s, 'cloud_source_points')) }, // the gateway's source count, not what is drawn
-    { k: 'elevation cells', v: count(stat(s, 'elevation_known_cells')) },
     { k: 'database', v: megabytes(stat(s, 'db_bytes')) },
-    { k: 'depth rate', v: fixed(stat(s, 'depth_hz'), 'Hz') },
     { k: 'last update', v: fixed(age(stat(s, 'last_update_age_s')), 's') },
   ]
   const mode = s?.mode

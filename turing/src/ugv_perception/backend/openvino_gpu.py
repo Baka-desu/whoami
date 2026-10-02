@@ -18,7 +18,9 @@ _IOU_THRES = 0.70
 _MAX_DET = 300
 
 
-def _compile_gpu_then_cpu(core: object, model: object) -> tuple[object, str]:
+def _compile_gpu_then_cpu(
+    core: object, model: object, config: dict | None = None
+) -> tuple[object, str]:
     """Prefer OpenVINO GPU (Intel Arc or NVIDIA plugin). CPU is last. Compile once."""
     devices = [str(d) for d in core.available_devices]
     names: list[str] = []
@@ -31,7 +33,9 @@ def _compile_gpu_then_cpu(core: object, model: object) -> tuple[object, str]:
     last: Exception | None = None
     for name in names:
         try:
-            return core.compile_model(model, name), name
+            if config is None:
+                return core.compile_model(model, name), name
+            return core.compile_model(model, name, config), name
         except Exception as exc:
             last = exc
             continue
@@ -359,6 +363,56 @@ def _compile_seg_post(
         raise AdapterError("OpenVINO seg-post compile failed") from exc
 
 
+def _compile_rgb_pre(
+    core: object,
+    device: str,
+    in_h: int,
+    in_w: int,
+    sizes: tuple[tuple[int, int], ...],
+    mean: tuple[float, float, float],
+    std: tuple[float, float, float],
+    clip_255: bool,
+) -> object:
+    """u8 NHWC → f32 NCHW bilinear to each size → ImageNet. Pin f32."""
+    from openvino import Model, Type, properties
+    from openvino import opset13 as ops
+
+    if not sizes:
+        raise ValueError("rgb pre needs at least one target size")
+    rgb_p = ops.parameter([1, in_h, in_w, 3], Type.u8, name="rgb")
+    x = ops.convert(rgb_p, Type.f32)
+    x = ops.transpose(x, np.array([0, 3, 1, 2], dtype=np.int64))
+    cur_h, cur_w = int(in_h), int(in_w)
+    for oh, ow in sizes:
+        th, tw = int(oh), int(ow)
+        if (th, tw) != (cur_h, cur_w):
+            x = ops.interpolate(
+                x,
+                np.array([th, tw], dtype=np.int64),
+                mode="linear",
+                shape_calculation_mode="sizes",
+                coordinate_transformation_mode="half_pixel",
+                axes=np.array([2, 3], dtype=np.int64),
+            )
+            if clip_255:
+                x = ops.clamp(x, 0.0, 255.0)
+            cur_h, cur_w = th, tw
+    x = ops.multiply(x, np.array(1.0 / 255.0, dtype=np.float32))
+    mean_a = np.asarray(mean, dtype=np.float32).reshape(1, 3, 1, 1)
+    std_a = np.asarray(std, dtype=np.float32).reshape(1, 3, 1, 1)
+    x = ops.subtract(x, mean_a)
+    x = ops.divide(x, std_a)
+    model = Model([x], [rgb_p], "rgb_pre")
+    try:
+        return core.compile_model(
+            model, device, {properties.hint.inference_precision: Type.f32}
+        )
+    except AdapterError:
+        raise
+    except Exception as exc:
+        raise AdapterError("OpenVINO rgb-pre compile failed") from exc
+
+
 class OpenVinoGpuTensorBackend:
     """Compile an IR on GPU and return the first output tensor. No YOLO decode."""
 
@@ -371,8 +425,11 @@ class OpenVinoGpuTensorBackend:
         self._hw: tuple[int, int] | None = None
         self._post = None
         self._post_key: tuple | None = None
+        self._pre = None
+        self._pre_key: tuple | None = None
         self._fallback_logits: np.ndarray | None = None
         self.seg_post_disabled = False
+        self.rgb_pre_disabled = False
         self.device = _DEVICE
 
     def load(self, weights_path: str, input_hw: tuple[int, int] | None = None) -> None:
@@ -416,7 +473,13 @@ class OpenVinoGpuTensorBackend:
 
     def _compile(self) -> None:
         try:
-            self._compiled, self.device = _compile_gpu_then_cpu(self._core, self._model)
+            from openvino import Type, properties
+
+            # FP32 on every backend: the GPU plugin would otherwise pick f16 on an f16-capable GPU (Arc) even
+            # for an FP32 IR.
+            self._compiled, self.device = _compile_gpu_then_cpu(
+                self._core, self._model, {properties.hint.inference_precision: Type.f32}
+            )
         except AdapterError:
             raise
         except Exception as exc:
@@ -503,3 +566,76 @@ class OpenVinoGpuTensorBackend:
             return [np.asarray(result[out]) for out in self._compiled.outputs]
         except Exception as exc:
             raise AdapterError("OpenVINO GPU run failed") from exc
+
+    def run_seg_from_rgb(
+        self,
+        rgb: NDArray[np.uint8],
+        out_hw: tuple[int, int],
+        input_hw: tuple[int, int],
+        mean: tuple[float, float, float],
+        std: tuple[float, float, float],
+    ) -> tuple[np.ndarray, np.ndarray]:
+        blob = self._rgb_pre(rgb, (input_hw,), mean, std, clip_255=False)
+        return self.run_seg(blob, out_hw)
+
+    def run_all_from_rgb(
+        self,
+        rgb: NDArray[np.uint8],
+        sizes: tuple[tuple[int, int], ...],
+        mean: tuple[float, float, float],
+        std: tuple[float, float, float],
+    ) -> list[np.ndarray]:
+        blob = self._rgb_pre(rgb, sizes, mean, std, clip_255=True)
+        return self.run_all(blob)
+
+    def _rgb_pre(
+        self,
+        rgb: np.ndarray,
+        sizes: tuple[tuple[int, int], ...],
+        mean: tuple[float, float, float],
+        std: tuple[float, float, float],
+        clip_255: bool,
+    ) -> np.ndarray:
+        if self.rgb_pre_disabled:
+            raise AdapterError("OpenVINO rgb pre is disabled")
+        if self._core is None:
+            raise AdapterError("OpenVinoGpuTensorBackend.load() was not called")
+        if not isinstance(rgb, np.ndarray) or rgb.dtype != np.uint8 or rgb.ndim != 3 or rgb.shape[2] != 3:
+            raise TypeError("rgb must be uint8 HWC")
+        in_h, in_w = int(rgb.shape[0]), int(rgb.shape[1])
+        steps = tuple((int(h), int(w)) for h, w in sizes)
+        key = (
+            str(self.device),
+            in_h,
+            in_w,
+            steps,
+            tuple(float(x) for x in mean),
+            tuple(float(x) for x in std),
+            bool(clip_255),
+        )
+        if self._pre is None or self._pre_key != key:
+            try:
+                self._pre = _compile_rgb_pre(
+                    self._core, str(self.device), in_h, in_w, steps, mean, std, clip_255
+                )
+                self._pre_key = key
+            except AdapterError:
+                self.rgb_pre_disabled = True
+                raise
+            except Exception as exc:
+                self.rgb_pre_disabled = True
+                raise AdapterError("OpenVINO rgb-pre compile failed") from exc
+        try:
+            batched = np.ascontiguousarray(rgb[None, ...])
+            result = self._pre([batched])
+            blob = np.asarray(result[self._pre.output(0)], dtype=np.float32)
+        except AdapterError:
+            self.rgb_pre_disabled = True
+            raise
+        except Exception as exc:
+            self.rgb_pre_disabled = True
+            raise AdapterError("OpenVINO rgb pre failed") from exc
+        if blob.ndim != 4 or blob.shape[0] != 1 or blob.shape[1] != 3:
+            self.rgb_pre_disabled = True
+            raise AdapterError("OpenVINO rgb pre must return NCHW")
+        return blob

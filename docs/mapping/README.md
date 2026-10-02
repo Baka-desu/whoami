@@ -3,19 +3,17 @@
 What was built on branch `mapping-3d` (plan: `docs/superpowers/plans/2026-10-02-3d-mapping-elevation.md`), how to run it
 and what it can and cannot tell you. Where the plan and the code disagree, this document follows the code.
 
-**Status.** The map, live cloud, trajectory, cost grid, depth and camera layers and the statistics widget are built and
+**Status.** The map, live cloud, trajectory and cost grid layers, the image panels and the statistics widget are built and
 tested on synthetic data and on the real stack with synthetic sensors. **Nothing has run on the UGV yet** (see "Pending
-owner runs"). The **elevation map (plan Tasks 10-12) is not built yet**: the owner deferred it. The gateway endpoint, the
-decoder and the viewer's ELEV layer exist, but nothing publishes elevation, so the layer stays empty ("no map yet", the
-endpoint answers 503). Nothing here feeds Nav2: the map is mapping and display only (mindmap D9, architecture §9 unchanged).
+owner runs"). The **elevation map (plan Tasks 10-12) is not built yet**: the owner deferred it, and its gateway endpoint,
+decoder and viewer layer were removed until a producer lands with them (mindmap D16). Nothing here feeds Nav2: the map is mapping and display only (mindmap D9, architecture §9 unchanged).
 
 ## Data flow
 
 ```
 phone camera -> tunnel -> ugv_bringup camera driver -- /camera/image_raw + /camera/camera_info --> Dev 1 perception
                                    |                                                              (DA3 depth, SegFormer mask)
-                                   +-- /image_raw/compressed (camera panel)                        /perception/depth/image (32FC1 m)
-                                                                                                   /ugv/perception/stats (JSON, 1 Hz)
+                                   +-- /image_raw/compressed (camera view, read by the UI)          /perception/depth/image (32FC1 m)
                                                                                                           |
         rgbd_sync (RGB + depth, exact stamps) -> rgbd_odometry -> odom_selector -> /odom                  |
                                          |                                                                |
@@ -46,11 +44,10 @@ demand" below) only while a client keeps calling `GET /api/v1/map`.
 | `/rtabmap/mapGraph` | `rtabmap_msgs/MapGraph` | `rtabmap` | `map_stats` | cheap, transient local |
 | `/rtabmap/mapData` | `rtabmap_msgs/MapData` | `rtabmap` | `map_assembler`, always (while it runs) | every SLAM step: the new node's data and the graph. Also the input a future elevation mapper would use (not built); contract in `ugv_nav/docs/localization/interfaces.md` |
 | `/ugv/map/stats` | `std_msgs/String` (JSON) | `map_stats` (`ugv_localization`) | gateway, always on | `keyframes`, `loop_closures` (distinct closure-type graph links; rtabmap's closure constraints, not "returns to a known place": it rises roughly with the node count while driving, even with no revisit, and does not grow while parked), `path_length_m`, `db_bytes`, `last_update_age_s` (null before the first graph and in `localize` mode), `mode`, `calibration_placeholder` |
-| `/ugv/perception/stats` | `std_msgs/String` (JSON) | Dev 1 perception | gateway, always on | `mask_hz`, `depth_hz`, `stage_ms`, `depth_errors` |
-| `/perception/depth/image` | `sensor_msgs/Image` 32FC1 | Dev 1 perception | RTAB-Map, gateway (depth layer, live cloud) | published for every processed frame, not only when a mask is published (D14) |
+| `/perception/depth/image` | `sensor_msgs/Image` 32FC1 | Dev 1 perception | RTAB-Map, UI camera view | published for every processed frame, not only when a mask is published (D14) |
+| `/perception/depth_cloud` | `sensor_msgs/PointCloud2` | Dev 1 perception | gateway (on demand), Nav2 VoxelLayer | the live cloud layer; the gateway does not back-project depth itself |
 | `/global_costmap/costmap` | `nav_msgs/OccupancyGrid` | Nav2 | gateway (on demand) | the cost grid layer, display only |
-| `/image_raw/compressed` | `sensor_msgs/CompressedImage` | camera driver | gateway (on demand) | camera panel, passed through |
-| `/ugv/elevation/cloud`, `/ugv/elevation/obstacles` | `sensor_msgs/PointCloud2` | **nobody yet** | gateway (configured, on demand) | elevation deferred; the subscriptions exist and stay silent |
+| `/image_raw/compressed` | `sensor_msgs/CompressedImage` | camera driver | UI camera view (read only) | also drawn in the map view's camera panel; the gateway does not carry it |
 
 Topic names are gateway parameters under `map:` in `ugv_nav/ugv_api/config/api.yaml`.
 
@@ -58,10 +55,9 @@ Topic names are gateway parameters under `map:` in `ugv_nav/ugv_api/config/api.y
 
 | Endpoint | Body | Notes |
 |---|---|---|
-| `GET /api/v1/map` | `MapStatus` JSON: `epoch`, `seq` for the seven layers, flat `stats` | also the demand heartbeat: only an explicit GET keeps the heavy subscriptions alive (`idle_timeout_s`, default 10 s) |
+| `GET /api/v1/map` | `MapStatus` JSON: `epoch`, `seq` for every layer, flat `stats` | also the demand heartbeat: only an explicit GET keeps the heavy subscriptions alive (`idle_timeout_s`, default 10 s) |
 | `GET /api/v1/map/pose` | `Pose` JSON, `map -> base_link` from TF | `available: false` and null fields until a transform is seen |
-| `GET /api/v1/map/{cloud,elevation,trajectory,grid,live,depth}` | binary format v1 (below) | 503 `application/problem+json` until the layer has data |
-| `GET /api/v1/map/camera` | `image/jpeg` | the camera driver's JPEG, unchanged |
+| `GET /api/v1/map/{cloud,trajectory,grid,live}` | binary format v1 (below) | 503 `application/problem+json` until the layer has data |
 | `GET /api/v1/telemetry/stream` | SSE | gains the `map` (MapStatus) and `pose` events |
 
 `epoch` is random per gateway process; `seq[layer]` counts changes (0 = nothing yet). A client compares `epoch:seq`, not
@@ -76,11 +72,9 @@ body. Decoders reject an unknown format and any length that is not exact.
 
 | Layer | Magic | Body |
 |---|---|---|
-| cloud, live | `UGVC` | `f32 xyz`, then `u8 rgb` if flag bit 0; at most `cloud_point_budget` points (default 500000) picked by spatial hash at `cloud_spacing_m` (0.05). `live` is the current depth scan back-projected with CameraInfo K (every 4th pixel, 0.3-8 m) and transformed to `map` |
+| cloud, live | `UGVC` | `f32 xyz`, then `u8 rgb` if flag bit 0; at most `cloud_point_budget` points (default 500000) picked by spatial hash at `cloud_spacing_m` (0.05). `live` is Dev 1's `/perception/depth_cloud` (already back-projected by perception, full resolution), range-gated on optical depth (0.3-8 m), transformed to `map` and cut to `live_point_budget` (20000) points the same way |
 | trajectory | `UGVT` | `f32 x y z qx qy qz qw` per pose |
 | grid | `UGVG` | `i8` cells (-1 unknown, 0..100); size, resolution, origin and yaw in the header |
-| depth | `UGVD` | `u16` millimetres, every 2nd pixel (320x240), 0 = hole |
-| elevation | `UGVE` | `f32` height, `u8` obstacle (5 cm units), `u8` confidence. **Encoder and decoder exist; no data source yet** |
 
 Authoritative layout and the golden files the Python and TypeScript tests share:
 `docs/mapping/map-contract.md`, `ugv_nav/ugv_api/test/fixtures/map/*.bin`.
@@ -101,8 +95,8 @@ cd ui && npm install && npm run dev      # http://localhost:5173, proxies /api t
 camera driver refuses the file and publishes nothing (`ugv_nav/ugv_bringup/README.md`). Never for an autonomous run.
 
 Open the console and pick **map** in the top bar. The view shows the accumulated cloud (camera colours), the live depth scan
-(height colours), the trajectory, the Nav2 cost grid halo, the robot pose, the depth and camera image panels and the
-statistics widget. Layer buttons: cloud, live, path, elev (empty, see above), cost, img; the choice is kept in
+(height colours), the trajectory, the Nav2 cost grid halo, the robot pose, the depth and camera image panels (the camera view's feed) and the
+statistics widget. Layer buttons: cloud, live, path, cost, img; the choice is kept in
 `localStorage`. Banners: `NO MAP YET`, `STALE · map not updating`, `STALE · telemetry lost`, `MAP INPUTS STOPPED` (the
 gateway's input thread is gone).
 

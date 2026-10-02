@@ -21,6 +21,7 @@ uvicorn = pytest.importorskip("uvicorn")
 
 from fastapi.testclient import TestClient  # noqa: E402
 
+import mapread  # noqa: E402
 from ugv_api import mapcodec as codec  # noqa: E402
 from ugv_api import state as k  # noqa: E402
 from ugv_api.app import create_app  # noqa: E402
@@ -32,12 +33,8 @@ from ugv_api.watches import Timeouts  # noqa: E402
 
 PROBLEM = "application/problem+json"
 OCTET = "application/octet-stream"
-LAYERS = ("cloud", "elevation", "trajectory", "grid", "live", "depth", "camera")
-BINARY_LAYERS = tuple(name for name in LAYERS if name != "camera")
+LAYERS = ("cloud", "trajectory", "grid", "live")
 NOW_NS = 1_000 * 1_000_000_000
-JPEG = b"\xff\xd8\xff\xe0\x00\x10JFIF-pretend-picture\xff\xd9"
-
-
 class FakeRobot:
     """Implements app.Robot with a clock the test moves by hand."""
 
@@ -100,15 +97,6 @@ def cloud_source(n: int = 6, *, rgb: bool = True) -> dict:
     return {"fields": fields, "point_step": 16, "n_points": n, "is_bigendian": False, "data": arr.tobytes()}
 
 
-def elevation_source() -> dict:
-    return {
-        "x": np.array([0.75, 1.75], np.float32), "y": np.array([1.25, 0.25], np.float32),
-        "z": np.array([1.0, 2.0], np.float32), "confidence": np.array([0.2, 1.0], np.float32),
-        "obstacle_h": np.array([0.12, 0.0], np.float32),
-        "origin_xy": (0.0, 0.0), "resolution": 0.5, "width": 4, "height": 3,
-    }
-
-
 def grid_source() -> dict:
     cells = np.arange(12, dtype=np.int8).reshape(3, 4) * 8 - 1
     return {"cells": cells, "resolution": 0.25, "origin_xy": (-0.5, 1.0), "origin_yaw": 0.5}
@@ -118,19 +106,12 @@ def trajectory_source() -> np.ndarray:
     return np.array([[0, 0, 0, 0, 0, 0, 1], [3, 4, 0, 0, 0, 1, 0], [3, 4, 12, 0.5, 0.5, 0.5, 0.5]], np.float32)
 
 
-def depth_source() -> dict:
-    d = np.full((4, 6), 2.0, np.float32)
-    d[0, 2] = 9.0  # beyond the 8 m range: a hole once decimated onto it
-    return {"depth_m": d}
-
-
 def live_source(n: int = 6) -> dict:
     return {"xyz": np.arange(3 * n, dtype=np.float32).reshape(n, 3)}
 
 
 SOURCES = {
-    "cloud": cloud_source, "elevation": elevation_source, "trajectory": trajectory_source, "grid": grid_source,
-    "live": live_source, "depth": depth_source, "camera": lambda: JPEG,
+    "cloud": cloud_source, "trajectory": trajectory_source, "grid": grid_source, "live": live_source,
 }
 assert tuple(SOURCES) == LAYERS
 
@@ -154,7 +135,7 @@ def test_every_layer_route_is_503_when_the_app_has_no_map_store(layer):
     assert r.status_code == 503 and r.headers["content-type"].startswith(PROBLEM)
 
 
-def test_status_before_data_has_all_seven_layers_at_zero(rig):
+def test_status_before_data_has_every_layer_at_zero(rig):
     r = rig.get("/map")
     assert r.status_code == 200
     assert r.json() == {"epoch": 1234, "seq": {name: 0 for name in LAYERS}, "stats": {}}
@@ -174,10 +155,10 @@ def test_an_unknown_layer_is_a_404_problem(rig):
 # ----------------------------------------------------------------------- after put: decoded bodies
 
 
-def get_binary(rig: Rig, layer: str, media: str = OCTET):
+def get_binary(rig: Rig, layer: str):
     r = rig.get(f"/map/{layer}")
     assert r.status_code == 200, r.text
-    assert r.headers["content-type"] == media
+    assert r.headers["content-type"] == OCTET
     assert r.headers["cache-control"] == "no-store"
     assert int(r.headers["content-length"]) == len(r.content)
     return r
@@ -186,7 +167,7 @@ def get_binary(rig: Rig, layer: str, media: str = OCTET):
 def test_cloud_decodes_with_colour_and_the_store_epoch_seq_and_stamp(rig):
     src = cloud_source(6)
     rig.maps.put("cloud", src, 42.5)
-    d = codec.decode_cloud(get_binary(rig, "cloud").content)
+    d = mapread.cloud(get_binary(rig, "cloud").content)
     assert (d["epoch"], d["seq"], d["stamp_s"]) == (1234, 1, 42.5)
     assert d["count"] == 6 and d["source_count"] == 6 and d["has_rgb"]
     np.testing.assert_array_equal(d["xyz"][:, 0], np.arange(6) * 0.5)
@@ -197,77 +178,43 @@ def test_cloud_decodes_with_colour_and_the_store_epoch_seq_and_stamp(rig):
 
 def test_cloud_without_a_colour_field_has_no_rgb_block(rig):
     rig.maps.put("cloud", cloud_source(4, rgb=False), 1.0)
-    d = codec.decode_cloud(get_binary(rig, "cloud").content)
+    d = mapread.cloud(get_binary(rig, "cloud").content)
     assert d["count"] == 4 and not d["has_rgb"]
 
 
 def test_cloud_is_cut_to_the_configured_budget_and_spacing():
     rig = Rig(MapStore(), cloud_point_budget=4, cloud_spacing_m=0.2)
     rig.maps.put("cloud", cloud_source(6), 1.0)
-    d = codec.decode_cloud(get_binary(rig, "cloud").content)
+    d = mapread.cloud(get_binary(rig, "cloud").content)
     assert d["count"] == 4 and d["source_count"] == 6
     assert d["spacing_m"] == pytest.approx(0.2)
 
 
-def test_live_cloud_is_never_decimated_and_has_no_colour():
-    rig = Rig(MapStore(epoch=9), cloud_point_budget=2)  # a budget far below N must not touch the live scan
+def test_live_cloud_has_no_colour_and_its_own_budget():
+    rig = Rig(MapStore(epoch=9), cloud_point_budget=2)  # the map cloud's budget does not cut the live scan
     rig.maps.put("live", live_source(6), 7.0)
-    d = codec.decode_cloud(get_binary(rig, "live").content)
+    d = mapread.cloud(get_binary(rig, "live").content)
     assert (d["epoch"], d["seq"], d["stamp_s"]) == (9, 1, 7.0)
     assert d["count"] == 6 and d["source_count"] == 6 and not d["has_rgb"]
     np.testing.assert_array_equal(d["xyz"], live_source(6)["xyz"])
+    cut = Rig(MapStore(), live_point_budget=4)  # Dev 1's cloud is full resolution: the live budget cuts it
+    cut.maps.put("live", live_source(6), 7.0)
+    d = mapread.cloud(get_binary(cut, "live").content)
+    assert d["count"] == 4 and d["source_count"] == 6
 
 
 def test_trajectory_decodes(rig):
     rig.maps.put("trajectory", trajectory_source(), 3.0)
-    d = codec.decode_trajectory(get_binary(rig, "trajectory").content)
+    d = mapread.trajectory(get_binary(rig, "trajectory").content)
     assert d["count"] == 3 and d["length_m"] == pytest.approx(17.0)
     np.testing.assert_array_equal(d["poses"], trajectory_source())
 
 
-def test_elevation_is_built_from_the_cell_samples(rig):
-    rig.maps.put("elevation", elevation_source(), 5.0)
-    d = codec.decode_elevation(get_binary(rig, "elevation").content)
-    # cells (col 1, row 2) and (col 3, row 0): cropped to columns 1..3 and rows 0..2
-    assert (d["width"], d["height"], d["known_cells"]) == (3, 3, 2)
-    assert (d["origin_x"], d["origin_y"], d["resolution_m"]) == pytest.approx((0.5, 0.0, 0.5))
-    assert d["heights"][2, 0] == pytest.approx(1.0) and d["heights"][0, 2] == pytest.approx(2.0)
-    assert d["obstacle"][2, 0] == 3 and d["confidence"][2, 0] == 51 and d["confidence"][0, 2] == 255
-
-
-def test_elevation_is_reduced_to_the_configured_max_side():
-    rig = Rig(MapStore(), elevation_max_side=2)
-    rig.maps.put("elevation", elevation_source(), 5.0)
-    d = codec.decode_elevation(get_binary(rig, "elevation").content)
-    assert (d["width"], d["height"]) == (2, 2) and d["resolution_m"] == pytest.approx(1.0)
-
-
 def test_grid_decodes(rig):
     rig.maps.put("grid", grid_source(), 6.0)
-    d = codec.decode_grid(get_binary(rig, "grid").content)
+    d = mapread.grid(get_binary(rig, "grid").content)
     np.testing.assert_array_equal(d["cells"], grid_source()["cells"])
     assert (d["resolution_m"], d["origin_x"], d["origin_y"], d["origin_yaw"]) == (0.25, -0.5, 1.0, 0.5)
-
-
-def test_depth_is_decimated_and_range_limited_with_the_configured_values():
-    rig = Rig(MapStore(), depth_stride=2, depth_max_range_m=8.0)
-    rig.maps.put("depth", depth_source(), 8.0)
-    d = codec.decode_depth(get_binary(rig, "depth").content)
-    assert (d["width"], d["height"]) == (3, 2) and d["max_range_m"] == 8.0
-    assert d["counts"].tolist() == [[2000, 0, 2000], [2000, 2000, 2000]]  # [0, 2] was 9 m: a hole
-
-
-def test_depth_stride_one_keeps_every_pixel():
-    rig = Rig(MapStore(), depth_stride=1)
-    rig.maps.put("depth", depth_source(), 8.0)
-    d = codec.decode_depth(get_binary(rig, "depth").content)
-    assert (d["width"], d["height"]) == (6, 4)
-
-
-def test_camera_is_the_stored_jpeg_untouched(rig):
-    rig.maps.put("camera", JPEG, 9.0)
-    r = get_binary(rig, "camera", media="image/jpeg")
-    assert r.content == JPEG
 
 
 def test_each_layer_has_its_own_route_and_none_serves_another_layers_data(rig):
@@ -282,7 +229,7 @@ def test_a_source_the_codec_rejects_is_a_500_problem_and_does_not_poison_the_lay
     assert r.status_code == 500 and r.headers["content-type"].startswith(PROBLEM)
     assert "(N, 7)" in r.json()["detail"]
     rig.maps.put("trajectory", trajectory_source(), 2.0)
-    assert codec.decode_trajectory(rig.get("/map/trajectory").content)["count"] == 3
+    assert mapread.trajectory(rig.get("/map/trajectory").content)["count"] == 3
 
 
 # ------------------------------------------------------------------------- seq, memoisation, status
@@ -291,15 +238,15 @@ def test_a_source_the_codec_rejects_is_a_500_problem_and_does_not_poison_the_lay
 def test_status_reports_the_new_seq_after_a_put(rig):
     rig.maps.put("cloud", cloud_source(), 1.0)
     rig.maps.put("cloud", cloud_source(), 2.0)
-    rig.maps.put("camera", JPEG, 2.0)
-    assert rig.get("/map").json()["seq"] == {**{name: 0 for name in LAYERS}, "cloud": 2, "camera": 1}
+    rig.maps.put("grid", grid_source(), 2.0)
+    assert rig.get("/map").json()["seq"] == {**{name: 0 for name in LAYERS}, "cloud": 2, "grid": 1}
 
 
 def test_the_body_header_agrees_with_the_status(rig):
     for i in range(3):
         rig.maps.put("grid", grid_source(), float(i))
     status = rig.get("/map").json()
-    d = codec.decode_grid(rig.get("/map/grid").content)
+    d = mapread.grid(rig.get("/map/grid").content)
     assert (d["epoch"], d["seq"]) == (status["epoch"], status["seq"]["grid"]) == (1234, 3)
 
 
@@ -318,25 +265,25 @@ def test_repeated_gets_encode_once_and_a_new_put_encodes_again(rig, monkeypatch)
     rig.maps.put("trajectory", trajectory_source(), 2.0)
     again = [rig.get("/map/trajectory").content for _ in range(2)]
     assert calls == [1, 2] and again[0] == again[1]
-    assert codec.decode_trajectory(again[0])["seq"] == 2
+    assert mapread.trajectory(again[0])["seq"] == 2
 
 
 def test_the_status_is_cheap_and_does_not_encode(rig, monkeypatch):
     def forbidden(*_a, **_kw):
         raise AssertionError("GET /map must not encode a layer")
 
-    for name in ("encode_cloud", "encode_elevation", "encode_trajectory", "encode_grid", "encode_depth"):
+    for name in ("encode_cloud", "encode_trajectory", "encode_grid"):
         monkeypatch.setattr(codec, name, forbidden)
-    for layer in BINARY_LAYERS:
+    for layer in LAYERS:
         rig.maps.put(layer, SOURCES[layer](), 1.0)
     assert rig.get("/map").status_code == 200
 
 
 def test_stats_pass_through_with_their_snake_case_keys_and_scalar_types(rig):
-    rig.maps.put_stats("mapping", {"keyframes": 12, "depth_hz": 3.2, "calibration_placeholder": False, "mode": "mapping",
+    rig.maps.put_stats("mapping", {"keyframes": 12, "path_length_m": 3.2, "calibration_placeholder": False, "mode": "mapping",
                                    "last_update_age_s": None, "nested": {"a": 1}})
     stats = rig.get("/map").json()["stats"]
-    assert stats == {"keyframes": 12, "depth_hz": 3.2, "calibration_placeholder": False, "mode": "mapping",
+    assert stats == {"keyframes": 12, "path_length_m": 3.2, "calibration_placeholder": False, "mode": "mapping",
                      "last_update_age_s": None}
     assert type(stats["keyframes"]) is int and stats["calibration_placeholder"] is False
 
@@ -356,7 +303,7 @@ def test_get_map_is_the_demand_heartbeat_and_the_layer_routes_are_not(rig):
     rig.maps.put("cloud", cloud_source(), 1.0)
     rig.get("/map/cloud")
     rig.get("/map/pose")
-    rig.get("/map/camera")  # a 503, still no touch
+    rig.get("/map/grid")  # a 503, still no touch
     assert not rig.maps.wanted(now_s, 5.0)
 
     rig.get("/map")
@@ -428,7 +375,7 @@ def test_models_forbid_extra_fields_like_every_other_resource():
         Pose.model_validate({**NO_POSE, "extra": 1})
 
 
-def test_the_seq_model_has_the_seven_layers_in_the_store_order():
+def test_the_seq_model_has_the_layers_in_the_store_order():
     assert tuple(MapStatus.model_fields["seq"].annotation.model_fields) == MapStore.LAYERS == LAYERS
 
 
@@ -445,8 +392,7 @@ def test_map_handlers_are_sync_so_encoding_runs_in_the_threadpool(rig):
 
 
 @pytest.mark.parametrize("tunable,value", [
-    ("cloud_point_budget", -1), ("cloud_spacing_m", 0.0), ("cloud_spacing_m", float("nan")),
-    ("elevation_max_side", 0), ("depth_stride", 0), ("depth_max_range_m", 0.0), ("depth_max_range_m", -1.0),
+    ("cloud_point_budget", -1), ("cloud_spacing_m", 0.0), ("cloud_spacing_m", float("nan")), ("live_point_budget", -1),
 ])
 def test_bad_tunables_fail_at_construction(tunable, value):
     with pytest.raises(ValueError, match=tunable):

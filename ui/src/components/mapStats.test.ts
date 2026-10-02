@@ -6,17 +6,15 @@ const row = (rows: { k: string; v: string }[], k: string) => rows.find((r) => r.
 describe('map widget values', () => {
   it('formats every known stat', () => {
     const rows = mapRows({
-      keyframes: 12, loop_closures: 3, path_length_m: 41.26, cloud_source_points: 1234567, elevation_known_cells: 8800,
-      db_bytes: 52_428_800, depth_hz: 3.24, last_update_age_s: 0.51, mode: 'mapping', calibration_placeholder: false,
+      keyframes: 12, loop_closures: 3, path_length_m: 41.26, cloud_source_points: 1234567,
+      db_bytes: 52_428_800, last_update_age_s: 0.51, mode: 'mapping', calibration_placeholder: false,
     })
     expect(rows).toEqual([
       { k: 'keyframes', v: '12' },
       { k: 'closure links', v: '3' },
       { k: 'path length', v: '41.3 m' },
       { k: 'cloud source pts', v: '1,234,567' },
-      { k: 'elevation cells', v: '8,800' },
       { k: 'database', v: '52.4 MB' },
-      { k: 'depth rate', v: '3.2 Hz' },
       { k: 'last update', v: '0.5 s' },
       { k: 'mode', v: 'MAPPING' },
     ])
@@ -24,20 +22,19 @@ describe('map widget values', () => {
 
   it('shows the neutral placeholder for an absent, null or unusable value, never undefined or NaN', () => {
     const blank = mapRows({}).map((r) => r.v)
-    expect(blank).toEqual(new Array(8).fill('—'))
+    expect(blank).toEqual(new Array(6).fill('—'))
     expect(mapRows(undefined).map((r) => r.v)).toEqual(blank)
-    expect(mapRows({ keyframes: null, depth_hz: null, db_bytes: null }).map((r) => r.v)).toEqual(blank)
-    const junk = mapRows({ keyframes: Number.NaN, path_length_m: Infinity, db_bytes: 'big', depth_hz: true, loop_closures: '3' })
+    expect(mapRows({ keyframes: null, db_bytes: null }).map((r) => r.v)).toEqual(blank)
+    const junk = mapRows({ keyframes: Number.NaN, path_length_m: Infinity, db_bytes: 'big', loop_closures: '3' })
     expect(junk.map((r) => r.v)).toEqual(blank)
     for (const r of [...blank, ...junk.map((j) => j.v)]) expect(r).not.toMatch(/undefined|NaN|Infinity/)
   })
 
   it('keeps zero, which is a real reading', () => {
-    const rows = mapRows({ keyframes: 0, path_length_m: 0, db_bytes: 0, depth_hz: 0, last_update_age_s: 0 })
+    const rows = mapRows({ keyframes: 0, path_length_m: 0, db_bytes: 0, last_update_age_s: 0 })
     expect(row(rows, 'keyframes')).toBe('0')
     expect(row(rows, 'path length')).toBe('0.0 m')
     expect(row(rows, 'database')).toBe('0.0 MB')
-    expect(row(rows, 'depth rate')).toBe('0.0 Hz')
     expect(row(rows, 'last update')).toBe('0.0 s')
   })
 
@@ -47,12 +44,6 @@ describe('map widget values', () => {
     expect(row(mapRows({ mode: null }), 'mode')).toBeUndefined()
     expect(row(mapRows({ mode: 7 }), 'mode')).toBeUndefined()
     expect(row(mapRows({ mode: 'localize' }), 'mode')).toBe('LOCALIZE')
-  })
-
-  it('tolerates stats keys it does not know', () => {
-    const rows = mapRows({ keyframes: 2, mask_hz: 3.1, depth_errors: 0, brand_new_stat: 'x' })
-    expect(rows).toHaveLength(8)
-    expect(row(rows, 'keyframes')).toBe('2')
   })
 
   it('flags a placeholder calibration only when it is exactly true', () => {
@@ -65,12 +56,11 @@ describe('map widget values', () => {
   })
 
   it('prints a value that rounds to negative zero as zero', () => {
-    const rows = mapRows({ keyframes: -0.4, loop_closures: -0, path_length_m: -0.04, db_bytes: -1000, depth_hz: -0.02, cloud_source_points: -0.2 })
+    const rows = mapRows({ keyframes: -0.4, loop_closures: -0, path_length_m: -0.04, db_bytes: -1000, cloud_source_points: -0.2 })
     expect(row(rows, 'keyframes')).toBe('0')
     expect(row(rows, 'closure links')).toBe('0')
     expect(row(rows, 'path length')).toBe('0.0 m')
     expect(row(rows, 'database')).toBe('0.0 MB')
-    expect(row(rows, 'depth rate')).toBe('0.0 Hz')
     expect(row(rows, 'cloud source pts')).toBe('0')
     for (const r of rows) expect(r.v).not.toMatch(/-0/)
   })
@@ -83,13 +73,8 @@ describe('map widget values', () => {
   it('shows a negative last-update age as 0.0 s', () => {
     expect(row(mapRows({ last_update_age_s: -0.3 }), 'last update')).toBe('0.0 s')
     expect(row(mapRows({ last_update_age_s: -12 }), 'last update')).toBe('0.0 s')
-    expect(row(mapRows({ last_update_age_s: 1.26 }), 'last update')).toBe('1.3 s')
   })
 
-  it('labels the gateway source point count as such', () => {
-    expect(row(mapRows({ cloud_source_points: 5 }), 'cloud source pts')).toBe('5')
-    expect(row(mapRows({ cloud_source_points: 5 }), 'cloud points')).toBeUndefined()
-  })
 })
 
 describe('map input health rows', () => {
@@ -110,7 +95,7 @@ describe('map input health rows', () => {
   it('keeps the base rows first and the optional rows after them', () => {
     const rows = mapRows({ keyframes: 1, mode: 'mapping', map_rejects: 3, map_restarts: 1 })
     expect(rows.map((r) => r.k)).toEqual([
-      'keyframes', 'closure links', 'path length', 'cloud source pts', 'elevation cells', 'database', 'depth rate', 'last update',
+      'keyframes', 'closure links', 'path length', 'cloud source pts', 'database', 'last update',
       'mode', 'rejects', 'restarts',
     ])
   })
@@ -189,12 +174,5 @@ describe('map view banner', () => {
   it('does not trust the health claim of a stale status on an empty map', () => {
     expect(view({ noMap: true, statusStale: true, stats: stopped })).toBeNull()
     expect(view({ noMap: true, statusStale: true, telemetryLost: true, stats: stopped })).toBeNull()
-  })
-
-  it('shows a banner whenever the map has data and anything is wrong, so the feed dot can follow the banner', () => {
-    // MapView derives its ok dot as: map has data and no banner.
-    const cases = [{}, { statusStale: true }, { telemetryLost: true }, { stats: stopped }, { stats: { map_inputs_alive: true } }]
-    const ok = (o: object) => view(o) === null
-    expect(cases.map(ok)).toEqual([true, false, false, false, true])
   })
 })

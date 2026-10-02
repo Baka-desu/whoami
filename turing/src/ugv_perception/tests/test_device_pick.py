@@ -52,6 +52,21 @@ def test_device_py_has_no_module_level_vendor_imports() -> None:
             assert "transformers" not in line
 
 
+def test_adapters_stay_vendor_neutral() -> None:
+    root = Path(__file__).resolve().parents[1]
+    for rel in (
+        "adapter/rugd.py",
+        "depth/geometry.py",
+        "backend/depth_live.py",
+    ):
+        text = (root / rel).read_text(encoding="utf-8")
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("import ") or stripped.startswith("from "):
+                assert "openvino" not in stripped
+                assert "torch" not in stripped
+
+
 def test_pick_prefers_intel_gpu_ir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     xml, folder = _weights(tmp_path, xml=True, safetensors=True)
     monkeypatch.setattr(device, "intel_openvino_gpu_available", lambda: True)
@@ -104,6 +119,27 @@ def test_pick_none_when_no_weights(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(device, "intel_openvino_gpu_available", lambda: True)
     monkeypatch.setattr(device, "cuda_available", lambda: True)
     assert pick_tensor_backend(ir_xml=xml, safetensors_dir=folder, kind="rugd") is None
+
+
+def test_openvino_networks_compile_pinned_to_fp32(monkeypatch: pytest.MonkeyPatch) -> None:
+    """FP32 on every backend: the GPU plugin would otherwise pick f16 on Arc even for an FP32 IR."""
+    ov = pytest.importorskip("openvino")
+    from ugv_perception.backend import openvino_gpu
+
+    seen: list[object] = []
+    monkeypatch.setattr(
+        openvino_gpu, "_compile_gpu_then_cpu", lambda core, model, config: seen.append(config) or (None, "CPU")
+    )
+
+    class _Model:
+        def input(self, i):
+            raise AssertionError("not reached")
+
+    backend = openvino_gpu.OpenVinoGpuTensorBackend()
+    backend._core, backend._model = object(), _Model()
+    with pytest.raises(AssertionError, match="not reached"):
+        backend._compile()
+    assert seen == [{ov.properties.hint.inference_precision: ov.Type.f32}]
 
 
 def test_cuda_tensor_load_raises_without_cuda(

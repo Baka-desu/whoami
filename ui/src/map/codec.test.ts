@@ -1,10 +1,10 @@
 /// <reference types="node" />
-// Golden-file tests for the binary map layer decoders. The five .bin files are produced by the gateway's own
+// Golden-file tests for the binary map layer decoders. The .bin files are produced by the gateway's own
 // encoder (ugv_nav/ugv_api/ugv_api/mapcodec.py) with epoch=7, seq=3, stamp_s=1234.5; their inputs are listed in
 // ugv_nav/ugv_api/test/test_mapcodec.py (build_golden). They are read in place, never copied into ui/.
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
-import { decodeCloud, decodeDepth, decodeElevation, decodeGrid, decodeTrajectory } from './codec'
+import { decodeCloud, decodeGrid, decodeTrajectory } from './codec'
 
 const FIXTURES = new URL('../../../ugv_nav/ugv_api/test/fixtures/map/', import.meta.url)
 
@@ -13,24 +13,20 @@ function golden(name: string): ArrayBuffer {
   return Uint8Array.from(readFileSync(new URL(`${name}.bin`, FIXTURES))).buffer
 }
 
-const LAYERS = ['cloud', 'elevation', 'trajectory', 'grid', 'depth'] as const
+const LAYERS = ['cloud', 'trajectory', 'grid'] as const
 type Layer = (typeof LAYERS)[number]
 
 const DECODERS: Record<Layer, (buf: ArrayBuffer) => unknown> = {
   cloud: decodeCloud,
-  elevation: decodeElevation,
   trajectory: decodeTrajectory,
   grid: decodeGrid,
-  depth: decodeDepth,
 }
 
 // Exact sizes from the spec: prelude 24 + layer header, then the body.
 const SIZES: Record<Layer, { total: number; header: number }> = {
   cloud: { total: 184, header: 64 },
-  elevation: { total: 120, header: 48 },
   trajectory: { total: 116, header: 32 },
   grid: { total: 60, header: 48 },
-  depth: { total: 72, header: 40 },
 }
 
 // A copy of `buf` (optionally cut to `length` bytes) with `edit` applied through a little-endian DataView.
@@ -65,23 +61,6 @@ describe('golden files', () => {
     expect(f.rgb!.byteOffset).toBe(64 + 12 * 8)
   })
 
-  it('decodes elevation.bin', () => {
-    const buf = golden('elevation')
-    const f = decodeElevation(buf)!
-    expect(f).not.toBeNull()
-    expect(f).toMatchObject({ ...prelude, width: 4, height: 3, resolution: 0.5, originX: -1, originY: 2, knownCells: 11 })
-    expect(Array.from(f.heightM)).toEqual([0, 0.25, 0.5, 0.75, 1, NaN, 1.5, 1.75, 2, 2.25, 2.5, 2.75])
-    expect(Number.isNaN(f.heightM[5])).toBe(true)
-    expect(Array.from(f.obstacle)).toEqual([0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0])
-    expect(Array.from(f.confidence)).toEqual([255, 204, 153, 102, 51, 0, 255, 204, 153, 102, 51, 255])
-    expect(f.heightM.buffer).toBe(buf)
-    expect(f.heightM.byteOffset).toBe(48)
-    expect(f.obstacle.buffer).toBe(buf)
-    expect(f.obstacle.byteOffset).toBe(48 + 4 * 12)
-    expect(f.confidence.buffer).toBe(buf)
-    expect(f.confidence.byteOffset).toBe(48 + 5 * 12)
-  })
-
   it('decodes trajectory.bin', () => {
     const buf = golden('trajectory')
     const f = decodeTrajectory(buf)!
@@ -101,17 +80,6 @@ describe('golden files', () => {
     expect(f.cells).toBeInstanceOf(Int8Array)
     expect(f.cells.buffer).toBe(buf)
     expect(f.cells.byteOffset).toBe(48)
-  })
-
-  it('decodes depth.bin', () => {
-    const buf = golden('depth')
-    const f = decodeDepth(buf)!
-    expect(f).not.toBeNull()
-    // unit_m is a float32 on the wire: 0.001 does not survive the trip exactly.
-    expect(f).toMatchObject({ ...prelude, width: 4, height: 4, unitM: Math.fround(0.001), maxRangeM: 10 })
-    expect(Array.from(f.counts)).toEqual([500, 1000, 1500, 2000, 2500, 0, 3500, 4000, 4500, 5000, 9500, 10000, 0, 0, 0, 1])
-    expect(f.counts.buffer).toBe(buf)
-    expect(f.counts.byteOffset).toBe(40)
   })
 })
 
@@ -204,21 +172,6 @@ describe('cloud edge cases', () => {
   })
 })
 
-describe('elevation edge cases', () => {
-  it.each([[0, 3], [4, 0], [0, 0]])('accepts an empty %i x %i grid with the exact header-only length', (w, h) => {
-    const f = decodeElevation(edited(golden('elevation'), (dv) => { dv.setUint32(24, w, true); dv.setUint32(28, h, true); dv.setUint32(44, 0, true) }, 48))!
-    expect(f).toMatchObject({ width: w, height: h, knownCells: 0 })
-    expect(f.heightM).toHaveLength(0)
-    expect(f.obstacle).toHaveLength(0)
-    expect(f.confidence).toHaveLength(0)
-  })
-
-  it('rejects dimensions that disagree with the body', () => {
-    expect(decodeElevation(edited(golden('elevation'), (dv) => dv.setUint32(24, 5, true)))).toBeNull()
-    expect(decodeElevation(edited(golden('elevation'), (dv) => dv.setUint32(28, 2, true)))).toBeNull()
-  })
-})
-
 describe('trajectory edge cases', () => {
   it('accepts an empty trajectory with the exact header-only length', () => {
     const f = decodeTrajectory(edited(golden('trajectory'), (dv) => { dv.setUint32(24, 0, true); dv.setFloat32(28, 0, true) }, 32))!
@@ -246,25 +199,6 @@ describe('grid edge cases', () => {
 
   it('rejects dimensions that disagree with the body', () => {
     expect(decodeGrid(edited(golden('grid'), (dv) => dv.setUint32(24, 5, true)))).toBeNull()
-  })
-})
-
-describe('depth edge cases', () => {
-  it('accepts an empty depth image with the exact header-only length', () => {
-    const f = decodeDepth(edited(golden('depth'), (dv) => { dv.setUint32(24, 0, true); dv.setUint32(28, 4, true) }, 40))!
-    expect(f).toMatchObject({ width: 0, height: 4, maxRangeM: 10 })
-    expect(f.counts).toHaveLength(0)
-  })
-
-  it('keeps the full u16 range', () => {
-    const buf = edited(golden('depth'), (dv) => { dv.setUint16(40, 65535, true); dv.setUint16(42, 1, true) })
-    const f = decodeDepth(buf)!
-    expect(f.counts[0]).toBe(65535)
-    expect(f.counts[1]).toBe(1)
-  })
-
-  it('rejects dimensions that disagree with the body', () => {
-    expect(decodeDepth(edited(golden('depth'), (dv) => dv.setUint32(28, 5, true)))).toBeNull()
   })
 })
 

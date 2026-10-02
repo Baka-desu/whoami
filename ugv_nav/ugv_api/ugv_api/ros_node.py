@@ -12,9 +12,9 @@ Subscribes : /camera/camera_info          sensor_msgs/CameraInfo  stamp only (§
              /cmd_vel                     geometry_msgs/Twist     final command, read only
              TF map->base_link (polled; the pose is what GET /map/pose and the SSE `pose` event report)
              map viewer inputs, on a node of their own (ugv_api_map) in a second rclpy context (class _MapInputs):
-               always on : /ugv/map/stats, /ugv/perception/stats        std_msgs/String (JSON)
-               on demand : /rtabmap/cloud_map, /rtabmap/mapPath, /ugv/elevation/cloud + /ugv/elevation/obstacles,
-                           /global_costmap/costmap, /perception/depth/image (depth + live), /image_raw/compressed
+               always on : /ugv/map/stats                               std_msgs/String (JSON)
+               on demand : /rtabmap/cloud_map, /rtabmap/mapPath, /global_costmap/costmap,
+                           /perception/depth_cloud (live)
 Publishes  : /ugv/e_stop                  std_msgs/Bool           latched; re-published while asserted
 Clients    : /navigate_to_pose            nav2_msgs/action/NavigateToPose (map-frame goals, §11)
              <rtabmap ns>/set_mode_mapping, set_mode_localization  std_srvs/Empty (§10)
@@ -43,11 +43,12 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from rclpy.signals import SignalHandlerOptions
 from rclpy.time import Time
-from sensor_msgs.msg import CameraInfo, CompressedImage, Image, PointCloud2
+from sensor_msgs.msg import CameraInfo, Image, PointCloud2
 from std_msgs.msg import Bool, String
 from std_srvs.srv import Empty
 from tf2_ros import Buffer, TransformException, TransformListener
 
+from ugv_api import mapcodec as codec
 from ugv_api import mapsources as ms
 from ugv_api import state as k
 from ugv_api.errors import ServiceUnavailable
@@ -108,9 +109,6 @@ class GatewayNode(Node):
         self._estop_asserted = False
         self._handles: dict[str, object] = {}
         self.requested_mode: str | None = None
-        # (K row-major, width, height) of the last CameraInfo, for the live scan. Written by the camera_info
-        # callback here, read by the map node's thread: one reference swap, never mutated in place.
-        self.camera_k: tuple[tuple[float, ...], int, int] | None = None
 
         best_effort = qos_profile_sensor_data  # matches reliable and best-effort publishers
         flags = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT)
@@ -174,7 +172,6 @@ class GatewayNode(Node):
 
     def _on_camera_info(self, msg: CameraInfo) -> None:
         self._store.put(k.CAMERA_INFO, None, self.now_ns(), _stamp_ns(msg.header.stamp))  # §12 camera watch
-        self.camera_k = (tuple(map(float, msg.k)), int(msg.width), int(msg.height))
 
     def _poll_tf(self) -> None:
         try:
@@ -360,7 +357,7 @@ class _MapInputs:
     worker thread can land between rclpy marking a subscription's QoS event handler in use and adding it to
     the wait set; the second entry raises InvalidHandle out of `spin` (reproduced within seconds with a
     toggling demand) and ends the thread. One group and one thread also mean these callbacks never run
-    concurrently, so `_subs` and the elevation pairer need no lock.
+    concurrently, so `_subs` needs no lock.
 
     Health. A map thread that hangs or dies cannot report that itself, so the gateway does it
     (`publish_health`, called by a timer of the gateway node): `map_inputs_alive` is false when the thread is
@@ -372,8 +369,8 @@ class _MapInputs:
     and `MapStore.put` it. Encoding happens later, on the HTTP thread, only for a layer somebody requests.
 
     Demand: the heavy subscriptions exist only while `maps.wanted(now, idle_timeout_s)`, which GET /api/v1/map
-    keeps true. The timer creates them when it becomes true and destroys them when it stops. The two stats
-    subscriptions and the TF lookups are always on.
+    keeps true. The timer creates them when it becomes true and destroys them when it stops. The map stats
+    subscription and the TF lookups are always on.
 
     Durability: a TRANSIENT_LOCAL subscription only matches a latched publisher, a VOLATILE one matches both
     but misses the latched sample. So each subscription takes the durability its publishers offer (latched only
@@ -381,15 +378,13 @@ class _MapInputs:
     publisher turned out to offer something else. Losing the publisher does not change anything: the
     subscription is kept for when it comes back.
 
-    Frames: cloud, trajectory, grid and elevation are served as map-frame layers, so a message whose
+    Frames: cloud, trajectory and grid are served as map-frame layers, so a message whose
     `frame_id` is neither the map frame nor empty (a local costmap is in `odom`) is refused and counted.
     """
 
-    ELEVATION_FIELDS = ("x", "y", "z", "confidence", "obstacle_h")
-
     def __init__(self, gateway: GatewayNode, maps: MapStore, cfg: MapConfig, tf_buffer: Buffer,
                  map_frame: str) -> None:
-        self._gw = gateway  # logger, clock (sim-time aware, the one the HTTP layer touches with), camera K
+        self._gw = gateway  # logger, clock (sim-time aware, the one the HTTP layer touches with)
         self._maps = maps
         self._cfg = cfg
         self._tf = tf_buffer
@@ -404,8 +399,6 @@ class _MapInputs:
         self._gateway_stats: dict[str, int] = {}
         self._stats_seen: dict[str, float] = {}  # source -> time.monotonic() of its last message
         self._last_tick = time.monotonic()
-        self._pairer = ms.ElevationPairer()
-        self._pairer_seen = {"unpaired": 0, "unstamped": 0}
         self._subs: dict[str, tuple[Any, DurabilityPolicy]] = {}
         self._node: Node | None = None
         self._executor: SingleThreadedExecutor | None = None
@@ -426,19 +419,13 @@ class _MapInputs:
             self._specs: dict[str, tuple[str, type, Callable[[Any], None]]] = {
                 "cloud": (c.cloud_topic, PointCloud2, guard("cloud", self._on_cloud)),
                 "trajectory": (c.trajectory_topic, Path, guard("trajectory", self._on_path)),
-                "elevation_cloud": (c.elevation_cloud_topic, PointCloud2,
-                                    guard("elevation_cloud", self._on_elevation_cloud)),
-                "elevation_obstacles": (c.elevation_obstacles_topic, OccupancyGrid,
-                                        guard("elevation_obstacles", self._on_elevation_grid)),
                 "grid": (c.grid_topic, OccupancyGrid, guard("grid", self._on_grid)),
-                "depth": (c.depth_topic, Image, guard("depth", self._on_depth)),
-                "camera": (c.camera_topic, CompressedImage, guard("camera", self._on_camera)),
+                "live": (c.live_cloud_topic, PointCloud2, guard("live", self._on_live)),
             }
             # reliable + volatile matches a latched publisher (/ugv/map/stats) and a plain one alike
             stats_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE)
-            for source, topic in (("map", c.map_stats_topic), ("perception", c.perception_stats_topic)):
-                self._node.create_subscription(String, topic, guard(f"{source}_stats", self._stats_callback(source)),
-                                               stats_qos, callback_group=self._group)
+            self._node.create_subscription(String, c.map_stats_topic, guard("map_stats", self._stats_callback("map")),
+                                           stats_qos, callback_group=self._group)
             self._node.create_timer(1.0, guard("demand_timer", self._tick), callback_group=self._group)
             with self._state_lock:
                 self._publish_gateway_locked()  # the health keys exist from the first moment
@@ -596,7 +583,6 @@ class _MapInputs:
         for sub, _durability in self._subs.values():
             self._node.destroy_subscription(sub)
         self._subs.clear()
-        self._pairer.reset()
 
     def _expire_stats(self, now: float) -> None:
         """Drop a stats source that has been silent for `stats_stale_s` (monotonic seconds): it must not keep
@@ -658,67 +644,17 @@ class _MapInputs:
             origin_q=(o.orientation.x, o.orientation.y, o.orientation.z, o.orientation.w))
         self._maps.put("grid", source, self._stamp_s(msg))
 
-    def _on_elevation_cloud(self, msg: PointCloud2) -> None:
-        if not self._in_map_frame("elevation_cloud", msg):
-            return
-        columns = ms.cloud_columns(**self._cloud_args(msg), names=self.ELEVATION_FIELDS)
-        self._elevation_pair(self._pairer.add_cloud(_stamp_ns(msg.header.stamp), columns), msg)
-
-    def _on_elevation_grid(self, msg: OccupancyGrid) -> None:
-        if not self._in_map_frame("elevation_obstacles", msg):
-            return
-        info = msg.info
-        source = self._pairer.add_grid(
-            _stamp_ns(msg.header.stamp), resolution=info.resolution, width=info.width, height=info.height,
-            origin_x=info.origin.position.x, origin_y=info.origin.position.y)
-        self._elevation_pair(source, msg)
-
-    def _elevation_pair(self, source: dict[str, Any] | None, msg: Any) -> None:
-        """What the pairer made of the half that just arrived: a source to store, and/or halves it had to drop,
-        which are counted as rejects (a publisher that stamps the halves differently must not look like a layer
-        that is merely slow). Known cells are counted only for a pair that was emitted."""
-        for attr, name, why in (
-            ("unstamped", "elevation_unstamped", "an elevation half has no header.stamp and cannot be paired"),
-            ("unpaired", "elevation_unpaired", "an elevation half was replaced before a half with its stamp "
-                                               "arrived: the cloud and the obstacle grid are stamped differently"),
-        ):
-            now = getattr(self._pairer, attr)
-            if now != self._pairer_seen[attr]:
-                delta, self._pairer_seen[attr] = now - self._pairer_seen[attr], now
-                self._reject(name, why, delta)
-        if source is not None:
-            self._maps.put("elevation", source, self._stamp_s(msg))
-            self._count("elevation_known_cells", len(source["x"]))
-
-    def _on_camera(self, msg: CompressedImage) -> None:
-        self._maps.put("camera", ms.jpeg_source(msg.data), self._stamp_s(msg))
-
-    def _on_depth(self, msg: Image) -> None:
-        depth = ms.depth_source(encoding=msg.encoding, height=msg.height, width=msg.width, step=msg.step,
-                                is_bigendian=msg.is_bigendian, data=msg.data)
-        stamp_s = self._stamp_s(msg)
-        self._maps.put("depth", depth, stamp_s)
-        self._put_live(msg, depth["depth_m"], stamp_s)
-
-    def _put_live(self, msg: Image, depth_m: Any, stamp_s: float) -> None:
-        """The depth image back-projected with CameraInfo K and moved into the map frame. Without K or without
-        any TF map <- camera the layer is skipped for this frame: camera-frame points are never published as
+    def _on_live(self, msg: PointCloud2) -> None:
+        """Dev 1's depth cloud (camera optical frame, back-projected by perception) range-gated and moved into the
+        map frame. Without any TF map <- camera the frame is skipped: camera-frame points are never published as
         map-frame points."""
-        cam = self._gw.camera_k
-        intr = None
-        if cam is not None:
-            intr = ms.intrinsics(cam[0], width=msg.width, height=msg.height, info_width=cam[1], info_height=cam[2])
-        if intr is None:
-            self._reject("live_no_intrinsics", "no usable CameraInfo K yet, live layer skipped")
-            return
         transform = self._camera_to_map(msg.header.frame_id, msg.header.stamp)
         if transform is None:
             self._reject("live_no_transform", f"no TF {self._frame} <- '{msg.header.frame_id}', live layer skipped")
             return
-        cfg = self._cfg
-        points = ms.backproject(depth_m, intr, stride=cfg.live_stride, min_range_m=cfg.live_range_min_m,
-                                max_range_m=cfg.live_range_max_m)
-        self._maps.put("live", {"xyz": ms.transform_points(points, *transform)}, stamp_s)
+        xyz, _ = codec.cloud_view(**ms.cloud_source(**self._cloud_args(msg)))  # a view of msg.data, no copy
+        points = ms.within_range(xyz, self._cfg.live_range_min_m, self._cfg.live_range_max_m)
+        self._maps.put("live", {"xyz": ms.transform_points(points, *transform)}, self._stamp_s(msg))
 
     def _camera_to_map(self, frame_id: str, stamp: Any) -> tuple[tuple[float, ...], tuple[float, ...]] | None:
         """(translation, quaternion) of `frame_id` in the map frame at the image stamp, else the latest one."""

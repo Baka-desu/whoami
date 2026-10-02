@@ -135,6 +135,12 @@ the arbiter's 0.5 s timeout at 4 Hz.
 - Hole-safe resize on the 2 m plane, GPU against numpy: well under 1 mm.
 - Segmentation never runs under fp16: a test records the autocast state during `run_seg`, `run_decoded` and `run_all`
   of the RUGD net and requires it off.
+- **Superseded by the PR #40 review (mindmap D19, D21).** DA3 runs **FP32 on every backend**; the fp16 path measured
+  above was removed (FP32 3.6 Hz vs fp16 4.9 Hz end to end on the RTX 4060 is history, not an option). OpenVINO
+  networks compile with an explicit f32 `INFERENCE_PRECISION_HINT`, because the GPU plugin would otherwise pick f16 on
+  Arc. RUGD never runs in fp16. The stage timing, `/ugv/perception/stats`, the forced `cuda.synchronize`, depth on
+  every frame and the segmentation scheduler described in this file were deferred (removed) as well; depth is again
+  published after each mask.
 
 ### What each stage covers now
 
@@ -142,7 +148,7 @@ the arbiter's 0.5 s timeout at 4 Hz.
 |---|---|
 | `decode` | ROS `Image` to `ImageView` (`image_msg_to_view`) plus the one `decode_frame` of the tick (view to RGB array, checks on K and frame id). Before: the first, plus a second `decode_frame` inside the depth step, while the decode of the cycle was counted under `seg`. |
 | `seg` | The cycle after the decode, and only on frames that are segmented: freshness check, `adapter.infer` (RUGD preprocess, SegFormer, GPU decode), remap, gates, mask. Before: it included the decode. |
-| `depth_infer` | Backend sizing, DA3 preprocess (on the GPU for CUDA, numpy for OpenVINO), forward pass (fp16 on CUDA). On CUDA the device is synchronised before it closes, so the time is real. |
+| `depth_infer` | Backend sizing, DA3 preprocess (on the GPU for CUDA, numpy for OpenVINO), forward pass (fp16 autocast at the time of this measurement; FP32 only since the PR #40 review). On CUDA the device is synchronised before it closes, so the time is real. |
 | `depth_post` | Metres, hole-safe resize and the copy back (GPU for CUDA, numpy otherwise), then the back-projection to XYZ (numpy). |
 | `cloud` | Building the 32FC1 depth `Image` and the `PointCloud2` messages. |
 | `publish` | All `publish()` calls of the tick. |

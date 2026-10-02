@@ -1,23 +1,23 @@
 import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import type { Pose } from '../source/api'
-import type { CloudFrame, ElevationFrame, GridFrame, TrajectoryFrame } from './codec'
-import { buildElevationGeometry, buildGridTexture, colorByHeight, colorElevation, type ElevationColorMode } from './geometry'
+import type { CloudFrame, GridFrame, TrajectoryFrame } from './codec'
+import { buildGridTexture, colorByHeight } from './geometry'
 import {
   cloudBounds, gridQuad, groundGridFor, homeView, liveHeightBand, pointBounds, unionBounds, yawOf,
   type Bounds, type PlanarPose, type View,
 } from './scene-math'
 
-// The 3D map (map view): the accumulated map cloud, the live depth scan coloured by height, the elevation mesh, the
-// trajectory, the cost grid draped on the ground and the robot pose, over a ground grid. A plain class in the manner
+// The 3D map (map view): the accumulated map cloud, the live depth scan coloured by height, the trajectory, the cost
+// grid draped on the ground and the robot pose, over a ground grid. A plain class in the manner
 // of glyph-ring's RingScene: made once per mount on its container, fed through setters, released by dispose(). No
 // React in here. World frame = the map frame: metres, x forward/east, y left/north, z up.
 //
 // Rendering is on demand only: one requestAnimationFrame is scheduled when something changed (a camera move, a
 // setter, a resize) and nothing runs in between - this GPU is shared with the segmentation and depth networks.
 //
-// Colour space. The map layers carry their colours as sRGB bytes (cloud RGB, the height ramp, the elevation colours).
-// Points and the elevation mesh are drawn by a small ShaderMaterial that writes those bytes, normalised to 0..1,
+// Colour space. The map layers carry their colours as sRGB bytes (cloud RGB, the height ramp). Points are drawn by a
+// small ShaderMaterial that writes those bytes, normalised to 0..1,
 // straight to the canvas: it includes neither three's colour-space conversion nor tone mapping, and the canvas is the
 // sRGB drawing buffer, so every byte is shown as it is (a built-in material would take vertex colours as linear and
 // encode them to sRGB on output, which washes them out). Everything else uses built-in materials the normal three.js
@@ -26,19 +26,18 @@ import {
 //
 // Draw order. Objects in the opaque pass are drawn in renderOrder order:
 //   -1 ground grid lines, no depth write (whatever is drawn later covers them)
-//    0 elevation mesh, pushed back a little in depth so points lying on it win the depth test
-//    1 cost grid, draped: no depth test, blended (custom blending keeps it in the opaque pass, after the terrain and
-//      before the points), so the halo stays visible on uneven terrain and points stand on top of it
+//    1 cost grid, draped: no depth test, blended (custom blending keeps it in the opaque pass, before the points), so
+//      the points stand on top of the halo
 //    2 the accumulated map cloud, depth tested
 //    3 the live scan, depth tested, drawn after the map cloud and 1.5x larger, so where the two coincide the current
 //      scan's fan stays readable on top (the depth test passes on equal depth)
 //    4 trajectory and robot pose, no depth test: never hidden inside the cloud
 
-export interface LayerVisibility { cloud: boolean; live: boolean; trajectory: boolean; elevation: boolean; grid: boolean }
+export interface LayerVisibility { cloud: boolean; live: boolean; trajectory: boolean; grid: boolean }
 type SceneLayer = keyof LayerVisibility
-const SCENE_LAYERS: readonly SceneLayer[] = ['cloud', 'live', 'trajectory', 'elevation', 'grid']
+const SCENE_LAYERS: readonly SceneLayer[] = ['cloud', 'live', 'trajectory', 'grid']
 
-const ORDER = { ground: -1, elevation: 0, grid: 1, cloud: 2, live: 3, overlay: 4 } as const
+const ORDER = { ground: -1, grid: 1, cloud: 2, live: 3, overlay: 4 } as const
 
 const BACKGROUND = '#03100c' // --bg
 const GROUND_LINE = '#1f4637' // between --line and --line-strong
@@ -65,15 +64,6 @@ const POINT_VERTEX = /* glsl */ `
   }
 `
 
-const MESH_VERTEX = /* glsl */ `
-  attribute vec3 aColor;
-  varying vec3 vColor;
-  void main() {
-    vColor = aColor;
-    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-  }
-`
-
 // sRGB bytes out as they came in: no colour-space conversion, no tone mapping (see the header).
 const BYTE_COLOR_FRAGMENT = /* glsl */ `
   varying vec3 vColor;
@@ -97,8 +87,8 @@ const pointMaterial = (scale: number) =>
 const pointSizeM = (spacingM: number) => (Number.isFinite(spacingM) && spacingM > 0 ? Math.min(0.5, Math.max(0.01, spacingM)) : POINT_DEFAULT_M)
 
 // Bounds, set once per frame update: the given box (a cloud's header) or one pass over the positions, and the sphere
-// around that box (no second pass). They place the camera and the ground grid, and cull the mesh and the line (the
-// point objects are never culled).
+// around that box (no second pass). They place the camera and the ground grid, and cull the line (the point objects
+// are never culled).
 function fitBounds(g: THREE.BufferGeometry, box: Bounds | null): Bounds | null {
   if (box) g.boundingBox = new THREE.Box3(new THREE.Vector3(box.minX, box.minY, box.minZ), new THREE.Vector3(box.maxX, box.maxY, box.maxZ))
   else g.computeBoundingBox()
@@ -119,13 +109,6 @@ export class MapScene {
 
   private cloudMat = pointMaterial(1)
   private liveMat = pointMaterial(LIVE_POINT_SCALE)
-  private elevationMat = new THREE.ShaderMaterial({
-    vertexShader: MESH_VERTEX,
-    fragmentShader: BYTE_COLOR_FRAGMENT,
-    polygonOffset: true,
-    polygonOffsetFactor: 1,
-    polygonOffsetUnits: 2,
-  })
   private trajectoryMat = new THREE.LineBasicMaterial({ color: TRAJECTORY, depthTest: false, depthWrite: false, toneMapped: false })
   private gridMat = new THREE.MeshBasicMaterial({
     map: null,
@@ -142,7 +125,6 @@ export class MapScene {
 
   private cloud = new THREE.Points(new THREE.BufferGeometry(), this.cloudMat)
   private live = new THREE.Points(new THREE.BufferGeometry(), this.liveMat)
-  private elevation = new THREE.Mesh(new THREE.BufferGeometry(), this.elevationMat)
   private trajectory = new THREE.Line(new THREE.BufferGeometry(), this.trajectoryMat)
   private grid = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), this.gridMat) // unit plane, scaled to the grid
   private gridTexture: THREE.DataTexture | null = null
@@ -154,11 +136,9 @@ export class MapScene {
   // anything to draw, and its bounds (ground grid extent and camera framing).
   private frames: { cloud: CloudFrame | null; live: CloudFrame | null; trajectory: TrajectoryFrame | null; grid: GridFrame | null } =
     { cloud: null, live: null, trajectory: null, grid: null }
-  private elev: { frame: ElevationFrame | null; mode: ElevationColorMode; cellOfVertex: Uint32Array | null } =
-    { frame: null, mode: 'height', cellOfVertex: null }
-  private visible: LayerVisibility = { cloud: true, live: true, trajectory: true, elevation: true, grid: true }
-  private drawable: Record<SceneLayer, boolean> = { cloud: false, live: false, trajectory: false, elevation: false, grid: false }
-  private bounds: Record<SceneLayer, Bounds | null> = { cloud: null, live: null, trajectory: null, elevation: null, grid: null }
+  private visible: LayerVisibility = { cloud: true, live: true, trajectory: true, grid: true }
+  private drawable: Record<SceneLayer, boolean> = { cloud: false, live: false, trajectory: false, grid: false }
+  private bounds: Record<SceneLayer, Bounds | null> = { cloud: null, live: null, trajectory: null, grid: null }
   private robot: PlanarPose | null = null
   private robotKey = ''
 
@@ -204,7 +184,6 @@ export class MapScene {
     // one sphere saves nothing worth that).
     this.cloud.frustumCulled = false
     this.live.frustumCulled = false
-    this.elevation.renderOrder = ORDER.elevation
     this.grid.renderOrder = ORDER.grid
     this.trajectory.renderOrder = ORDER.overlay
     this.pose.renderOrder = ORDER.overlay
@@ -212,8 +191,8 @@ export class MapScene {
     poseMat.depthTest = false
     poseMat.depthWrite = false
     this.pose.visible = false
-    for (const o of [this.cloud, this.live, this.elevation, this.trajectory, this.grid]) o.visible = false
-    this.scene.add(this.elevation, this.grid, this.cloud, this.live, this.trajectory, this.pose)
+    for (const o of [this.cloud, this.live, this.trajectory, this.grid]) o.visible = false
+    this.scene.add(this.grid, this.cloud, this.live, this.trajectory, this.pose)
 
     this.applyView(homeView(null, null))
     this.updateGround()
@@ -233,40 +212,6 @@ export class MapScene {
     if (this.disposed || frame === this.frames.live) return
     this.frames.live = frame
     this.setPoints('live', this.live, frame, frame ? colorByHeight(frame.xyz, ...liveHeightBand(this.robot?.z ?? null)) : null)
-  }
-
-  // The elevation mesh. A new frame rebuilds the mesh; a new mode alone rewrites only the colour attribute.
-  setElevation(frame: ElevationFrame | null, mode: ElevationColorMode) {
-    if (this.disposed) return
-    const e = this.elev
-    if (frame === e.frame) {
-      if (mode === e.mode) return
-      e.mode = mode
-      const colors = this.elevation.geometry.getAttribute('aColor') as THREE.BufferAttribute | undefined
-      if (frame && e.cellOfVertex && colors) {
-        colors.set(colorElevation(frame, e.cellOfVertex, mode))
-        colors.needsUpdate = true
-        this.invalidate()
-      }
-      return
-    }
-    e.frame = frame
-    e.mode = mode
-    e.cellOfVertex = null
-    const g = new THREE.BufferGeometry()
-    let bounds: Bounds | null = null
-    if (frame) {
-      const mesh = buildElevationGeometry(frame)
-      if (mesh.indices.length > 0) {
-        g.setAttribute('position', new THREE.BufferAttribute(mesh.positions, 3))
-        g.setAttribute('aColor', new THREE.BufferAttribute(colorElevation(frame, mesh.cellOfVertex, mode), 3, true))
-        g.setIndex(new THREE.BufferAttribute(mesh.indices, 1))
-        bounds = fitBounds(g, null)
-        e.cellOfVertex = mesh.cellOfVertex
-      }
-    }
-    this.replaceGeometry(this.elevation, g)
-    this.layerChanged('elevation', g.index !== null, bounds)
   }
 
   // A line through the trajectory's positions.
@@ -374,10 +319,10 @@ export class MapScene {
     this.controls.removeEventListener('start', this.onOperatorMove)
     this.controls.dispose()
     el.removeEventListener('webglcontextrestored', this.invalidate)
-    for (const o of [this.cloud, this.live, this.elevation, this.trajectory, this.grid]) o.geometry.dispose()
+    for (const o of [this.cloud, this.live, this.trajectory, this.grid]) o.geometry.dispose()
     this.ground?.dispose()
     this.pose.dispose()
-    for (const m of [this.cloudMat, this.liveMat, this.elevationMat, this.trajectoryMat, this.gridMat]) m.dispose()
+    for (const m of [this.cloudMat, this.liveMat, this.trajectoryMat, this.gridMat]) m.dispose()
     this.gridTexture?.dispose()
     this.scene.clear()
     this.renderer.dispose()
@@ -385,7 +330,6 @@ export class MapScene {
     if (el.parentNode === this.container) this.container.removeChild(el)
     // drop the frames, which hold the fetched buffers
     this.frames = { cloud: null, live: null, trajectory: null, grid: null }
-    this.elev = { frame: null, mode: this.elev.mode, cellOfVertex: null }
   }
 
   // ---- internals --------------------------------------------------------------------------------
@@ -440,7 +384,7 @@ export class MapScene {
 
   private applyVisibility() {
     const objects: Record<SceneLayer, THREE.Object3D> = {
-      cloud: this.cloud, live: this.live, trajectory: this.trajectory, elevation: this.elevation, grid: this.grid,
+      cloud: this.cloud, live: this.live, trajectory: this.trajectory, grid: this.grid,
     }
     for (const l of SCENE_LAYERS) objects[l].visible = this.visible[l] && this.drawable[l]
   }
@@ -453,7 +397,7 @@ export class MapScene {
 
   // Re-sizes / re-centres the ground grid to the map (not the live scan) and the robot; rebuilt only when it changes.
   private updateGround() {
-    const g = groundGridFor(unionBounds([this.bounds.cloud, this.bounds.elevation, this.bounds.trajectory, this.bounds.grid, this.robotBounds()]))
+    const g = groundGridFor(unionBounds([this.bounds.cloud, this.bounds.trajectory, this.bounds.grid, this.robotBounds()]))
     const key = `${g.cx}:${g.cy}:${g.size}:${g.cell}`
     if (key === this.groundKey) return
     this.groundKey = key

@@ -30,10 +30,11 @@ from rclpy.executors import MultiThreadedExecutor  # noqa: E402
 from rclpy.parameter import Parameter  # noqa: E402
 from rclpy.qos import DurabilityPolicy, QoSProfile  # noqa: E402
 from rclpy.time import Time  # noqa: E402
-from sensor_msgs.msg import CameraInfo, CompressedImage, Image, PointCloud2, PointField  # noqa: E402
+from sensor_msgs.msg import CameraInfo, Image, PointCloud2, PointField  # noqa: E402
 from std_msgs.msg import Bool, String  # noqa: E402
 from tf2_ros import TransformBroadcaster  # noqa: E402
 
+import mapread  # noqa: E402
 from ugv_api import mapcodec as codec  # noqa: E402
 from ugv_api import ros_node  # noqa: E402
 from ugv_api.app import create_app  # noqa: E402
@@ -50,12 +51,10 @@ IDLE_S = 1.5
 STATS_STALE_S = 1.5
 
 CLOUD, PATH = "/rtabmap/cloud_map", "/rtabmap/mapPath"
-ELEV_CLOUD, ELEV_GRID = "/ugv/elevation/cloud", "/ugv/elevation/obstacles"
-GRID, DEPTH, CAMERA = "/global_costmap/costmap", "/perception/depth/image", "/image_raw/compressed"
-MAP_STATS, PERCEPTION_STATS = "/ugv/map/stats", "/ugv/perception/stats"
-HEAVY_TOPICS = (CLOUD, PATH, ELEV_CLOUD, ELEV_GRID, GRID, DEPTH, CAMERA)
-GATEWAY_STAT_KEYS = {"cloud_source_points", "elevation_known_cells", "map_inputs_alive", "map_rejects",
-                     "map_restarts", "map_last_reject"}
+GRID, DEPTH_CLOUD = "/global_costmap/costmap", "/perception/depth_cloud"
+MAP_STATS = "/ugv/map/stats"
+HEAVY_TOPICS = (CLOUD, PATH, GRID, DEPTH_CLOUD)
+GATEWAY_STAT_KEYS = {"cloud_source_points", "map_inputs_alive", "map_rejects", "map_restarts", "map_last_reject"}
 # A map thread that stopped ticking is reported not alive after MAP_ALIVE_S; the gateway checks every 0.5 s.
 MAP_ALIVE_BOUND = ros_node.MAP_ALIVE_S + 3.0
 
@@ -118,9 +117,8 @@ class Inputs:
 
 
 class MapPubs:
-    """Publishers for the map inputs, with the durability each real publisher uses: RTAB-Map's cloud, the
-    elevation pair and the map stats are latched (transient local); the path, the depth image, the camera
-    stream and the perception stats are volatile."""
+    """Publishers for the map inputs, with the durability each real publisher uses: RTAB-Map's cloud and the
+    map stats are latched (transient local); the path, the depth cloud and the perception stats are volatile."""
 
     def __init__(self, node) -> None:
         latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
@@ -128,12 +126,8 @@ class MapPubs:
         self.node = node
         self.cloud = node.create_publisher(PointCloud2, CLOUD, latched)
         self.path = node.create_publisher(Path, PATH, volatile)
-        self.elev_cloud = node.create_publisher(PointCloud2, ELEV_CLOUD, latched)
-        self.elev_grid = node.create_publisher(OccupancyGrid, ELEV_GRID, latched)
-        self.depth = node.create_publisher(Image, DEPTH, volatile)
-        self.camera = node.create_publisher(CompressedImage, CAMERA, volatile)
+        self.depth_cloud = node.create_publisher(PointCloud2, DEPTH_CLOUD, volatile)
         self.map_stats = node.create_publisher(String, MAP_STATS, latched)
-        self.perception_stats = node.create_publisher(String, PERCEPTION_STATS, QoSProfile(depth=10))
 
     def now(self):
         return self.node.get_clock().now().to_msg()
@@ -478,6 +472,16 @@ def make_rgb_cloud(xyz, rgb, stamp, frame="map"):
     return msg
 
 
+def make_xyz_cloud(xyz, stamp, frame="camera_optical_frame"):
+    """Dev 1's /perception/depth_cloud layout: x y z float32, 12-byte records, unorganised, not dense."""
+    msg = PointCloud2()
+    msg.header.stamp, msg.header.frame_id = stamp, frame
+    msg.height, msg.width, msg.point_step, msg.row_step, msg.is_dense = 1, len(xyz), 12, 12 * len(xyz), False
+    msg.fields = _fields("x", "y", "z")
+    msg.data = _pack([xyz[:, 0], xyz[:, 1], xyz[:, 2]], [0, 4, 8], 12)
+    return msg
+
+
 def make_path(rows, stamp, frame="map"):
     msg = Path()
     msg.header.stamp, msg.header.frame_id = stamp, frame
@@ -491,16 +495,6 @@ def make_path(rows, stamp, frame="map"):
     return msg
 
 
-def make_elevation_cloud(columns, stamp, frame="map"):
-    msg = PointCloud2()
-    msg.header.stamp, msg.header.frame_id = stamp, frame
-    n = len(columns[0])
-    msg.height, msg.width, msg.point_step, msg.is_dense, msg.row_step = 1, n, 20, True, 20 * n
-    msg.fields = _fields("x", "y", "z", "confidence", "obstacle_h")
-    msg.data = _pack(columns, [0, 4, 8, 12, 16], 20)
-    return msg
-
-
 def make_grid(cells, resolution, origin, stamp, yaw=0.0, frame="map"):
     msg = OccupancyGrid()
     msg.header.stamp, msg.header.frame_id = stamp, frame
@@ -508,15 +502,6 @@ def make_grid(cells, resolution, origin, stamp, yaw=0.0, frame="map"):
     msg.info.origin.position.x, msg.info.origin.position.y = origin
     msg.info.origin.orientation.z, msg.info.origin.orientation.w = math.sin(yaw / 2), math.cos(yaw / 2)
     msg.data = cells.astype(np.int8).reshape(-1).tolist()
-    return msg
-
-
-def make_depth(frame, stamp, depth_m):
-    msg = Image()
-    msg.header.stamp, msg.header.frame_id = stamp, frame
-    msg.height, msg.width = depth_m.shape
-    msg.encoding, msg.is_bigendian, msg.step = "32FC1", False, 4 * depth_m.shape[1]
-    msg.data = depth_m.astype("<f4").tobytes()
     return msg
 
 
@@ -528,8 +513,8 @@ def test_cloud_and_trajectory_published_on_ros_come_out_of_http_decoded(graph):
     rows = [(0, 0, 0, 0, 0, 0, 1), (3, 4, 0, 0, 0, 1, 0), (3, 4, 12, 0.5, 0.5, 0.5, 0.5)]
 
     with watching(c):
-        cloud = codec.decode_cloud(_fetch(c, "/map/cloud").content)  # only a transient-local subscription gets it
-        traj = codec.decode_trajectory(
+        cloud = mapread.cloud(_fetch(c, "/map/cloud").content)  # only a transient-local subscription gets it
+        traj = mapread.trajectory(
             _fetch(c, "/map/trajectory", publish=lambda: pubs.path.publish(make_path(rows, pubs.now()))).content)
         status = _map_status(c)
 
@@ -548,7 +533,7 @@ def test_a_newer_cloud_replaces_the_older_one_and_never_changes_what_was_served(
     grey = np.full((3, 3), 128, dtype=np.uint8)
     def with_points(n):
         r = c.get("/map/cloud")
-        return r if r.status_code == 200 and codec.decode_cloud(r.content)["count"] == n else None
+        return r if r.status_code == 200 and mapread.cloud(r.content)["count"] == n else None
 
     with watching(c):
         assert _wait(lambda: _subscribed(node, [CLOUD]), timeout=8.0)  # a latched sample only reaches a live sub
@@ -558,14 +543,13 @@ def test_a_newer_cloud_replaces_the_older_one_and_never_changes_what_was_served(
         kept = a.content
         pubs.cloud.publish(make_rgb_cloud(second, grey, pubs.now()))
         b = _wait(lambda: with_points(3))
-    assert b is not None and np.array_equal(codec.decode_cloud(b.content)["xyz"], second)
-    assert np.array_equal(codec.decode_cloud(kept)["xyz"], first)  # the earlier body is untouched
+    assert b is not None and np.array_equal(mapread.cloud(b.content)["xyz"], second)
+    assert np.array_equal(mapread.cloud(kept)["xyz"], first)  # the earlier body is untouched
 
 
 def test_heavy_subscriptions_exist_only_while_a_client_is_watching(graph):
     c, node = graph["client"], graph["pub_node"]
-    always_on = (MAP_STATS, PERCEPTION_STATS)
-    assert _wait(lambda: _subscribed(node, always_on), timeout=3.0), "the two stats subscriptions are always on"
+    assert _wait(lambda: _subscribed(node, [MAP_STATS]), timeout=3.0), "the map stats subscription is always on"
 
     with watching(c):
         assert _wait(lambda: _subscribed(node, HEAVY_TOPICS), timeout=8.0), [
@@ -573,7 +557,7 @@ def test_heavy_subscriptions_exist_only_while_a_client_is_watching(graph):
     # no heartbeat for longer than IDLE_S: the demand timer destroys them (it ticks once a second)
     assert _wait(lambda: all(node.count_subscribers(t) == 0 for t in HEAVY_TOPICS), timeout=IDLE_S + 6.0), [
         (t, node.count_subscribers(t)) for t in HEAVY_TOPICS]
-    assert _subscribed(node, always_on), "the stats subscriptions stay"
+    assert _subscribed(node, [MAP_STATS]), "the map stats subscription stays"
 
     with watching(c):  # and they come back for the next viewer
         assert _wait(lambda: _subscribed(node, HEAVY_TOPICS), timeout=8.0)
@@ -609,51 +593,6 @@ def test_pose_resource_and_event_report_the_published_transform(graph):
     assert got["qz"] == pytest.approx(math.sin(POSE["yaw"] / 2))
 
 
-def test_elevation_is_built_only_from_a_cloud_and_a_grid_with_equal_stamps(graph):
-    c, pubs, node, gw = graph["client"], graph["pubs"], graph["pub_node"], graph["gw"]
-    cols = [np.array(v, dtype=np.float32) for v in (
-        [-1.75, -1.25, -0.25],  # x: cell columns 0 1 3 of the grid below
-        [1.75, 2.25, 3.25],  # y: rows 0 1 3
-        [0.5, 1.0, 1.5],  # z
-        [1.0, 0.5, 0.25],  # confidence
-        [0.0, 0.15, 0.0],  # obstacle_h
-    )]
-    s1 = pubs.now()
-    time.sleep(0.01)
-    s2 = pubs.now()  # a later stamp: same publishers, different sample
-    assert (s1.sec, s1.nanosec) != (s2.sec, s2.nanosec)
-    cells = np.zeros((6, 8), dtype=np.int8)
-    unpaired_before = gw.map_rejects.get("elevation_unpaired", 0)
-
-    def served():  # judged by what is served, not by a seq: a latched replay of an older pair also bumps that
-        r = c.get("/map/elevation")
-        return codec.decode_elevation(r.content) if r.status_code == 200 else None
-
-    def ours():
-        out = served()
-        return out if out and out["known_cells"] == 3 and out["resolution_m"] == pytest.approx(0.5) else None
-
-    with watching(c):
-        assert _wait(lambda: _subscribed(node, HEAVY_TOPICS), timeout=8.0)
-        pubs.elev_cloud.publish(make_elevation_cloud(cols, s1))
-        pubs.elev_grid.publish(make_grid(cells, 0.25, (5.0, 5.0), s2))  # stamps differ: no pair (and its own geometry)
-        time.sleep(0.8)
-        wrong = served()
-        assert wrong is None or wrong["resolution_m"] != pytest.approx(0.25), "an unequal pair was used"
-        pubs.elev_grid.publish(make_grid(cells, 0.5, (-2.0, 1.5), s1))  # now they match
-        out = _wait(ours, timeout=8.0)
-        stats = _map_status(c)["stats"]
-    assert out, "the matching pair was never served"
-    assert (out["origin_x"], out["origin_y"]) == pytest.approx((-2.0, 1.5))
-    assert out["heights"][0, 0] == pytest.approx(0.5) and out["heights"][1, 1] == pytest.approx(1.0)
-    assert out["heights"][3, 3] == pytest.approx(1.5)
-    assert out["obstacle"][1, 1] == 3  # 0.15 m in 5 cm units
-    assert stats["elevation_known_cells"] == 3
-    # the stamp-s2 grid was replaced before it found its cloud: a publisher that stamps the halves differently
-    # shows up as rejects, not as a silent 503
-    assert gw.map_rejects.get("elevation_unpaired", 0) > unpaired_before
-
-
 def test_a_latched_costmap_is_received_when_its_publisher_appears_after_the_subscription(graph):
     c, node = graph["client"], graph["pub_node"]
     cells = np.array([[-1, 0, 10], [20, 100, 50]], dtype=np.int8)
@@ -669,18 +608,19 @@ def test_a_latched_costmap_is_received_when_its_publisher_appears_after_the_subs
             pub = other.create_publisher(OccupancyGrid, GRID,
                                          QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
             pub.publish(make_grid(cells, 0.25, (-0.5, 1.0), other.get_clock().now().to_msg(), yaw=0.5))  # once
-            out = codec.decode_grid(_fetch(c, "/map/grid", timeout=12.0).content)
+            out = mapread.grid(_fetch(c, "/map/grid", timeout=12.0).content)
     assert out["cells"].tolist() == cells.tolist()
     assert out["resolution_m"] == pytest.approx(0.25) and (out["origin_x"], out["origin_y"]) == pytest.approx((-0.5, 1.0))
     assert out["origin_yaw"] == pytest.approx(0.5, abs=1e-6)
 
 
-def _expected_live_points():
-    """Pixels (0,0) (4,0) (0,4) (4,4) of an 8 x 6 image at 2 m, through the optical -> base -> map chain, with
-    plain numpy and the numbers published above."""
-    fx, fy, cx, cy = K[0], K[4], K[2], K[5]
-    z = 2.0
-    optical = np.array([[(u - cx) * z / fx, (v - cy) * z / fy, z] for v in (0, 4) for u in (0, 4)])
+# Four optical-frame points 2 m ahead, then what the range gate (0.3-8 m) and the NaN check drop.
+LIVE_IN_RANGE = np.array([[-0.8, -0.4, 2.0], [0.0, -0.4, 2.0], [-0.8, 0.4, 2.0], [0.0, 0.4, 2.0]], dtype=np.float32)
+LIVE_DROPPED = np.array([[0.0, 0.0, 0.1], [0.0, 0.0, 9.0], [np.nan, 0.0, 2.0]], dtype=np.float32)
+
+
+def _expected_live_points(optical):
+    """`optical` through the optical -> base -> map chain, with plain numpy and the numbers published above."""
     r_opt = np.array([[0, 0, 1], [-1, 0, 0], [0, -1, 0]], dtype=float)  # body = (z, -x, -y)
     yaw = POSE["yaw"]
     r_yaw = np.array([[math.cos(yaw), -math.sin(yaw), 0], [math.sin(yaw), math.cos(yaw), 0], [0, 0, 1]])
@@ -688,66 +628,40 @@ def _expected_live_points():
     return in_base @ r_yaw.T + np.array([POSE["x"], POSE["y"], POSE["z"]])
 
 
-def test_depth_and_live_layers_come_from_the_same_image(graph):
+def test_live_layer_is_the_depth_cloud_in_the_map_frame(graph):
     c, pubs = graph["client"], graph["pubs"]
-    depth = np.full((CAM_H, CAM_W), 2.0, dtype=np.float32)
-    depth[0, 6] = np.nan  # a hole on a pixel the depth stride samples (column 6) and the live stride does not
+    cloud = np.concatenate([LIVE_IN_RANGE, LIVE_DROPPED])
 
     def publish():
-        pubs.depth.publish(make_depth("camera_optical_frame", pubs.now(), depth))
+        pubs.depth_cloud.publish(make_xyz_cloud(cloud, pubs.now()))
 
     with watching(c):
-        d = codec.decode_depth(_fetch(c, "/map/depth", publish=publish).content)
-        live = codec.decode_cloud(_fetch(c, "/map/live", publish=publish).content)
-    assert (d["width"], d["height"]) == (4, 3)  # depth_stride 2
-    assert d["counts"][0, 0] == 2000 and d["counts"][0, 3] == 0  # 2 m in mm; the hole at (row 0, col 6) is 0
-    assert live["count"] == 4 and not live["has_rgb"]  # live_stride 4: columns 0 4, rows 0 4
-    assert np.allclose(live["xyz"], _expected_live_points(), atol=1e-4)
+        live = mapread.cloud(_fetch(c, "/map/live", publish=publish).content)
+    assert live["count"] == 4 and not live["has_rgb"]  # too near, too far and NaN are dropped
+    assert np.allclose(live["xyz"], _expected_live_points(LIVE_IN_RANGE), atol=1e-4)
 
 
-def test_live_is_skipped_without_a_transform_but_depth_still_updates(graph):
+def test_live_is_skipped_without_a_transform(graph):
     c, pubs, gw = graph["client"], graph["pubs"], graph["gw"]
-    depth = np.full((CAM_H, CAM_W), 2.0, dtype=np.float32)
     with watching(c):
         before = _map_status(c)
         rejects_before = gw.map_rejects.get("live_no_transform", 0)
         deadline = time.monotonic() + 8.0
-        while time.monotonic() < deadline and _map_status(c)["seq"]["depth"] < before["seq"]["depth"] + 3:
-            pubs.depth.publish(make_depth("no_such_frame", pubs.now(), depth))
+        # frames keep arriving (each one is counted as skipped), none of them becomes a live layer
+        while time.monotonic() < deadline and gw.map_rejects.get("live_no_transform", 0) < rejects_before + 3:
+            pubs.depth_cloud.publish(make_xyz_cloud(LIVE_IN_RANGE, pubs.now(), frame="no_such_frame"))
             time.sleep(0.1)
         after = _map_status(c)
-        assert _wait(lambda: gw.map_rejects.get("live_no_transform", 0) > rejects_before)
         stats = _wait(lambda: (lambda s: s if s["map_rejects"] > before["stats"]["map_rejects"] else None)(
             _map_status(c)["stats"]))
-    assert after["seq"]["depth"] >= before["seq"]["depth"] + 3
+    assert gw.map_rejects.get("live_no_transform", 0) >= rejects_before + 3
     assert after["seq"]["live"] == before["seq"]["live"], "camera-frame points were published as map-frame points"
     # the skipped frames are visible to the operator, not only in a test-only property: counted and named
     assert stats, _map_status(c)["stats"]
     assert "live_no_transform" in stats["map_last_reject"]
 
 
-def test_camera_jpeg_is_served_as_received_and_a_non_jpeg_is_refused(graph):
-    c, pubs, gw = graph["client"], graph["pubs"], graph["gw"]
-    jpeg = b"\xff\xd8\xff\xe0\x00\x10JFIF-pretend-picture\xff\xd9"
-
-    def frame(data):
-        msg = CompressedImage()
-        msg.header.stamp, msg.header.frame_id, msg.format, msg.data = pubs.now(), "camera", "jpeg", data
-        return msg
-
-    with watching(c):
-        r = _fetch(c, "/map/camera", publish=lambda: pubs.camera.publish(frame(jpeg)))
-        rejects_before = gw.map_rejects.get("camera", 0)
-        for _ in range(5):
-            pubs.camera.publish(frame(b"\x89PNG\r\n\x1a\n-not-a-jpeg"))
-            time.sleep(0.1)
-        assert _wait(lambda: gw.map_rejects.get("camera", 0) > rejects_before)
-        again = c.get("/map/camera")
-    assert r.headers["content-type"] == "image/jpeg" and r.content == jpeg
-    assert again.status_code == 200 and again.content == jpeg  # the PNG never replaced the JPEG
-
-
-def test_stats_from_both_sources_merge_malformed_json_is_ignored_and_silence_expires(graph):
+def test_map_stats_pass_through_malformed_json_is_ignored_and_silence_expires(graph):
     c, pubs, gw = graph["client"], graph["pubs"], graph["gw"]
 
     def seen(*keys):
@@ -756,18 +670,16 @@ def test_stats_from_both_sources_merge_malformed_json_is_ignored_and_silence_exp
 
     def publish_good():
         pubs.map_stats.publish(String(data=json.dumps({"keyframes": 12, "mode": "mapping",
-                                                       "calibration_placeholder": False})))
-        pubs.perception_stats.publish(String(data=json.dumps({"depth_hz": 3.2, "stage_ms": {"seg": 40}})))
+                                                       "calibration_placeholder": False, "nested": {"a": 1}})))
 
     deadline = time.monotonic() + 8.0
     stats = None
     while stats is None and time.monotonic() < deadline:
         publish_good()
-        stats = _wait(lambda: seen("keyframes", "depth_hz"), timeout=0.3)
+        stats = _wait(lambda: seen("keyframes"), timeout=0.3)
     assert stats, _map_status(c)
     assert stats["keyframes"] == 12 and stats["mode"] == "mapping" and stats["calibration_placeholder"] is False
-    assert stats["depth_hz"] == 3.2
-    assert "stage_ms" not in stats  # nested values are not part of the flat contract
+    assert "nested" not in stats  # nested values are not part of the flat contract
 
     publish_good()
     before = gw.map_rejects.get("map_stats", 0)
@@ -775,9 +687,8 @@ def test_stats_from_both_sources_merge_malformed_json_is_ignored_and_silence_exp
     assert _wait(lambda: gw.map_rejects.get("map_stats", 0) == before + 1)
     assert seen("keyframes"), "malformed JSON must not clear what the source reported"
 
-    # silence: nothing more is published; both sources are dropped after STATS_STALE_S
-    assert _wait(lambda: "keyframes" not in _map_status(c)["stats"] and "depth_hz" not in _map_status(c)["stats"],
-                 timeout=STATS_STALE_S + 6.0)
+    # silence: nothing more is published; the source is dropped after STATS_STALE_S
+    assert _wait(lambda: "keyframes" not in _map_status(c)["stats"], timeout=STATS_STALE_S + 6.0)
     # only the gateway's own statistics (retained layers, and the health of the map inputs) outlive the silence
     assert set(_map_status(c)["stats"]) <= GATEWAY_STAT_KEYS
 
@@ -942,8 +853,7 @@ def test_a_failing_map_health_update_never_stops_the_gateways_executor():
 def test_layers_in_another_frame_are_refused_and_an_empty_frame_is_accepted(graph):
     c, pubs, node, gw = graph["client"], graph["pubs"], graph["pub_node"], graph["gw"]
     cells = np.zeros((6, 8), dtype=np.int8)
-    elevation = [np.array(v, dtype=np.float32) for v in ([-1.75], [1.75], [0.5], [1.0], [0.0])]
-    kinds = ("frame_cloud", "frame_trajectory", "frame_elevation_cloud", "frame_elevation_obstacles", "frame_grid")
+    kinds = ("frame_cloud", "frame_trajectory", "frame_grid")
 
     def counts():
         rejects = gw.map_rejects
@@ -963,26 +873,22 @@ def test_layers_in_another_frame_are_refused_and_an_empty_frame_is_accepted(grap
             pubs.cloud.publish(make_rgb_cloud(np.array([[901, 902, 903]], dtype=np.float32),
                                               np.zeros((1, 3), dtype=np.uint8), now, frame="odom"))
             pubs.path.publish(make_path([(901, 902, 903, 0, 0, 0, 1)], now, frame="odom"))
-            pubs.elev_cloud.publish(make_elevation_cloud(elevation, now, frame="odom"))
-            pubs.elev_grid.publish(make_grid(cells, 0.3125, (0.0, 0.0), now, frame="odom"))
             costmap.publish(make_grid(cells, 0.2, (0.0, 0.0), now, frame="odom"))  # a local costmap, say
 
         refused = _wait(lambda: (publish_odom_layers(), all(counts()[k] > before[k] for k in kinds))[1], timeout=12.0)
         assert refused, f"not every layer was refused: {before} -> {counts()}"
         # nothing of it was served as a map-frame layer
-        cloud = served("/map/cloud", codec.decode_cloud)
+        cloud = served("/map/cloud", mapread.cloud)
         assert cloud is None or 901.0 not in cloud["xyz"]
-        trajectory = served("/map/trajectory", codec.decode_trajectory)
+        trajectory = served("/map/trajectory", mapread.trajectory)
         assert trajectory is None or 901.0 not in trajectory["poses"][:, 0]
-        elevation_out = served("/map/elevation", codec.decode_elevation)
-        assert elevation_out is None or elevation_out["resolution_m"] != pytest.approx(0.3125)
-        grid = served("/map/grid", codec.decode_grid)
+        grid = served("/map/grid", mapread.grid)
         assert grid is None or grid["resolution_m"] != pytest.approx(0.2)
 
         # a message with no frame at all is taken as the map frame (some publishers leave it empty)
         def publish_unframed():
             costmap.publish(make_grid(cells, 0.125, (0.0, 0.0), other.get_clock().now().to_msg(), frame=""))
-            grid = served("/map/grid", codec.decode_grid)
+            grid = served("/map/grid", mapread.grid)
             return grid is not None and grid["resolution_m"] == pytest.approx(0.125)
 
         assert _wait(publish_unframed, timeout=8.0), "a grid with an empty frame_id was refused"
@@ -1001,24 +907,7 @@ def test_an_organised_cloud_with_padded_rows_is_refused(graph):
         pubs.cloud.publish(msg)
         assert _wait(lambda: gw.map_rejects.get("cloud", 0) > before)
         r = c.get("/map/cloud")
-    assert r.status_code != 200 or codec.decode_cloud(r.content)["source_count"] != 6
-
-
-def test_elevation_halves_without_a_stamp_never_pair(graph):
-    c, pubs, node, gw = graph["client"], graph["pubs"], graph["pub_node"], graph["gw"]
-    four = [np.arange(4, dtype=np.float32) + i for i in range(5)]
-    cells = np.zeros((6, 8), dtype=np.int8)
-    unset = Time().to_msg()  # sec 0, nanosec 0
-    before = gw.map_rejects.get("elevation_unstamped", 0)
-    with watching(c):
-        assert _wait(lambda: _subscribed(node, HEAVY_TOPICS), timeout=8.0)
-        pubs.elev_cloud.publish(make_elevation_cloud(four, unset))
-        pubs.elev_grid.publish(make_grid(cells, 0.375, (-2.0, 1.5), unset))
-        assert _wait(lambda: gw.map_rejects.get("elevation_unstamped", 0) >= before + 2)
-        r = c.get("/map/elevation")
-        stats = _map_status(c)["stats"]
-    assert r.status_code != 200 or codec.decode_elevation(r.content)["resolution_m"] != pytest.approx(0.375)
-    assert stats.get("elevation_known_cells") != 4, "cells were counted for a half that never paired"
+    assert r.status_code != 200 or mapread.cloud(r.content)["source_count"] != 6
 
 
 def test_a_latched_arbiter_status_published_before_discovery_is_received(graph):

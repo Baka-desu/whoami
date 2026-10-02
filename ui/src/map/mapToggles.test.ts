@@ -13,27 +13,18 @@ describe('persisted toggles', () => {
     expect(parseToggles('42')).toEqual(DEFAULT_TOGGLES)
   })
 
-  it('shows every layer but elevation by default, height colours', () => {
-    expect(DEFAULT_TOGGLES).toEqual({
-      cloud: true, live: true, trajectory: true, elevation: false, grid: true, images: true, mode: 'height',
-    })
-  })
-
-  it('honours a saved choice over the default, including elevation turned on', () => {
-    expect(parseToggles(JSON.stringify({ elevation: true })).elevation).toBe(true)
-    // a whole record saved under the old all-on default stays exactly as it was saved
-    const old: MapToggles = { cloud: true, live: true, trajectory: true, elevation: true, grid: true, images: true, mode: 'height' }
-    expect(parseToggles(JSON.stringify(old))).toEqual(old)
+  it('shows every layer by default', () => {
+    expect(DEFAULT_TOGGLES).toEqual({ cloud: true, live: true, trajectory: true, grid: true, images: true })
   })
 
   it('reads each stored value it understands and keeps the default for the rest', () => {
-    const t = parseToggles(JSON.stringify({ cloud: false, grid: 'no', images: false, mode: 'obstacle', future: 1 }))
-    expect(t).toEqual({ ...DEFAULT_TOGGLES, cloud: false, images: false, mode: 'obstacle' })
-    expect(parseToggles(JSON.stringify({ mode: 'rainbow' })).mode).toBe(DEFAULT_TOGGLES.mode)
+    // keys of removed layers (elevation and its colour mode) are ignored, like any other unknown key
+    const t = parseToggles(JSON.stringify({ cloud: false, grid: 'no', images: false, elevation: true, mode: 'obstacle' }))
+    expect(t).toEqual({ ...DEFAULT_TOGGLES, cloud: false, images: false })
   })
 
   it('round-trips what the view writes', () => {
-    const t: MapToggles = { cloud: false, live: true, trajectory: false, elevation: true, grid: false, images: true, mode: 'confidence' }
+    const t: MapToggles = { cloud: false, live: true, trajectory: false, grid: false, images: true }
     expect(parseToggles(JSON.stringify(t))).toEqual(t)
   })
 
@@ -55,13 +46,10 @@ describe('persisted toggles', () => {
     expect(DEFAULT_TOGGLES.cloud).toBe(true) // never mutated
   })
 
-  it('turns toggles into the layers to fetch: the image panels switch depth and camera together', () => {
-    const t: MapToggles = { ...DEFAULT_TOGGLES, cloud: false, live: true, trajectory: false, elevation: true, grid: false, images: false }
-    expect(enabledLayers(t)).toEqual({
-      cloud: false, live: true, trajectory: false, elevation: true, grid: false, depth: false, camera: false,
-    })
-    expect(enabledLayers({ ...t, images: true })).toMatchObject({ depth: true, camera: true })
-    expect(enabledLayers(DEFAULT_TOGGLES).elevation).toBe(false) // off by default: not fetched either
+  it('turns toggles into the layers to fetch; the image panels fetch nothing', () => {
+    const t: MapToggles = { ...DEFAULT_TOGGLES, cloud: false, live: true, trajectory: false, grid: false, images: false }
+    expect(enabledLayers(t)).toEqual({ cloud: false, live: true, trajectory: false, grid: false })
+    expect(enabledLayers({ ...t, images: true })).toEqual(enabledLayers(t))
   })
 })
 

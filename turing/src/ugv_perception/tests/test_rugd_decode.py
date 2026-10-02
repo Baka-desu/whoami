@@ -135,6 +135,71 @@ def test_infer_falls_back_to_numpy_when_run_seg_fails() -> None:
     assert backend.runs == 3
 
 
+def test_infer_falls_back_when_rgb_pre_fails() -> None:
+    logits = np.full((1, 25, 2, 2), -20.0, dtype=np.float32)
+    logits[0, 4] = 8.0
+
+    class _Backend:
+        def __init__(self) -> None:
+            self.from_rgb = 0
+            self.runs = 0
+            self.rgb_pre_disabled = False
+            self.seg_post_disabled = False
+
+        def run_seg_from_rgb(self, rgb, out_hw, input_hw, mean, std):
+            self.from_rgb += 1
+            self.rgb_pre_disabled = True
+            raise AdapterError("rgb pre failed")
+
+        def run_seg(self, blob, out_hw):
+            self.runs += 1
+            rh, rw = out_hw
+            labels = np.full((rh, rw), 4, dtype=np.int32)
+            scores = np.full((rh, rw), 0.9, dtype=np.float32)
+            return labels, scores
+
+        def run(self, blob):
+            raise AssertionError("GPU pre fallback must not call run()")
+
+    backend = _Backend()
+    adapter = RugdSegformerAdapter(
+        backend, input_hw=(2, 2), mean=(0.0, 0.0, 0.0), std=(1.0, 1.0, 1.0)
+    )
+    raw = adapter.infer(_frame(4, 6))
+    assert set(int(x) for x in np.unique(raw.label_ids).tolist()) == {4}
+    assert backend.from_rgb == 1
+    assert backend.runs == 1
+    raw2 = adapter.infer(_frame(4, 6))
+    assert set(int(x) for x in np.unique(raw2.label_ids).tolist()) == {4}
+    assert backend.from_rgb == 1
+    assert backend.runs == 2
+
+
+def test_gpu_infer_fail_after_rgb_pre_does_not_retry() -> None:
+    class _Backend:
+        rgb_pre_disabled = False
+        seg_post_disabled = False
+
+        def run_seg_from_rgb(self, rgb, out_hw, input_hw, mean, std):
+            raise AdapterError("OpenVINO GPU run failed")
+
+        def run_seg(self, blob, out_hw):
+            raise AssertionError("must not retry infer after GPU run failed")
+
+        def run(self, blob):
+            raise AssertionError("must not retry infer after GPU run failed")
+
+    adapter = RugdSegformerAdapter(
+        _Backend(), input_hw=(2, 2), mean=(0.0, 0.0, 0.0), std=(1.0, 1.0, 1.0)
+    )
+    try:
+        adapter.infer(_frame(4, 6))
+    except AdapterError as exc:
+        assert "run failed" in str(exc)
+        return
+    raise AssertionError("GPU infer failure must raise")
+
+
 def test_nan_gpu_decode_does_not_retry_infer() -> None:
     class _Backend:
         def run_seg(self, blob, out_hw):
@@ -152,24 +217,6 @@ def test_nan_gpu_decode_does_not_retry_infer() -> None:
         assert "not finite" in str(exc)
         return
     raise AssertionError("NaN logits must raise")
-
-
-def test_infer_uses_run_decoded_when_no_run_seg() -> None:
-    class _Backend:
-        def run_decoded(self, blob, out_hw):
-            labels = np.full(out_hw, 4, dtype=np.int32)
-            scores = np.full(out_hw, 0.9, dtype=np.float32)
-            return labels, scores
-
-        def run(self, blob):
-            raise AssertionError("must not fall back to run when run_decoded works")
-
-    adapter = RugdSegformerAdapter(
-        _Backend(), input_hw=(2, 2), mean=(0.0, 0.0, 0.0), std=(1.0, 1.0, 1.0)
-    )
-    raw = adapter.infer(_frame(4, 6))
-    assert raw.hw == (4, 6)
-    assert set(int(x) for x in np.unique(raw.label_ids).tolist()) == {4}
 
 
 def test_compose_tick_uses_rugd_table() -> None:

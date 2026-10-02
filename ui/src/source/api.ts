@@ -70,8 +70,8 @@ export interface Navigation {
   activeGoal: Goal | null
 }
 
-// The map layers the gateway serves (GET /map/{layer}); MapStatus.seq always carries all seven.
-export const LAYERS = ['cloud', 'elevation', 'trajectory', 'grid', 'live', 'depth', 'camera'] as const
+// The map layers the gateway serves (GET /map/{layer}); MapStatus.seq always carries every one of them.
+export const LAYERS = ['cloud', 'trajectory', 'grid', 'live'] as const
 export type Layer = (typeof LAYERS)[number]
 
 export type StatValue = number | string | boolean | null
@@ -180,7 +180,7 @@ export function asNavigation(v: unknown): Navigation | null {
 export function asMapStatus(v: unknown): MapStatus | null {
   if (!isObj(v) || !isNum(v.epoch) || !isObj(v.seq) || !isObj(v.stats)) return null
   const s = v.seq
-  if (LAYERS.some((l) => !isNum(s[l]))) return null // all seven layers or nothing
+  if (LAYERS.some((l) => !isNum(s[l]))) return null // every layer or nothing
   if (!Object.values(v.stats).every(isStat)) return null // flat scalars only
   const seq = Object.fromEntries(LAYERS.map((l) => [l, s[l] as number])) as Record<Layer, number>
   return { epoch: v.epoch, seq, stats: { ...(v.stats as Record<string, StatValue>) } }

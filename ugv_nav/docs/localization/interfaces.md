@@ -106,7 +106,7 @@ subscribes them.
 
 ### `/rtabmap/mapData` consumer contract (what a future elevation node would build against)
 
-> **Elevation (not built).** The owner deferred the elevation map (plan Tasks 10-12). No node publishes `/ugv/elevation/cloud` or `/ugv/elevation/obstacles`; the gateway subscribes to them on demand and the `elevation` layer stays at seq 0 (`GET /api/v1/map/elevation` answers 503). `/rtabmap/mapData` therefore has no consumer today except `map_assembler`; the contract below is for a future elevation mapper.
+> **Elevation (not built).** The owner deferred the elevation map (plan Tasks 10-12). No node publishes `/ugv/elevation/cloud` or `/ugv/elevation/obstacles`, and the gateway and the web viewer have no elevation layer until such a node lands (mindmap D16). `/rtabmap/mapData` therefore has no consumer today except `map_assembler`; the contract below is for a future elevation mapper.
 
 Which points a test asserts and which were measured once (`test/test_ros_stack.py`): `test_x4_rtabmap_3d_map_outputs` (`_map_data_problems`, `_depth_png_problem`) asserts points 2-4 (first entry per id with data, every id of the final graph delivered, float32-in-PNG depth at camera size) and that `left_camera_info` and `local_transform` are non-empty; unit tests `test_x4a_*` cover those checks. Points 1 and 5-7 (one node per message, pose z = 0, JPEG left image, empty camera-info `frame_id`, the `local_transform` values) were measured once and are not asserted.
 

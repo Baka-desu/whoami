@@ -153,11 +153,29 @@ class RugdSegformerAdapter:
         self._std = std
 
     def infer(self, frame: ImageFrame) -> RawSemOutput:
+        rh, rw = int(frame.rgb.shape[0]), int(frame.rgb.shape[1])
+        run_from_rgb = getattr(self._backend, "run_seg_from_rgb", None)
+        if (
+            callable(run_from_rgb)
+            and not getattr(self._backend, "rgb_pre_disabled", False)
+            and not getattr(self._backend, "seg_post_disabled", False)
+        ):
+            try:
+                labels, scores = run_from_rgb(
+                    frame.rgb, (rh, rw), self._input_hw, self._mean, self._std
+                )
+                return _raw_from_maps(labels, scores, frame)
+            except AdapterError as exc:
+                if "not finite" in str(exc):
+                    raise
+                if not getattr(self._backend, "rgb_pre_disabled", False) and not getattr(
+                    self._backend, "seg_post_disabled", False
+                ):
+                    raise
         try:
             blob = preprocess_rgb(
                 frame.rgb, input_hw=self._input_hw, mean=self._mean, std=self._std
             )
-            rh, rw = int(frame.rgb.shape[0]), int(frame.rgb.shape[1])
             run_seg = getattr(self._backend, "run_seg", None)
             if callable(run_seg) and not getattr(self._backend, "seg_post_disabled", False):
                 try:
@@ -166,10 +184,6 @@ class RugdSegformerAdapter:
                 except AdapterError as exc:
                     if "not finite" in str(exc):
                         raise
-            elif callable(getattr(self._backend, "run_decoded", None)):
-                # Backend decodes on its own device: same maths as decode_rugd_logits.
-                labels, scores = self._backend.run_decoded(blob, (rh, rw))
-                return _raw_from_maps(labels, scores, frame)
             logits = self._backend.run(blob)
         except AdapterError:
             raise
