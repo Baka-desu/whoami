@@ -413,7 +413,9 @@ code { font-size: 10px; color: var(--text); overflow-wrap: anywhere; }
 }
 .mapview-stage::before { top: 8px; left: 8px; border-right: 0; border-bottom: 0; }
 .mapview-stage::after { right: 8px; bottom: 8px; border-left: 0; border-top: 0; }
-.mapview .banner { left: 50%; transform: translateX(-50%); white-space: nowrap; }
+/* Centred over the map, above the image panels (same z-index as them, later in the DOM is not enough on a narrow stage),
+   and wrapping inside the stage's width instead of running under them or past the edge. */
+.mapview .banner { left: 16px; right: 16px; width: fit-content; max-width: calc(100% - 32px); margin-inline: auto; box-sizing: border-box; text-align: center; z-index: 4; }
 .mapview-insets { position: absolute; top: 16px; left: 16px; z-index: 3; display: grid; gap: 10px; width: clamp(160px, 24%, 320px); max-height: calc(100% - 32px); overflow: hidden; }
 .mapview-inset { margin: 0; background: rgba(3, 16, 12, 0.88); border: 1px solid var(--line-strong); }
 .mapview-inset figcaption { padding: 3px 8px; font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--dim); border-bottom: 1px solid var(--line); }

@@ -138,9 +138,8 @@ export function MapView({ telemetry, live }: Props) {
     setToggles((t) => ({ ...t, mode: m }))
   }
 
-  const staleReason = data.stale ? 'map not updating' : !live ? 'telemetry lost' : null
-  const banner = mapBanner(noMap, staleReason, status?.stats)
-  const ok = !noMap && staleReason === null
+  const banner = mapBanner({ noMap, statusStale: data.stale, telemetryLost: !live, stats: status?.stats })
+  const ok = !noMap && banner === null // the dot follows the banner: green only when nothing says the feed is wrong
   const slamMode = typeof status?.stats.mode === 'string' ? status.stats.mode : null
   const depthPanel = toggles.images ? depth : null // a panel shows only with data and with the images toggle on
   const cameraPanel = toggles.images ? camera : null

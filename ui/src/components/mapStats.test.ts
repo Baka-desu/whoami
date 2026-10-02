@@ -147,31 +147,54 @@ describe('map inputs stopped', () => {
 describe('map view banner', () => {
   const stopped = { map_inputs_alive: false }
   const STOPPED = 'MAP INPUTS STOPPED — layers are not updating'
+  // A fresh status, telemetry live, a map with data, until a case says otherwise.
+  const view = (o: Partial<Parameters<typeof mapBanner>[0]> = {}) =>
+    mapBanner({ noMap: false, statusStale: false, telemetryLost: false, stats: {}, ...o })
 
   it('says nothing when the map is healthy', () => {
-    expect(mapBanner(false, null, {})).toBeNull()
-    expect(mapBanner(false, null, undefined)).toBeNull()
-    expect(mapBanner(false, null, { map_inputs_alive: true })).toBeNull()
-    expect(mapBanner(false, null, { map_inputs_alive: null })).toBeNull()
+    expect(view()).toBeNull()
+    expect(view({ stats: undefined })).toBeNull()
+    expect(view({ stats: { map_inputs_alive: true } })).toBeNull()
+    expect(view({ stats: { map_inputs_alive: null } })).toBeNull()
   })
 
   it('shows the stopped banner when the inputs are reported stopped', () => {
-    expect(mapBanner(false, null, stopped)).toBe(STOPPED)
+    expect(view({ stats: stopped })).toBe(STOPPED)
   })
 
   it('shows the stopped banner over an empty map too, so the operator learns why nothing arrives', () => {
-    expect(mapBanner(true, null, stopped)).toBe(STOPPED)
+    expect(view({ noMap: true, stats: stopped })).toBe(STOPPED)
   })
 
-  it('shows the STALE banner for a stale or unlive view, and that takes precedence over the stopped one', () => {
-    expect(mapBanner(false, 'map not updating', {})).toBe('STALE · map not updating')
-    expect(mapBanner(false, 'telemetry lost', { map_inputs_alive: true })).toBe('STALE · telemetry lost')
-    expect(mapBanner(false, 'map not updating', stopped)).toBe('STALE · map not updating')
-    expect(mapBanner(false, 'telemetry lost', stopped)).toBe('STALE · telemetry lost')
+  it('shows the STALE banner for a stale status or lost telemetry', () => {
+    expect(view({ statusStale: true })).toBe('STALE · map not updating')
+    expect(view({ telemetryLost: true, stats: { map_inputs_alive: true } })).toBe('STALE · telemetry lost')
+    expect(view({ statusStale: true, telemetryLost: true })).toBe('STALE · map not updating') // the status reason leads
+  })
+
+  it('lets STALE take precedence over the stopped banner on a map with data', () => {
+    expect(view({ statusStale: true, stats: stopped })).toBe('STALE · map not updating')
+    expect(view({ telemetryLost: true, stats: stopped })).toBe('STALE · telemetry lost')
   })
 
   it('keeps the existing rule that an empty map shows no STALE banner (the NO MAP YET overlay says it)', () => {
-    expect(mapBanner(true, 'map not updating', {})).toBeNull()
-    expect(mapBanner(true, 'map not updating', stopped)).toBeNull() // stale status: its health claim is not trusted
+    expect(view({ noMap: true, statusStale: true })).toBeNull()
+    expect(view({ noMap: true, telemetryLost: true })).toBeNull()
+  })
+
+  it('still reports stopped inputs on an empty map when only telemetry is lost: the status itself is fresh', () => {
+    expect(view({ noMap: true, telemetryLost: true, stats: stopped })).toBe(STOPPED)
+  })
+
+  it('does not trust the health claim of a stale status on an empty map', () => {
+    expect(view({ noMap: true, statusStale: true, stats: stopped })).toBeNull()
+    expect(view({ noMap: true, statusStale: true, telemetryLost: true, stats: stopped })).toBeNull()
+  })
+
+  it('shows a banner whenever the map has data and anything is wrong, so the feed dot can follow the banner', () => {
+    // MapView derives its ok dot as: map has data and no banner.
+    const cases = [{}, { statusStale: true }, { telemetryLost: true }, { stats: stopped }, { stats: { map_inputs_alive: true } }]
+    const ok = (o: object) => view(o) === null
+    expect(cases.map(ok)).toEqual([true, false, false, false, true])
   })
 })

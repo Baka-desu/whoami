@@ -63,10 +63,22 @@ export const mapInputsStopped = (s: Stats | undefined) => s?.map_inputs_alive ==
 
 const STOPPED_BANNER = 'MAP INPUTS STOPPED — layers are not updating'
 
-// The one banner over the map view, or null. STALE (the view cannot trust what it shows) takes precedence over the
-// stopped-inputs banner, and an empty map keeps showing no STALE banner (the NO MAP YET overlay says it). The
-// stopped-inputs banner stays on an empty map: it says why nothing arrives.
-export function mapBanner(noMap: boolean, staleReason: string | null, s: Stats | undefined): string | null {
-  if (staleReason !== null) return noMap ? null : `STALE · ${staleReason}`
-  return mapInputsStopped(s) ? STOPPED_BANNER : null
+export interface MapBannerInput {
+  noMap: boolean // no layer has data yet
+  statusStale: boolean // the map status document itself is stale (the poll failed or is old)
+  telemetryLost: boolean // the telemetry stream is not live
+  stats: Stats | undefined
+}
+
+// The one banner over the map view, or null.
+// - A map with data and a stale status or lost telemetry: STALE, which takes precedence over the stopped banner.
+// - An empty map shows no STALE banner (the NO MAP YET overlay says it), but a fresh status that reports the inputs
+//   stopped is shown even then, with telemetry lost or not: it says why nothing arrives (inputs never started, or off
+//   by a configuration error).
+// - A stale status is not trusted for that health claim, so the stopped banner is never shown from one.
+export function mapBanner({ noMap, statusStale, telemetryLost, stats }: MapBannerInput): string | null {
+  const staleReason = statusStale ? 'map not updating' : telemetryLost ? 'telemetry lost' : null
+  if (staleReason !== null && !noMap) return `STALE · ${staleReason}`
+  if (statusStale) return null
+  return mapInputsStopped(stats) ? STOPPED_BANNER : null
 }
