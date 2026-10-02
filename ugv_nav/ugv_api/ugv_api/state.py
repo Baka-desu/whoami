@@ -17,7 +17,7 @@ MASK = "mask"  # /segmentation/mask, stamp only (§12 perception watch)
 PERCEPTION_DEGRADED = "perception_degraded"  # /ugv/perception_degraded
 POSE_VALID = "pose_valid"  # /ugv/pose_valid
 LOCALIZATION_STATUS = "localization_status"  # /ugv/localization_status
-TF_MAP_BASE = "tf_map_base"  # TF map->base_link (value = None, stamp = transform stamp)
+TF_MAP_BASE = "tf_map_base"  # TF map->base_link, stamp = transform stamp; value = (x, y, z, qx, qy, qz, qw) or None
 NAV2_HEARTBEAT = "nav2_heartbeat"  # /ugv/nav2_heartbeat
 NAV2_STATUS = "nav2_status"  # /ugv/nav2_status
 E_STOP = "e_stop"  # /ugv/e_stop as observed on the graph (any publisher)

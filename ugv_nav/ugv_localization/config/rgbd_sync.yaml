@@ -8,7 +8,9 @@
     approx_sync: false
     sync_queue_size: 30         # ≥ camera fps × DA3 latency (s), with margin
     topic_queue_size: 10
-    # Best-effort subscriptions connect to BOTH reliable and best-effort publishers (a reliable
-    # subscriber silently never connects to a best-effort camera driver / bridge).
-    qos: 2                      # images: 0 = system default, 1 = reliable, 2 = best effort
+    # `qos` also sets the QoS of the published rgbd_image, which rgbd_odometry and rtabmap subscribe RELIABLE
+    # (a reliable subscriber never connects to a best-effort publisher). 0 = system default: a best-effort
+    # subscriber on the inputs (connects to BOTH reliable and best-effort camera drivers / bridges) and a
+    # reliable publisher for rgbd_image.
+    qos: 0                      # 0 = system default, 1 = reliable, 2 = best effort
     qos_camera_info: 2          # needs CameraInfo per frame with the image stamp (not latched once)

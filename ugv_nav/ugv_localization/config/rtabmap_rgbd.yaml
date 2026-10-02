@@ -26,7 +26,24 @@
     subscribe_odom: true        # /odom from odom_selector
     approx_sync: true           # rgbd_image (depth rate) vs /odom (wheel rate) stamps differ
     sync_queue_size: 30
-    topic_queue_size: 10
+    # rgbd_image is ~2.1 MB per message at 640x480; best effort drops most of them in transport (see
+    # rgbd_odometry.yaml, docs/mapping/baseline.md "Task 23"). Reliable input, short reader queue so a busy
+    # SLAM step skips old frames rather than replaying a backlog. rgbd_sync must publish RELIABLE (its `qos`).
+    # topic_queue_size is the reader queue of every rtabmap subscription, so /odom (and /odom_info when subscribed) get depth 2
+    # too. Kept: with wheel odometry at 30 Hz (frames 4 Hz) /rtabmap/info stayed at 1.75-1.87 Hz (1.72-1.87 Hz at 4 Hz) and each
+    # node's pose matched the true pose at its image stamp (docs/mapping/baseline.md "Review fixes for 0c5f1d9").
+    qos: 1                      # 0 = system default (best effort for a subscriber), 1 = reliable, 2 = best effort
+    topic_queue_size: 2
+
+    # 3D map outputs for the web viewer and the elevation mapper (docs/superpowers/plans/2026-10-02-3d-mapping-elevation.md):
+    # /rtabmap/cloud_map, /rtabmap/mapPath, /rtabmap/mapGraph, /rtabmap/mapData. rtabmap only assembles them while someone
+    # subscribes. Values are the 0.23.7 defaults (checked with `ros2 param get`), pinned so an upgrade cannot change them.
+    # This file is also map_assembler's (/rtabmap/assembler): it serves /rtabmap/cloud_map from mapData with these same
+    # Grid/* and map params, outside the SLAM step; rtabmap's own copy is remapped away (localization.launch.py).
+    cloud_output_voxelized: true       # cloud_map voxelised at Grid/CellSize, not one point per depth pixel
+    cloud_subtract_filtering: false    # keep every node's points (true removes points the earlier nodes already cover)
+    map_always_update: false           # no map rebuild while the graph is unchanged (robot parked)
+    latch: true                        # cloud_map, mapGraph and /map are TRANSIENT_LOCAL: a late subscriber gets the last one
 
     # ---- RTAB-Map library params (strings) ------------------------------------------
     Reg/Strategy: "0"               # visual registration
@@ -41,6 +58,8 @@
     Vis/MaxDepth: "8.0"             # m — DA3 metric error grows with range; tune from depth_report
     Kp/MaxDepth: "8.0"              # same cap for loop-closure vocabulary words
     Rtabmap/DetectionRate: "2"      # Hz; pose_validity slam_max_age_s must exceed 1/rate
+    Mem/NotLinkedNodesKept: "false" # don't save deleted nodes (weight -9): resuming a db whose last node was deleted aborts
+                                    # rtabmap in Memory::addLink; a parked robot also filled 207 MB with 191 of them
     RGBD/LinearUpdate: "0.1"        # m between graph nodes
     RGBD/AngularUpdate: "0.1"       # rad between graph nodes
     RGBD/ProximityBySpace: "true"   # local loop closures
@@ -50,9 +69,11 @@
 
     # Occupancy grid /map from DA3 depth (optional for Dev 3; not a Nav2 requirement).
     Grid/Sensor: "1"                # 1 = depth image (0 = laser scan, 2 = both)
-    Grid/3D: "false"                # 2D grid
+    # With Grid/3D true, Grid/MaxObstacleHeight (below) also clips /rtabmap/cloud_map: the viewer's 3D map lacks everything
+    # higher than about 1 m above base_link (upper walls, trees) until the owner decides. Measured: cloud z max 0.96 m, 1.42 m with it disabled.
+    Grid/3D: "true"                 # keep the 3D local maps: /rtabmap/cloud_map is a coloured 3D cloud (false = flat z=0)
     Grid/CellSize: "0.05"
     Grid/RangeMin: "0.3"
     Grid/RangeMax: "5.0"            # shorter than Vis/MaxDepth: far DA3 depth smears obstacles
     Grid/RayTracing: "true"         # clear free space between camera and obstacles
-    Grid/MaxObstacleHeight: "1.0"   # m above base_link; ignore overhangs (tune to robot height)
+    Grid/MaxObstacleHeight: "1.0"   # m above base_link; ignore overhangs (tune to robot height). Also clips cloud_map at ~1 m (see Grid/3D)

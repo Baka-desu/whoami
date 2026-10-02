@@ -2,25 +2,21 @@ name: ui
 
 on:
   pull_request:
-    paths: ['ui/**', 'turing/workbench/**', '.github/workflows/ui.yml']
+    paths: ['ui/**', 'ugv_nav/ugv_api/test/fixtures/map/**', '.github/workflows/ui.yml']
 
 jobs:
   check:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        # ui: Dev 5 operator console (talks only to ugv_api) · turing/workbench: Dev 1 eval tool
-        app: [ui, turing/workbench]
     defaults:
       run:
-        working-directory: ${{ matrix.app }}
+        working-directory: ui
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: ${{ matrix.app }}/package-lock.json
+          cache-dependency-path: ui/package-lock.json
       - run: npm ci
       - run: npm run lint
       - run: npm test

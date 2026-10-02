@@ -12,14 +12,21 @@ Resources (operator items of architecture.md only):
   POST /api/v1/navigation/goals              {x, y, yaw, frameId: "map"} (§11) -> 202
   GET  /api/v1/navigation/goals/{id}
   DELETE /api/v1/navigation/goals/{id}       cancel -> 202
-  GET  /api/v1/telemetry/stream              text/event-stream: safety, command, localization, navigation
+  GET  /api/v1/map                           MapStatus: epoch, per-layer seq, stats (the map view's demand heartbeat)
+  GET  /api/v1/map/pose                      map -> base_link from TF
+  GET  /api/v1/map/{cloud|elevation|trajectory|grid|live|depth}   Binary format v1, 503 problem until first data
+  GET  /api/v1/map/camera                    image/jpeg
+  GET  /api/v1/telemetry/stream              text/event-stream: safety, command, localization, navigation, map, pose
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
-from typing import Protocol
+import logging
+import math
+from collections.abc import Callable
+from typing import Any, Protocol
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
@@ -28,9 +35,11 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from ugv_api import __version__
+from ugv_api import mapcodec as codec
 from ugv_api import state as k
 from ugv_api.errors import ServiceUnavailable
 from ugv_api.goals import GoalRecord, GoalRegistry, GoalState
+from ugv_api.mapstore import MapStore
 from ugv_api.schemas import (
     ArbiterOut,
     BaseCommand,
@@ -40,9 +49,12 @@ from ugv_api.schemas import (
     GoalOut,
     Health,
     Localization,
+    MapSeq,
+    MapStatus,
     ModeIn,
     ModeOut,
     Navigation,
+    Pose,
     SafetyStatus,
     Vector3,
     WatchOut,
@@ -52,6 +64,10 @@ from ugv_api.watches import Timeouts, evaluate, gate_reasons
 
 PREFIX = "/api/v1"
 PROBLEM = "application/problem+json"
+OCTET = "application/octet-stream"
+JPEG = "image/jpeg"
+
+logger = logging.getLogger(__name__)
 
 
 class Robot(Protocol):
@@ -92,10 +108,84 @@ def _goal_out(rec: GoalRecord) -> GoalOut:
     )
 
 
+def _pose_values(value: Any) -> tuple[float, ...] | None:
+    """(x, y, z, qx, qy, qz, qw) as finite floats, or None for anything else (no value yet, malformed, NaN)."""
+    try:
+        values = tuple(float(v) for v in value)
+    except (TypeError, ValueError):
+        return None
+    return values if len(values) == 7 and all(math.isfinite(v) for v in values) else None
+
+
+def _layer_encoders(
+    *, point_budget: int, spacing_m: float, max_side: int, stride: int, max_range_m: float
+) -> dict[str, Callable[[Any, int, int, float], bytes]]:
+    """layer -> encode(source, epoch, seq, stamp_s) -> bytes, in the form MapStore.blob calls it. The `source`
+    each layer takes is what MapStore.put was given (documented per layer below); the ROS side builds exactly
+    these from its messages. Calls go through the `codec` module so a test can count them."""
+
+    def cloud(src: dict, epoch: int, seq: int, stamp_s: float) -> bytes:
+        # {"fields": [(name, offset, datatype, count)], "point_step", "n_points", "is_bigendian", "data"}
+        xyz, rgb = codec.cloud_view(**src)
+        return codec.encode_cloud(xyz, rgb, epoch=epoch, seq=seq, stamp_s=stamp_s, budget=point_budget,
+                                  spacing_m=spacing_m)
+
+    def live(src: dict, epoch: int, seq: int, stamp_s: float) -> bytes:
+        # {"xyz": (N, 3) float32}. The live scan is small and shown as it is: a budget never cuts it.
+        xyz = src["xyz"]
+        return codec.encode_cloud(xyz, None, epoch=epoch, seq=seq, stamp_s=stamp_s, budget=len(xyz),
+                                  spacing_m=spacing_m)
+
+    def trajectory(src: Any, epoch: int, seq: int, stamp_s: float) -> bytes:
+        # (N, 7) float32: x y z qx qy qz qw
+        return codec.encode_trajectory(src, epoch=epoch, seq=seq, stamp_s=stamp_s)
+
+    def elevation(src: dict, epoch: int, seq: int, stamp_s: float) -> bytes:
+        # {"x", "y", "z", "confidence", "obstacle_h": 1-D float32, one entry per known cell,
+        #  "origin_xy", "resolution", "width", "height"}
+        height, obstacle, confidence = codec.grid_from_cells(
+            src["x"], src["y"], src["z"], src["confidence"], src["obstacle_h"],
+            origin_xy=src["origin_xy"], resolution=src["resolution"], width=src["width"], height=src["height"],
+        )
+        return codec.encode_elevation(height, obstacle, confidence, epoch=epoch, seq=seq, stamp_s=stamp_s,
+                                      origin_xy=src["origin_xy"], resolution=src["resolution"], max_side=max_side)
+
+    def grid(src: dict, epoch: int, seq: int, stamp_s: float) -> bytes:
+        # {"cells": (H, W) int8, "resolution", "origin_xy", "origin_yaw"}
+        return codec.encode_grid(src["cells"], epoch=epoch, seq=seq, stamp_s=stamp_s, resolution=src["resolution"],
+                                 origin_xy=src["origin_xy"], origin_yaw=src["origin_yaw"])
+
+    def depth(src: dict, epoch: int, seq: int, stamp_s: float) -> bytes:
+        # {"depth_m": (H, W) float32}
+        return codec.encode_depth(src["depth_m"], epoch=epoch, seq=seq, stamp_s=stamp_s, stride=stride,
+                                  max_range_m=max_range_m)
+
+    def camera(src: Any, epoch: int, seq: int, stamp_s: float) -> bytes:
+        # JPEG bytes, served as they are (no prelude: the layer's version is its seq in MapStatus)
+        return bytes(src)
+
+    return {"cloud": cloud, "elevation": elevation, "trajectory": trajectory, "grid": grid, "live": live,
+            "depth": depth, "camera": camera}
+
+
 def create_app(robot: Robot, store: StateStore, goals: GoalRegistry, *, telemetry_hz: float = 5.0,
-               cors_origins: list[str] | None = None) -> FastAPI:
+               cors_origins: list[str] | None = None, maps: MapStore | None = None,
+               cloud_point_budget: int = 500_000, cloud_spacing_m: float = 0.05, elevation_max_side: int = 512,
+               depth_stride: int = 2, depth_max_range_m: float = 8.0) -> FastAPI:
     if not telemetry_hz > 0:
         raise ValueError("telemetry_hz must be > 0")
+    if cloud_point_budget < 0:
+        raise ValueError("cloud_point_budget must be >= 0")
+    if not (math.isfinite(cloud_spacing_m) and cloud_spacing_m > 0):
+        raise ValueError("cloud_spacing_m must be finite and > 0")
+    if elevation_max_side < 1:
+        raise ValueError("elevation_max_side must be >= 1")
+    if depth_stride < 1:
+        raise ValueError("depth_stride must be >= 1")
+    if not (math.isfinite(depth_max_range_m) and depth_max_range_m > 0):
+        raise ValueError("depth_max_range_m must be finite and > 0")
+    encoders = _layer_encoders(point_budget=cloud_point_budget, spacing_m=cloud_spacing_m, max_side=elevation_max_side,
+                               stride=depth_stride, max_range_m=depth_max_range_m)
     app = FastAPI(
         title="UGV operator API",
         version=__version__,
@@ -173,6 +263,20 @@ def create_app(robot: Robot, store: StateStore, goals: GoalRegistry, *, telemetr
             active_goal=_goal_out(active) if active else None,
         )
 
+    def map_view() -> MapStatus:
+        if maps is None:  # no store wired: report "nothing received" under the fixed epoch 0
+            return MapStatus(epoch=0, seq=MapSeq(**{name: 0 for name in MapStore.LAYERS}), stats={})
+        return MapStatus(epoch=maps.epoch, seq=MapSeq(**maps.seqs()), stats=maps.stats())
+
+    def pose_view() -> Pose:
+        sample = store.get(k.TF_MAP_BASE)
+        values = _pose_values(sample.value) if sample else None
+        if sample is None or values is None:  # no transform yet, or the poller stored only a stamp
+            return Pose(available=False, x=None, y=None, z=None, qx=None, qy=None, qz=None, qw=None, age_s=None)
+        x, y, z, qx, qy, qz, qw = values
+        return Pose(available=True, x=x, y=y, z=z, qx=qx, qy=qy, qz=qz, qw=qw,
+                    age_s=sample.age_s(robot.now_ns(), use_stamp=True))  # now - stamp, like the tf watch
+
     # ---- resources ----------------------------------------------------------------------------
     @app.get(f"{PREFIX}/health", response_model=Health, tags=["system"])
     def health() -> Health:
@@ -247,6 +351,45 @@ def create_app(robot: Robot, store: StateStore, goals: GoalRegistry, *, telemetr
             raise Problem(409, "Not cancelable", f"Goal {goal_id} is {rec.state.value} and has no live Nav2 handle yet.")
         return _goal_out(goals.get(goal_id) or rec)
 
+    @app.get(f"{PREFIX}/map", response_model=MapStatus, tags=["map"])
+    def map_status() -> MapStatus:
+        if maps is not None:
+            # The demand heartbeat: only an explicit GET counts. The SSE `map` event must not touch, or an
+            # open sidebar would keep the heavy subscriptions alive with the map view closed.
+            maps.touch(robot.now_ns() / 1e9)
+        return map_view()
+
+    @app.get(f"{PREFIX}/map/pose", response_model=Pose, tags=["map"])
+    def map_pose() -> Pose:
+        return pose_view()
+
+    def add_layer_route(layer: str) -> None:
+        encode = encoders[layer]
+        media = JPEG if layer == "camera" else OCTET
+
+        def get_layer() -> Response:
+            if maps is None:
+                raise Problem(503, "Map layers unavailable", "This gateway was started without a map store.")
+            try:
+                body = maps.blob(layer, encode)  # encodes once per seq, on this threadpool thread
+            except Exception as exc:  # a source the codec rejects is a gateway bug: say so, keep the traceback
+                logger.exception("could not encode the %s layer", layer)
+                raise Problem(500, "Layer encoding failed", f"The {layer} layer could not be encoded: {exc}") from exc
+            if body is None:
+                raise Problem(503, "No data yet", f"The {layer} layer has not received any data yet.")
+            return Response(body, media_type=media, headers={"Cache-Control": "no-store"})
+
+        app.get(
+            f"{PREFIX}/map/{layer}", name=f"map_{layer}", tags=["map"], response_class=Response,
+            responses={
+                200: {"content": {media: {"schema": {"type": "string", "format": "binary"}}}},
+                503: {"content": {PROBLEM: {}}, "description": "No data for this layer yet"},
+            },
+        )(get_layer)
+
+    for layer_name in MapStore.LAYERS:
+        add_layer_route(layer_name)
+
     @app.get(f"{PREFIX}/telemetry/stream", tags=["telemetry"],
              responses={200: {"content": {"text/event-stream": {}}}})
     async def telemetry(request: Request) -> StreamingResponse:
@@ -258,6 +401,7 @@ def create_app(robot: Robot, store: StateStore, goals: GoalRegistry, *, telemetr
                 views = {
                     "safety": safety_view, "command": command_view,
                     "localization": localization_view, "navigation": navigation_view,
+                    "map": map_view, "pose": pose_view,
                 }
                 for name, view in views.items():
                     data = json.dumps(view().model_dump(mode="json", by_alias=True), separators=(",", ":"))

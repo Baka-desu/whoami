@@ -3,15 +3,20 @@
     ros2 launch ugv_localization localization.launch.py mode:=mapping profile:=sim
     ros2 launch ugv_localization localization.launch.py mode:=localize profile:=sim odom_source:=auto
     ros2 launch ugv_localization localization.launch.py mode:=mapping fresh_db:=true   # visual odometry only
+    ros2 launch ugv_localization localization.launch.py map_assembler:=false   # no 3D map for the viewer
 
 Nodes:
   cloud_to_depth Dev 1 DA3 cloud + CameraInfo → /rtabmap/depth/image      (depth_input:=cloud, fallback only)
   rgbd_sync      camera RGB + depth image + CameraInfo → /rtabmap/rgbd_image (exact stamps)
   rgbd_odometry  visual odometry on rgbd_image → /rtabmap/odom_visual   (odom_source auto|visual)
   odom_selector  wheel | visual | auto → /odom + TF odom->base_link     (the only publisher)
-  rtabmap        RGB-D SLAM → TF map->odom, /map (occupancy from depth), /rtabmap/info
+  rtabmap        RGB-D SLAM → TF map->odom, /map (occupancy from depth), /rtabmap/info, mapPath, mapData
+  map_assembler  /rtabmap/mapData → /rtabmap/cloud_map (the 3D map, assembled outside the SLAM step);
+                 map_assembler:=false leaves it out: then nothing publishes /rtabmap/cloud_map at all (the web
+                 viewer's cloud layer stays empty) and its memory (it keeps every node's data) is not spent
   pose_validity  /ugv/pose_valid heartbeat
   distance_tracker /ugv/localization/distance_travelled (odometry estimate) + distance_basis label
+  map_stats      /ugv/map/stats JSON (keyframes, loop closures, path length, db size, calibration placeholder)
 
 TF chain owned here (mindmap D6). Camera driver + /wheel/odom come from Dev 5 bringup; DA3 depth
 comes from Dev 1 perception as a 32FC1 depth image on /perception/depth/image (depth_input:=image,
@@ -41,6 +46,8 @@ _ODOM_VISUAL = "/rtabmap/odom_visual"
 _ODOM_INFO = "/rtabmap/odom_info"
 _DEPTH_FROM_CLOUD = "/rtabmap/depth/image"
 _DEPTH_INPUTS = ("cloud", "image")
+_CLOUD_MAP = "/rtabmap/cloud_map"  # the viewer's 3D map, from map_assembler
+_SLAM_CLOUD_MAP = "/rtabmap/slam/cloud_map"  # rtabmap's own copy, moved out of the way
 
 
 def _to_bool(text: str, name: str) -> bool:
@@ -83,12 +90,13 @@ def _setup(context, *args, **kwargs):
     depth_topic = _DEPTH_FROM_CLOUD if depth_input == "cloud" else arg("depth_topic")
     depth_src = arg("depth_cloud_topic") if depth_input == "cloud" else depth_topic
     common = {"use_sim_time": use_sim_time}
+    with_assembler = _to_bool(arg("map_assembler"), "map_assembler")
 
     actions = [
         LogInfo(
             msg=f"[ugv_localization] profile={profile} mode={mode.value} odom_source={policy.value} "
             f"db={plan.database_path} fresh={bool(plan.rtabmap_args)} use_sim_time={use_sim_time} "
-            f"depth_input={depth_input} ({depth_src})"
+            f"depth_input={depth_input} ({depth_src}) map_assembler={with_assembler}"
         ),
     ]
     if depth_input == "cloud":
@@ -176,8 +184,32 @@ def _setup(context, *args, **kwargs):
                 ("odom", "/odom"),
                 ("odom_info", _ODOM_INFO),
                 ("map", "/map"),
+                # Its own cloud_map is assembled inside the SLAM step: never subscribe this one (map_assembler serves the real one)
+                ("cloud_map", _SLAM_CLOUD_MAP),
             ],
         ),
+    ]
+    if with_assembler:
+        # The 3D map for the viewer, assembled in its own process from /rtabmap/mapData (Task 8 review I1). rtabmap builds
+        # cloud_map inside its SLAM callback, and the first step after a late subscriber (the gateway, on demand) attaches
+        # assembles the whole map: 0.17-0.35 s at 275-415 nodes, growing with the map (docs/mapping/baseline.md "Task 8 fix
+        # round 1"). Same Grid/* and map params as rtabmap (the YAML is /**); its other map topics stay under
+        # /rtabmap/assembler/. map_cleanup false: its cache survives the viewer closing, so a re-attach adds only the new
+        # nodes (0.2-0.4 s instead of 1.7-3.0 s) and its depth-1 mapData subscription drops nothing meanwhile. true would not
+        # bound memory: the peak while a viewer is open is the same (~2 MB/node at 640x480) and grows with the map either
+        # way (baseline.md "Final review I2"); for a long mission use map_assembler:=false (docs/mapping/README.md).
+        actions.append(
+            Node(
+                package="rtabmap_util",
+                executable="map_assembler",
+                name="map_assembler",
+                namespace="rtabmap/assembler",
+                output="screen",
+                parameters=[os.path.join(cfg, "rtabmap_rgbd.yaml"), {**common, "rtabmap": "/rtabmap/rtabmap", "map_cleanup": False}],
+                remappings=[("mapData", "/rtabmap/mapData"), ("cloud_map", _CLOUD_MAP)],
+            )
+        )
+    actions += [
         Node(
             package="ugv_localization",
             executable="pose_validity_node",
@@ -205,6 +237,20 @@ def _setup(context, *args, **kwargs):
             parameters=[{**common, "profile_path": os.path.join(cfg, "distance.yaml")}],
             remappings=[("odom", "/odom")],
         ),
+        Node(
+            package="ugv_localization",
+            executable="map_stats_node",
+            name="map_stats",
+            output="screen",
+            parameters=[
+                {
+                    **common,
+                    "mode": plan.mode.value,
+                    "database_path": plan.database_path,
+                    "calibration_file": arg("calibration_file"),
+                }
+            ],
+        ),
     ]
     return actions
 
@@ -220,7 +266,18 @@ def generate_launch_description() -> LaunchDescription:
             ),
             DeclareLaunchArgument("database_path", default_value="~/.ros/ugv/rtabmap.db"),
             DeclareLaunchArgument("timing", default_value="default"),
+            DeclareLaunchArgument(
+                "calibration_file",
+                default_value="",
+                description="camera calibration YAML in use; only its `placeholder` flag is read, for /ugv/map/stats ('' = none)",
+            ),
             DeclareLaunchArgument("fresh_db", default_value="false", description="mapping only: delete db at start"),
+            DeclareLaunchArgument(
+                "map_assembler",
+                default_value="true",
+                description="true: map_assembler serves /rtabmap/cloud_map to the web viewer | false: no /rtabmap/cloud_map "
+                "at all (saves the assembler's memory on a long mission; SLAM, TF and pose validity are unchanged)",
+            ),
             DeclareLaunchArgument("profile", default_value="live_cam", description="live_cam | sim | bag"),
             DeclareLaunchArgument("use_sim_time", default_value="auto", description="auto = from profile"),
             # Topic names pending Dev 5 / Dev 1 confirmation (docs/localization/interfaces.md).
