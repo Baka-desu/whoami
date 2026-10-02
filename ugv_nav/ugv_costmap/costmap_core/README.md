@@ -128,9 +128,9 @@ Dev 3 configuration, not upstream inputs.
 | Input | Status |
 |---|---|
 | Semantic mask | **Available from Dev 1 (code)**: `/segmentation/mask`, `sensor_msgs/Image`, mono8, `{0,1,2}`, header stamp = image time, header frame_id = optical frame. The contract fields mirror this. |
-| Mask validity | **Available from Dev 1 (code)**: `valid` / `age` / `scale` on `/segmentation/port_meta`. Dev 1 publishes this as `Float64MultiArray` until its `PortMeta.msg` is compiled. Dev 1 only publishes a mask when it is valid. |
+| Mask validity | **Available from Dev 1 (code)**: Dev 1 only publishes a mask when it is valid, so the ROS node judges each mask by its own stamp age. `/segmentation/port_meta` (`[valid, age, scale]`, no stamp) is not used by Dev 3. |
 | Mask resolution | Dev 1 v1 port enforces `scale == 1.0` (mask size equals source image size). The contract's mask-size-equals-intrinsics-size check relies on this. |
-| CameraInfo topic | **Available as a pipe, not as values**: Dev 1 republishes the last received CameraInfo on `/segmentation/camera_info`. Dev 1 checks only that its `frame_id` matches the mask and that `K` is not a placeholder. |
+| CameraInfo topic | Dev 3 reads the driver's `/camera/camera_info` (Dev 5) and refuses a mask whose frame or size differs from it. |
 | Costmap cost semantics | Available: Dev 3 `class_to_cost`, `geometry_costmap`, `costmap_fusion`. |
 
 ## D. Temporary or synthetic inputs

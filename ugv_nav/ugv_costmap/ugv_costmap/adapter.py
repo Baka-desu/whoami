@@ -55,6 +55,16 @@ def pool_mask(classes: np.ndarray, factor: int) -> np.ndarray:
     return _CLASS_OF_RANK[ranks]
 
 
+def mask_is_fresh(now_ns: int, stamp_ns: int, max_age_s: float) -> bool:
+    """A mask is current only if its own stamp is 0..max_age_s old (architecture §8.4: the consumer rejects by age).
+
+    Validity is bound to the sample: Dev 1 publishes a mask only when it is valid, so the mask stamp is all a
+    consumer needs. A future stamp is refused like a stale one, the same rule as Dev 1's freshness check.
+    """
+    age_ns = now_ns - stamp_ns
+    return 0 <= age_ns <= max_age_s * 1e9
+
+
 def scale_intrinsics(fx: float, fy: float, cx: float, cy: float, factor: int) -> CameraIntrinsics:
     """Intrinsics of the pooled image: pooled pixel (u', v') is the centre of block k*u' .. k*u'+k-1."""
     half = (factor - 1) / 2.0

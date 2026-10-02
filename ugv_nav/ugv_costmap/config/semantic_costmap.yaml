@@ -2,7 +2,7 @@
 semantic_costmap:
   ros__parameters:
     robot_frame: base_link           # grid frame; base_link sits on the ground plane (z = 0)
-    camera_info_topic: /camera/camera_info
+    camera_info_topic: /camera/camera_info   # the driver's (Dev 5) CameraInfo; must match the mask frame and size
     output_topic: /semantic_costmap/grid
     resolution: 0.1                  # m/cell, same as the Nav2 costmaps
     max_range: 6.0                   # m ahead of the camera projected into the grid
@@ -12,5 +12,6 @@ semantic_costmap:
     mask_downsample: 4
     # Observed class 0 (unknown) -> OccupancyGrid value. Never free (architecture §8.1); 50 -> Nav2 cost ~127.
     unknown_occupancy: 50
-    # No valid mask for this long -> field of view published lethal (§8.4, §8.6). Same as Dev 1 perception_max_age.
+    # Mask stamp older than this (or no mask for this long) -> field of view published lethal (§8.4, §8.6).
+    # Same as Dev 1 perception_max_age.
     max_mask_age_s: 0.5
