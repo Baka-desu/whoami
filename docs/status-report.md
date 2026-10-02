@@ -48,7 +48,7 @@ Windows webcam ─► webcam_stream.py (MJPEG :8090)
 | Robot description (Dev 5) | `ugv_nav/ugv_robot_description` | Camera mount from launch args (z 0.97 m, pitch 0 for a laptop on a desk). |
 | Perception (Dev 1) | `turing/src/ugv_perception` (plain Python, not colcon) | Working: RUGD mask + DA3 depth on CUDA. |
 | Localization (Dev 2) | `ugv_nav/ugv_localization` | Runs, but `pose_valid` often false (odometry ~1 Hz, `rgbd_sync` pairing). Laptop timing profiles added. |
-| Semantic costmap (Dev 3) | `ugv_navigation/ugv_costmap` | New node: 0.1 m grid, 6 m ahead, ±4 m wide, stale mask (>0.5 s) -> FOV lethal. |
+| Semantic costmap (Dev 3) | `ugv_nav/ugv_costmap` | New node: 0.1 m grid, 6 m ahead, ±4 m wide, stale mask (>0.5 s) -> FOV lethal. |
 | Nav2 (Dev 4) | `src/ugv_navigation` | Launched; footprint is a Jackal-size placeholder. |
 | Safety arbiter (Dev 5) | `ugv_nav/ugv_safety` | Sole `/cmd_vel` publisher; e-stop latches across restarts. |
 | Operator API (Dev 5) | `ugv_nav/ugv_api` (new) | HTTP gateway + SSE telemetry for `ui/`. |

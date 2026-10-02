@@ -1,17 +1,9 @@
-# LAPTOP timing profile (localization.launch.py timing:=laptop). Copy of rgbd_sync.yaml: reliable QoS and a
-# deeper per-topic queue. Best effort lost raw 640x480 frames, so DA3 depth (stamped with that frame,
-# arriving ~0.7 s later) found no exact RGB match and odometry stalled for seconds. Dev 5's driver is reliable.
-# rtabmap_sync/rgbd_sync — camera RGB + DA3 depth + CameraInfo → one rtabmap_msgs/RGBDImage.
-# Dev 1 stamps depth with the SOURCE image stamp (interfaces.md "Depth input"), so exact sync is
-# correct; approx sync would silently pair depth with the wrong frame.
-# RGB arrives at camera rate, depth only at DA3 rate and DA3-latency later: the queue must hold
-# at least ~1 s of camera frames or pairs are lost. Names verified on rtabmap_ros 0.23.7 / Lyrical.
+# LAPTOP timing overlay on rgbd_sync.yaml (localization.launch.py timing:=laptop; launch passes
+# [rgbd_sync.yaml, this file], later wins). Best effort lost raw 640x480 frames, so DA3 depth (stamped with that
+# frame, arriving ~0.7 s later) found no exact RGB match and odometry stalled for seconds. Dev 5's camera driver
+# publishes reliable, so the laptop subscribes reliable with a deeper per-topic queue.
 /**:
   ros__parameters:
-    approx_sync: false
-    sync_queue_size: 30         # ≥ camera fps × DA3 latency (s), with margin
     topic_queue_size: 30
-    # Best-effort subscriptions connect to BOTH reliable and best-effort publishers (a reliable
-    # subscriber silently never connects to a best-effort camera driver / bridge).
-    qos: 1                      # images: 0 = system default, 1 = reliable, 2 = best effort
-    qos_camera_info: 1          # needs CameraInfo per frame with the image stamp (not latched once)
+    qos: 1                      # reliable inputs (matches Dev 5's reliable driver; would not connect to a best-effort one)
+    qos_camera_info: 1          # reliable CameraInfo per frame

@@ -7,7 +7,7 @@ map (see "Map view" below). The operator controls and status sit in two sidebars
 | Where | What | Source |
 |---|---|---|
 | Centre | Camera + mask / depth / path overlay, freshness banners, layer toggles | rosbridge (read only) |
-| Left sidebar | E-stop (§3.1 level 1) | `PUT /api/v1/safety/e-stop` |
+| Left sidebar | E-stop (§3.1 level 1) | `PUT /api/v1/safety/e-stop` (needs `ugv_api`; fallback below) |
 | Left sidebar | Mapping / localize mode (§10) | `PUT /api/v1/localization/mode` |
 | Left sidebar | Map-frame NavigateToPose goal (§10, §11) | `POST /api/v1/navigation/goals`, `DELETE …/{id}` |
 | Left sidebar | Camera source: robot camera (default), browser camera, photo upload | rosbridge / browser |
@@ -55,7 +55,10 @@ Start the gateway with `ros2 launch ugv_api api.launch.py` (package `ugv_nav/ugv
 
 ## Rules it keeps
 
-- **Commands only through Dev 5's gateway.** E-stop, mode and goals go to `/api/v1`. The map view is read-only GETs
+- **Commands only through Dev 5's gateway.** E-stop, mode and goals go to `/api/v1`. So the console's e-stop
+  works only while `ugv_api` runs; without it, assert the e-stop from any shell on the robot's ROS domain:
+  `ros2 topic pub --once /ugv/e_stop std_msgs/msg/Bool "{data: true}"` (the safety arbiter listens to every
+  publisher; release with `false`). The map view is read-only GETs
   against the same gateway (the guard in `source/api.test.ts` is narrowed to costmap topic names). rosbridge is confined to the
   read-only camera view (`CameraView`, `Viewport`, `Inspector`, `SourcePanel`, `source/rosbridge.ts`,
   `source/useCameraSource.ts`, `analysis/`). A test (`src/source/api.test.ts`) fails if any other file touches

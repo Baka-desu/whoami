@@ -203,8 +203,12 @@ class PerceptionAdapterNode(Node):
             self._inferred_stamp = self._last_image.stamp_ns
 
     def _publish_depth(self, frame: ImageFrame | None) -> None:
-        """After the mask, on the frame the cycle already decoded. Failure publishes no cloud and does not touch
-        degraded."""
+        """After the mask, on the frame the cycle already decoded.
+
+        A failure publishes no depth image or cloud for that frame. It is counted (metrics.depth_errors) and logged
+        on the first failure and every 100th after. It does not touch perception_degraded, which is the
+        segmentation port's flag (architecture §8.4): Dev 2 holds on missing depth (depth_stale -> /ugv/pose_valid
+        false -> safety hold, §10.1)."""
         if self._depth is None or frame is None or self._last_info is None:
             return
         try:
@@ -219,8 +223,11 @@ class PerceptionAdapterNode(Node):
                 self._pub_cloud.publish(
                     points_to_cloud(points, frame.stamp_ns, frame.frame_id)
                 )
-        except Exception:
-            return
+        except Exception as exc:  # any backend failure; the frame's mask is already out
+            self.metrics.depth_errors += 1
+            n = self.metrics.depth_errors
+            if n == 1 or n % 100 == 0:
+                self.get_logger().warning(f"depth failed ({n} so far), no depth for this frame: {exc!r}")
 
     def _watchdog_loop(self, period_s: float) -> None:
         max_age = float(self._fresh.perception_max_age)

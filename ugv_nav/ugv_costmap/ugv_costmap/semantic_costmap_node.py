@@ -2,17 +2,20 @@
 
     ros2 run ugv_costmap semantic_costmap_node --ros-args --params-file config/semantic_costmap.yaml
 
-Runs costmap_core's pipeline (mask -> ground projection -> semantic costmap) on every valid mask and
+Runs costmap_core's pipeline (mask -> ground projection -> semantic costmap) on every current mask and
 publishes the result in the robot frame. Nav2's global and local costmaps read it with a StaticLayer
 (src/ugv_navigation/config/costmaps.yaml) and add the Depth Anything geometry with a VoxelLayer whose
 Max combination keeps geometry lethal over semantic traversable (architecture §9).
 
-Inputs:  /segmentation/mask (mono8 {0,1,2}), /segmentation/port_meta ([valid, age, scale]),
-         camera_info_topic (K), TF robot_frame <- mask frame (the static camera mount).
+Inputs:  /segmentation/mask (mono8 {0,1,2}), camera_info_topic (K; the driver's /camera/camera_info),
+         TF robot_frame <- mask frame (the static camera mount).
+         Dev 1 publishes a mask only when it is valid, so validity is judged on the mask itself (its stamp age),
+         not on /segmentation/port_meta: that topic carries no stamp and arrives after its mask, so pairing it
+         would judge each mask by the previous frame's flag.
 Output:  output_topic, frame robot_frame, stamp = mask stamp, reliable + transient local.
 
-Fail-safe (architecture §8.6): an invalid mask, or no mask for longer than max_mask_age_s, publishes the
-camera's whole field of view as lethal. Unseen cells are -1 (unknown); observed class 0 is
+Fail-safe (architecture §8.4, §8.6): a mask whose stamp is older than max_mask_age_s (or in the future), or no
+mask for longer than max_mask_age_s, publishes the camera's whole field of view as lethal. Unseen cells are -1 (unknown); observed class 0 is
 `unknown_occupancy` (never free).
 """
 
@@ -29,7 +32,6 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.time import Time
 from sensor_msgs.msg import CameraInfo, Image
-from std_msgs.msg import Float64MultiArray
 from tf2_ros import Buffer, TransformException, TransformListener
 
 from costmap_core.contracts import (
@@ -39,7 +41,7 @@ from costmap_core.grid import CostmapGridGeometry
 from costmap_core.mask_projection import project_mask_to_costmap
 from costmap_core.pipeline import run_costmap_pipeline
 from ugv_costmap.adapter import (
-    AdapterError, all_traversable, costs_to_occupancy, front_roi_lethal, mount_from_tf, pool_mask,
+    AdapterError, all_traversable, costs_to_occupancy, front_roi_lethal, mask_is_fresh, mount_from_tf, pool_mask,
     scale_intrinsics,
 )
 
@@ -70,14 +72,12 @@ class SemanticCostmapNode(Node):
         self._lock = threading.Lock()
         self._busy = threading.Lock()
         self._info: CameraInfo | None = None
-        self._valid = False
         self._model = None  # (key, intrinsics, mount, grid, coverage), rebuilt only if camera or mount change
         self._last_good_ns = 0
         self._failsafe_sent = False
 
         self._pub = self.create_publisher(OccupancyGrid, self._out_topic, _latched())
         self.create_subscription(CameraInfo, info_topic, self._on_info, _latched())
-        self.create_subscription(Float64MultiArray, "/segmentation/port_meta", self._on_meta, 10)
         self.create_subscription(Image, "/segmentation/mask", self._on_mask, 1)
         self.create_timer(0.1, self._watchdog)
         self.get_logger().info(
@@ -89,10 +89,6 @@ class SemanticCostmapNode(Node):
     def _on_info(self, msg: CameraInfo) -> None:
         with self._lock:
             self._info = msg
-
-    def _on_meta(self, msg: Float64MultiArray) -> None:
-        with self._lock:
-            self._valid = len(msg.data) > 0 and msg.data[0] >= 0.5
 
     def _on_mask(self, msg: Image) -> None:
         if not self._busy.acquire(blocking=False):
@@ -150,14 +146,14 @@ class SemanticCostmapNode(Node):
             raise AdapterError(f"mask encoding {msg.encoding!r}, expected mono8")
         classes = np.frombuffer(bytes(msg.data), dtype=np.uint8).reshape(msg.height, msg.step)[:, : msg.width]
         _, intr, mount, grid, coverage = self._camera_model(msg.header.frame_id, (msg.height, msg.width))
-        with self._lock:
-            valid = self._valid
-        if not valid:
-            self._publish(front_roi_lethal(coverage), msg.header.stamp, mount)
-            self.get_logger().warning("port_meta valid=false: field of view published lethal",
-                                   throttle_duration_sec=5.0)
-            return
         stamp_ns = Time.from_msg(msg.header.stamp).nanoseconds
+        now_ns = self.get_clock().now().nanoseconds
+        if not mask_is_fresh(now_ns, stamp_ns, self._max_age):
+            self._publish(front_roi_lethal(coverage), msg.header.stamp, mount)
+            self.get_logger().warning(
+                f"mask stamp {(now_ns - stamp_ns) / 1e9:.3f} s old (limit {self._max_age:g} s): field of view "
+                "published lethal", throttle_duration_sec=5.0)
+            return
         inputs = CostmapCoreInputs(
             mask=SemanticMaskInput(classes=pool_mask(classes, self._factor), stamp_ns=stamp_ns,
                                    frame_id=msg.header.frame_id, valid=True),

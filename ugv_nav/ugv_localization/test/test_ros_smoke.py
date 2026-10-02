@@ -87,10 +87,13 @@ def test_s4_launch_nodes_per_odom_source(odom_source: str, expect_vo: bool, dept
             "depth_cloud_topic": "/perception/depth_cloud",
             "depth_topic": "/camera/depth/image_raw",
             "wheel_odom_topic": "/wheel/odom",
+            "timing": "default",
+            "map_assembler": "false",
+            "calibration_file": "",
         }
     )
     execs = [a.node_executable for a in mod._setup(ctx) if isinstance(a, Node)]
-    expected = {"rgbd_sync", "odom_selector", "rtabmap", "pose_validity_node", "distance_tracker"}
+    expected = {"rgbd_sync", "odom_selector", "rtabmap", "pose_validity_node", "distance_tracker", "map_stats_node"}
     expected |= {"rgbd_odometry"} if expect_vo else set()
     expected |= {"pointcloud_to_depthimage"} if depth_input == "cloud" else set()
     assert set(execs) == expected

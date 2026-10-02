@@ -7,8 +7,8 @@ import pytest
 
 from costmap_core.projection import CameraIntrinsics, project_pixel_to_ground
 from ugv_costmap.adapter import (
-    OCC_FREE, OCC_LETHAL, OCC_UNKNOWN, AdapterError, costs_to_occupancy, front_roi_lethal, mount_from_tf,
-    pool_mask, scale_intrinsics,
+    OCC_FREE, OCC_LETHAL, OCC_UNKNOWN, AdapterError, costs_to_occupancy, front_roi_lethal, mask_is_fresh,
+    mount_from_tf, pool_mask, scale_intrinsics,
 )
 
 UNKNOWN, TRAV, HAZARD = 0, 1, 2
@@ -86,3 +86,9 @@ def test_unknown_occupancy_must_be_neither_free_nor_lethal(bad):
 def test_failsafe_marks_field_of_view_lethal():
     cov = np.array([[True, False]])
     assert front_roi_lethal(cov).tolist() == [[OCC_LETHAL, OCC_UNKNOWN]]
+
+
+@pytest.mark.parametrize("age_s, fresh", [(0.0, True), (0.3, True), (0.5, True), (0.51, False), (-0.01, False)])
+def test_mask_freshness_is_judged_on_its_own_stamp(age_s, fresh):
+    now_ns = 100_000_000_000
+    assert mask_is_fresh(now_ns, now_ns - int(age_s * 1e9), 0.5) is fresh

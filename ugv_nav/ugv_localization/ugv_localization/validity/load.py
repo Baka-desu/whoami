@@ -6,7 +6,7 @@ from dataclasses import fields
 from pathlib import Path
 
 from ugv_localization.common.checks import require_bool, require_positive_float
-from ugv_localization.common.yamlio import load_yaml_mapping, require_exact_keys
+from ugv_localization.common.yamlio import load_yaml_profile, require_exact_keys
 from ugv_localization.validity.monitor import ValidityProfile
 
 # Thresholds where 0.0 is a meaningful value (disabled / no hysteresis / no future tolerance).
@@ -15,8 +15,8 @@ _FRACTIONS = {"min_depth_coverage"}  # (0.0, 1.0]
 _BOOLS = {"dead_reckon_in_mapping"}
 
 
-def load_validity_profile(path: str | Path) -> ValidityProfile:
-    data = load_yaml_mapping(path)
+def load_validity_profile(path: str | Path, overlay_path: str | Path | None = None) -> ValidityProfile:
+    data = load_yaml_profile(path, overlay_path)
     names = {f.name for f in fields(ValidityProfile)}
     require_exact_keys(data, names, where=str(path))
     kwargs: dict[str, object] = {}

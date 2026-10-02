@@ -20,7 +20,7 @@ phone camera -> tunnel -> ugv_bringup camera driver -- /camera/image_raw + /came
                                          v                                                                |
         RTAB-Map (rgbd, Grid/3D true): TF map->odom, /rtabmap/info, /rtabmap/mapPath, /rtabmap/mapGraph, /rtabmap/mapData
                                          |                                   |
-                                         |        map_assembler (own process, map_assembler:=true default):
+                                         |        map_assembler (own process, opt-in map_assembler:=true):
                                          |        /rtabmap/mapData -> /rtabmap/cloud_map
                                          |
         map_stats node (reads /rtabmap/mapGraph only) -> /ugv/map/stats
@@ -31,7 +31,8 @@ phone camera -> tunnel -> ugv_bringup camera driver -- /camera/image_raw + /came
 
 RTAB-Map is the only fusion engine. The gateway and UI add no mapping; they reshape what RTAB-Map (through its
 `map_assembler`), perception and Nav2's global costmap already publish. `rtabmap` builds `mapPath` only while something
-subscribes; `mapData` is built every SLAM step because `map_assembler` subscribes it for the whole run. `map_assembler`
+subscribes; with `map_assembler:=true`, `mapData` is built every SLAM step because `map_assembler` subscribes it for the
+whole run. `map_assembler` is off by default (D24): the 3D map view's cloud layer needs `map_assembler:=true`. It
 publishes `cloud_map` only while something subscribes. The gateway subscribes to the heavy topics (those marked "on
 demand" below) only while a client keeps calling `GET /api/v1/map`.
 
@@ -44,7 +45,7 @@ demand" below) only while a client keeps calling `GET /api/v1/map`.
 | `/rtabmap/mapGraph` | `rtabmap_msgs/MapGraph` | `rtabmap` | `map_stats` | cheap, transient local |
 | `/rtabmap/mapData` | `rtabmap_msgs/MapData` | `rtabmap` | `map_assembler`, always (while it runs) | every SLAM step: the new node's data and the graph. Also the input a future elevation mapper would use (not built); contract in `ugv_nav/docs/localization/interfaces.md` |
 | `/ugv/map/stats` | `std_msgs/String` (JSON) | `map_stats` (`ugv_localization`) | gateway, always on | `keyframes`, `loop_closures` (distinct closure-type graph links; rtabmap's closure constraints, not "returns to a known place": it rises roughly with the node count while driving, even with no revisit, and does not grow while parked), `path_length_m`, `db_bytes`, `last_update_age_s` (null before the first graph and in `localize` mode), `mode`, `calibration_placeholder` |
-| `/perception/depth/image` | `sensor_msgs/Image` 32FC1 | Dev 1 perception | RTAB-Map, UI camera view | published for every processed frame, not only when a mask is published (D14) |
+| `/perception/depth/image` | `sensor_msgs/Image` 32FC1 | Dev 1 perception | RTAB-Map, UI camera view | published after each published mask, on the same decoded frame (D14 deferred, D21). A depth failure publishes nothing for that frame, is counted and logged by perception, and Dev 2 holds on `depth_stale` (D23) |
 | `/perception/depth_cloud` | `sensor_msgs/PointCloud2` | Dev 1 perception | gateway (on demand), Nav2 VoxelLayer | the live cloud layer; the gateway does not back-project depth itself |
 | `/global_costmap/costmap` | `nav_msgs/OccupancyGrid` | Nav2 | gateway (on demand) | the cost grid layer, display only |
 | `/image_raw/compressed` | `sensor_msgs/CompressedImage` | camera driver | UI camera view (read only) | also drawn in the map view's camera panel; the gateway does not carry it |
@@ -103,7 +104,7 @@ gateway's input thread is gone).
 Drive the loop, then stop the stack: the database is saved at `~/.ros/ugv/rtabmap.db` (override with `database_path`). To
 localize on it, relaunch with `mode:=localize`. The localization stack alone:
 `ros2 launch ugv_localization localization.launch.py mode:=mapping|localize` (`fresh_db:=true` starts an empty database).
-Map assembly runs outside the SLAM step: `rtabmap_util/map_assembler` (`/rtabmap/assembler/map_assembler`, started by `localization.launch.py`) builds the whole cloud from `/rtabmap/mapData` and publishes `/rtabmap/cloud_map`. rtabmap's own cloud goes to `/rtabmap/slam/cloud_map`, which nothing should subscribe, so opening the viewer does not load the SLAM loop. Known limits (numbers in `docs/mapping/baseline.md`, section "Task 8 fix round 1"): the first open of the map view takes about 1.4-2.9 s for the first cloud (about 5 ms per node); a few nodes (1-3 per run) can be missing from the viewer cloud (map_assembler's `mapData` queue depth is 1, upstream); map_assembler memory grows with the map and is never given back (next section). `map_assembler:=false` (on `localization.launch.py` or `bringup.launch.py`) does not start it: there is then no `/rtabmap/cloud_map` at all, the viewer's cloud layer stays at "no map yet", and everything else (SLAM, TF, pose validity, trajectory, live scan, stats) is unchanged.
+Map assembly runs outside the SLAM step: `rtabmap_util/map_assembler` (`/rtabmap/assembler/map_assembler`, started by `localization.launch.py`) builds the whole cloud from `/rtabmap/mapData` and publishes `/rtabmap/cloud_map`. rtabmap's own cloud goes to `/rtabmap/slam/cloud_map`, which nothing should subscribe, so opening the viewer does not load the SLAM loop. Known limits (numbers in `docs/mapping/baseline.md`, section "Task 8 fix round 1"): the first open of the map view takes about 1.4-2.9 s for the first cloud (about 5 ms per node); a few nodes (1-3 per run) can be missing from the viewer cloud (map_assembler's `mapData` queue depth is 1, upstream); map_assembler memory grows with the map and is never given back (next section). It runs only with `map_assembler:=true` (on `localization.launch.py` or `bringup.launch.py`; off by default, D24). Without it there is no `/rtabmap/cloud_map` at all, the viewer's cloud layer stays at "no map yet", and everything else (SLAM, TF, pose validity, trajectory, live scan, stats) is unchanged.
 
 ### Memory and mission length
 
@@ -130,11 +131,11 @@ work stayed at 3-5 ms per step after every attach).
 SegFormer-B5 in PyTorch), Nav2, the gateway and the rest of the stack share the same 12 GB and were not measured here; keep
 about 6 GB for them, which leaves about 6 GB for rtabmap and map_assembler:
 
-- **With the map view (default):** up to about 1500 graph nodes (about 5.7 GB for the two). RTAB-Map adds at most 2 nodes per
+- **With the map view (`map_assembler:=true`):** up to about 1500 graph nodes (about 5.7 GB for the two). RTAB-Map adds at most 2 nodes per
   second (`Rtabmap/DetectionRate`) and only while the robot moves (`RGBD/LinearUpdate` 0.1 m or `RGBD/AngularUpdate` 0.1 rad since the last node), so
   that is about **12 minutes of continuous driving** at the worst-case 2 nodes/s; slower driving or stops last longer. Watch
   `keyframes` in the statistics widget.
-- **Longer missions:** `map_assembler:=false`: up to about 4000 nodes (about 5.9 GB), about **30 minutes of continuous driving**
+- **Longer missions (default, `map_assembler:=false`):** up to about 4000 nodes (about 5.9 GB), about **30 minutes of continuous driving**
   at 2 nodes/s. The map is still built and saved in the database; view it afterwards from `mode:=localize`.
 - Past that the processes reach swap and slow down, and an out-of-memory kill of rtabmap ends the mission safely (SLAM stale
   -> pose invalid -> safety hold) but ends it.
@@ -164,7 +165,7 @@ npm run build`; in the container `colcon test --packages-select ugv_localization
 - **Stamps are arrival time minus `transport_latency_s`** for a network camera, not exposure time (mindmap D10).
 - **A mask is held up to about 0.58 s** against the 0.5 s limit (owner decision below).
 - **Memory bounds the mission length.** rtabmap and map_assembler grow with every graph node and give nothing back: about
-  12 minutes of continuous driving with the map view, about 30 with `map_assembler:=false` ("Memory and mission length").
+  12 minutes of continuous driving with the map view (`map_assembler:=true`), about 30 without (the default) ("Memory and mission length").
 - **Display only.** Not a Nav2 input, not a safety input; elevation into Nav2 needs its own §9 decision.
 
 ## Pending owner runs

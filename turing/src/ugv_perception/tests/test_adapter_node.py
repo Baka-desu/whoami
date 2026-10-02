@@ -122,3 +122,40 @@ def test_one_decode_per_frame_feeds_segmentation_and_depth(monkeypatch: pytest.M
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
+
+
+def test_depth_failure_is_counted_and_warned_and_leaves_the_mask_alone() -> None:
+    """A DA3 failure publishes no depth but is not silent: counted, logged once, every 100th after.
+
+    perception_degraded stays the segmentation port's flag (§8.4); the hold comes from Dev 2's depth_stale."""
+
+    from ugv_perception.node.cycle import decode_cycle_frame
+
+    class _BrokenDepth:
+        def maps(self, rgb, k):
+            raise RuntimeError("DA3 exploded")
+
+    rclpy.init()
+    spy = SpyAdapter()
+    node = PerceptionAdapterNode(
+        adapter=spy, adapter_id="yoloe", now_ns_fn=lambda: _STAMP + 100_000_000, depth=_BrokenDepth()
+    )
+    warnings: list[str] = []
+    node.get_logger().warning = lambda msg, **kw: warnings.append(msg)  # type: ignore[method-assign]
+    try:
+        img, info = _msgs()
+        node._on_info(info)
+        node._on_image(img)
+        assert node.metrics.masks_published == 1, "the mask still goes out"
+        assert node.metrics.depth_errors == 1
+        assert node.metrics.degraded_true == 0, "depth failure does not touch perception_degraded"
+        assert len(warnings) == 1 and "DA3 exploded" in warnings[0]
+        frame = decode_cycle_frame(node._last_image, node._last_info)
+        for _ in range(99):
+            node._publish_depth(frame)
+        assert node.metrics.depth_errors == 100
+        assert len(warnings) == 2, "first failure, then every 100th"
+    finally:
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()

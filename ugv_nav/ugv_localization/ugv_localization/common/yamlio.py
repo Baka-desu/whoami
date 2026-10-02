@@ -25,3 +25,28 @@ def require_exact_keys(data: dict, expected: set[str], *, where: str) -> None:
         raise KeyError(f"{where}: missing keys {sorted(missing)}")
     if unknown:
         raise KeyError(f"{where}: unknown keys {sorted(unknown)}")
+
+
+def merge_overlay(base: dict, overlay: dict, *, where: str) -> dict:
+    """Base mapping with an overlay's values on top (nested mappings merged key by key; base not modified).
+
+    An overlay may only change keys the base already has, so a typo fails loudly instead of doing nothing.
+    """
+    out = dict(base)
+    for key, value in overlay.items():
+        if key not in base:
+            raise KeyError(f"{where}: overlay key {key!r} is not in the base profile")
+        if isinstance(base[key], dict):
+            if not isinstance(value, dict):
+                raise ValueError(f"{where}: {key} must be a mapping")
+            value = merge_overlay(base[key], value, where=f"{where}:{key}")
+        out[key] = value
+    return out
+
+
+def load_yaml_profile(path: str | Path, overlay_path: str | Path | None = None) -> dict:
+    """load_yaml_mapping(path), with an optional overlay file (e.g. a *_laptop.yaml timing profile) on top."""
+    data = load_yaml_mapping(path)
+    if overlay_path:
+        data = merge_overlay(data, load_yaml_mapping(overlay_path), where=str(overlay_path))
+    return data

@@ -99,8 +99,8 @@ subscribes them.
   a future elevation mapper would read `mapData` itself. It also holds every node's data (about 0.62 MB per node at 640x480) plus,
   once a viewer has been opened, the grid cache (about 1.9 MB per node in all), and gives none of it back: 1.2 GB at about 530
   nodes in the synthetic 640x480 run, next to rtabmap's 1.4 GB (0.71 GB + 1.3 MB per node). `map_cleanup: true` was measured and
-  does not lower the peak with a viewer open (docs/mapping/baseline.md "Final review I2"). `map_assembler:=false` (launch argument,
-  default true) does not start it: then nothing publishes `/rtabmap/cloud_map` at all; mission-length guidance in
+  does not lower the peak with a viewer open (docs/mapping/baseline.md "Final review I2"). It runs only with `map_assembler:=true`
+  (launch argument, default false, mindmap D24): otherwise nothing publishes `/rtabmap/cloud_map` at all; mission-length guidance in
   docs/mapping/README.md "Memory and mission length".
 - **`mapPath`**: frame `map`, one pose per graph node (optimised; it changes on loop closure).
 

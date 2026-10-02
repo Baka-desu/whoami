@@ -2,6 +2,10 @@
 
 What Dev 3 (costmaps & spatial geometry) needs from other developers and from the future ROS adapter, before we leave the ROS-independent Windows stage.
 
+> **Status (2026-10-02):** the ROS stage is done: `ugv_costmap/semantic_costmap_node.py` is live. This file is the
+> pre-ROS record; the live wire (topic, frame, values, CameraInfo topic, validity rule) is in
+> [`../DEV3_DEV4_INTERFACE.md`](../DEV3_DEV4_INTERFACE.md). Rows below that were settled say so.
+
 Every item is sourced from `PROJECT_CONTEXT.md`, `dev.md`, `architecture.md`, Dev 1's `turing/` docs/code (read-only), or this package's code. Nothing here is a new value or interface.
 
 ---
@@ -59,8 +63,8 @@ Verified against D1 `interfaces.md`, `node/adapter_node.py`, `node/wire.py`, `po
 | Mask timestamp | **CONFIRMED** | `header.stamp` = image capture time; stamp reuse is illegal (D1 `interfaces.md`). |
 | Mask `frame_id` | **CONFIRMED** | Camera optical frame; must equal the source image frame. The actual frame **name** is **NOT YET DEFINED** (PC §6 lists only temporary examples). |
 | Mask resolution | **CONFIRMED** (v1) | `scale = 1.0` (mask size = source image size). The core relies on this. |
-| Validity | **CONFIRMED**, format provisional | `/segmentation/port_meta`, currently `std_msgs/Float64MultiArray` `[valid, age, scale]` until Dev 1's `PortMeta.msg` is compiled. D1 publishes mask + meta only when its publish decision allows. The core refuses `valid=False`. |
-| CameraInfo | **AVAILABLE**, source topic **NOT YET DEFINED** | Driver is Dev 5's (DEV §3). D1 republishes the last received CameraInfo on `/segmentation/camera_info`. Which topic Dev 3 subscribes to is not agreed. |
+| Validity | **SETTLED** | D1 publishes a mask only when it is valid, so the node judges each mask by its own stamp age (`max_mask_age_s`). `/segmentation/port_meta` is not used: it has no stamp and arrives after its mask. |
+| CameraInfo | **SETTLED** | Dev 3 reads the driver's `/camera/camera_info` (Dev 5). D1's `/segmentation/camera_info` republish is not used by Dev 3. |
 | Confidence | **AVAILABLE BUT NOT USED** | `/segmentation/confidence`, 32FC1, `[0,1]`. Not in the Dev 3 contract. |
 | `/ugv/perception_degraded` | **AVAILABLE BUT NOT USED** | Subscriber is Dev 5 (DEV §3), not Dev 3. |
 | Depth (Depth Anything, T08) | **NOT YET DEFINED / not implemented** | See §5. |
@@ -68,7 +72,7 @@ Verified against D1 `interfaces.md`, `node/adapter_node.py`, `node/wire.py`, `po
 **Needs team confirmation:**
 
 - Is the mask computed on a rectified image? D1's node defaults to `/camera/image_raw`, and the core ignores distortion (README §8).
-- Which CameraInfo topic Dev 3 should use.
+- ~~Which CameraInfo topic Dev 3 should use.~~ Settled: `/camera/camera_info`.
 
 ---
 
@@ -154,7 +158,7 @@ Missing contract information (owner not defined in the sources unless stated):
 
 1. **Go-ahead:** ARCH §17/§18 — "No ROS coding until owner explicitly says go."
 2. **ROS 2 / Nav2 version: CONFIRMED — ROS 2 Lyrical Luth.** Older `architecture.md` references to Jazzy/Humble are documentation mistakes. The installed Lyrical-compatible APIs will be verified when ROS integration begins.
-3. **Mask adapter:** `Image` + `port_meta` → `SemanticMaskInput`.
+3. **Mask adapter:** `Image` (validity from its own stamp age) → `SemanticMaskInput`.
 4. **CameraInfo adapter:** `CameraInfo` → `CameraIntrinsicsInput`, plus a distortion decision.
 5. **TF adapter:** camera → costmap frame at mask stamp → `CameraGroundInput`, or a 6-DoF projection core.
 6. **Parameter adapter:** `config/robots/` → `GridInput` + Dev 3 tuning. DEV lists `config/robots/` under Dev 3 (costmap params), Dev 4 (planner/controller params) and Dev 5.
@@ -174,9 +178,9 @@ Missing contract information (owner not defined in the sources unless stated):
 | Item | Needed by Dev 3 | Current status | Owner/Dependency | Action needed |
 |---|---|---|---|---|
 | Semantic mask `/segmentation/mask` | yes | CONFIRMED | Dev 1 | None for the core; write mask adapter at ROS stage |
-| Mask validity (`port_meta`) | yes | CONFIRMED (format provisional) | Dev 1 | Confirm final `PortMeta.msg` format |
+| Mask validity | yes | SETTLED | Dev 1 | Mask stamp age; `port_meta` not used |
 | Confidence `/segmentation/confidence` | no | AVAILABLE BUT NOT USED | Dev 1 | None |
-| CameraInfo topic for Dev 3 | yes | AVAILABLE, topic NOT YET DEFINED | Dev 5 (driver); Dev 1 republishes | Agree which topic Dev 3 consumes |
+| CameraInfo topic for Dev 3 | yes | SETTLED: `/camera/camera_info` | Dev 5 (driver) | None |
 | Camera intrinsics values / YAML | yes | BLOCKED | Owner not yet defined (DEV: Dev 2; D1 docs: Dev 1) | Resolve ownership; supply calibration |
 | Distortion / rectified mask | yes | NOT YET DEFINED | Owner not yet defined | Confirm whether mask is rectified |
 | TF `map → odom → base_link` | yes | BLOCKED | Dev 2 | Available at ROS stage |

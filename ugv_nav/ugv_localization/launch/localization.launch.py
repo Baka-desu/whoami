@@ -3,7 +3,7 @@
     ros2 launch ugv_localization localization.launch.py mode:=mapping profile:=sim
     ros2 launch ugv_localization localization.launch.py mode:=localize profile:=sim odom_source:=auto
     ros2 launch ugv_localization localization.launch.py mode:=mapping fresh_db:=true   # visual odometry only
-    ros2 launch ugv_localization localization.launch.py map_assembler:=false   # no 3D map for the viewer
+    ros2 launch ugv_localization localization.launch.py map_assembler:=true    # 3D map for the web viewer
 
 Nodes:
   cloud_to_depth Dev 1 DA3 cloud + CameraInfo → /rtabmap/depth/image      (depth_input:=cloud, fallback only)
@@ -11,9 +11,10 @@ Nodes:
   rgbd_odometry  visual odometry on rgbd_image → /rtabmap/odom_visual   (odom_source auto|visual)
   odom_selector  wheel | visual | auto → /odom + TF odom->base_link     (the only publisher)
   rtabmap        RGB-D SLAM → TF map->odom, /map (occupancy from depth), /rtabmap/info, mapPath, mapData
-  map_assembler  /rtabmap/mapData → /rtabmap/cloud_map (the 3D map, assembled outside the SLAM step);
-                 map_assembler:=false leaves it out: then nothing publishes /rtabmap/cloud_map at all (the web
-                 viewer's cloud layer stays empty) and its memory (it keeps every node's data) is not spent
+  map_assembler  /rtabmap/mapData → /rtabmap/cloud_map (the 3D map, assembled outside the SLAM step).
+                 Opt-in, map_assembler:=true (mindmap D24): it keeps every node's data and never gives it back,
+                 so it is off by default for long missions; without it nothing publishes /rtabmap/cloud_map
+                 (the web viewer's cloud layer stays empty) and SLAM, TF and pose validity are unchanged
   pose_validity  /ugv/pose_valid heartbeat
   distance_tracker /ugv/localization/distance_travelled (odometry estimate) + distance_basis label
   map_stats      /ugv/map/stats JSON (keyframes, loop closures, path length, db size, calibration placeholder)
@@ -77,11 +78,14 @@ def _setup(context, *args, **kwargs):
     plan = plan_mode(mode, db, fresh=_to_bool(arg("fresh_db"), "fresh_db"))  # fails fast
 
     cfg = os.path.join(get_package_share_directory("ugv_localization"), "config")
-    # timing:=laptop selects *_laptop.yaml timing profiles (slow GPU laptop: DA3 depth ~1 Hz, ~0.7 s old).
+    # timing:=laptop layers the *_laptop.yaml overlays on the product profiles (slow GPU laptop: DA3 depth ~1 Hz,
+    # ~0.7 s old). An overlay holds only the keys it changes.
     timing = arg("timing")
     if timing not in ("default", "laptop"):
         raise RuntimeError(f"timing must be default or laptop, got {timing!r}")
-    suffix = "" if timing == "default" else "_laptop"
+
+    def overlay(name: str) -> str:
+        return os.path.join(cfg, f"{name}_laptop.yaml") if timing == "laptop" else ""
     image_topic = arg("image_topic")
     info_topic = arg("camera_info_topic")
     depth_input = arg("depth_input")
@@ -123,7 +127,7 @@ def _setup(context, *args, **kwargs):
             name="rgbd_sync",
             namespace="rtabmap",
             output="screen",
-            parameters=[os.path.join(cfg, f"rgbd_sync{suffix}.yaml"), common],
+            parameters=[os.path.join(cfg, "rgbd_sync.yaml"), *filter(None, [overlay("rgbd_sync")]), common],
             remappings=[
                 ("rgb/image", image_topic),
                 ("depth/image", depth_topic),
@@ -153,7 +157,8 @@ def _setup(context, *args, **kwargs):
             parameters=[
                 {
                     **common,
-                    "profile_path": os.path.join(cfg, f"odom_select{suffix}.yaml"),
+                    "profile_path": os.path.join(cfg, "odom_select.yaml"),
+                    "profile_overlay_path": overlay("odom_select"),
                     "odom_source": policy.value,
                 }
             ],
@@ -218,7 +223,8 @@ def _setup(context, *args, **kwargs):
             parameters=[
                 {
                     **common,
-                    "profile_path": os.path.join(cfg, f"pose_validity{suffix}.yaml"),
+                    "profile_path": os.path.join(cfg, "pose_validity.yaml"),
+                    "profile_overlay_path": overlay("pose_validity"),
                     "mode": plan.mode.value,
                 }
             ],
@@ -274,9 +280,9 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("fresh_db", default_value="false", description="mapping only: delete db at start"),
             DeclareLaunchArgument(
                 "map_assembler",
-                default_value="true",
-                description="true: map_assembler serves /rtabmap/cloud_map to the web viewer | false: no /rtabmap/cloud_map "
-                "at all (saves the assembler's memory on a long mission; SLAM, TF and pose validity are unchanged)",
+                default_value="false",
+                description="true: map_assembler serves /rtabmap/cloud_map to the web viewer (memory grows with the map) | "
+                "false (default): no /rtabmap/cloud_map at all; SLAM, TF and pose validity are unchanged",
             ),
             DeclareLaunchArgument("profile", default_value="live_cam", description="live_cam | sim | bag"),
             DeclareLaunchArgument("use_sim_time", default_value="auto", description="auto = from profile"),
