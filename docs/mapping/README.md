@@ -23,7 +23,7 @@ phone camera -> tunnel -> ugv_bringup camera driver -- /camera/image_raw + /came
         RTAB-Map (rgbd, Grid/3D true): TF map->odom, /rtabmap/info, /rtabmap/cloud_map, /rtabmap/mapPath,
                                        /rtabmap/mapGraph, /rtabmap/mapData
                                          |
-        map_stats node (reads /rtabmap/mapGraph + /rtabmap/info) -> /ugv/map/stats
+        map_stats node (reads /rtabmap/mapGraph only) -> /ugv/map/stats
                                          |
                                          v
         ugv_api gateway (on-demand subscriptions, TF poll map->base_link) -- GET /api/v1/map/... binary v1 --> web UI map view (three.js)
@@ -63,7 +63,7 @@ Topic names are gateway parameters under `map:` in `ugv_nav/ugv_api/config/api.y
 `epoch` is random per gateway process; `seq[layer]` counts changes (0 = nothing yet). A client compares `epoch:seq`, not
 `seq` alone, and refetches every layer when the epoch changes. `stats` passes the ROS stats keys through unchanged and adds
 the gateway's own input health: `map_inputs_alive`, `map_rejects`, `map_restarts`, `map_last_reject`. JSON contract:
-`.superpowers/sdd/2026-10-02-3d-mapping-elevation/map-json-contract.md`.
+`docs/mapping/map-contract.md`.
 
 ### Binary format v1
 
@@ -79,7 +79,7 @@ body. Decoders reject an unknown format and any length that is not exact.
 | elevation | `UGVE` | `f32` height, `u8` obstacle (5 cm units), `u8` confidence. **Encoder and decoder exist; no data source yet** |
 
 Authoritative layout and the golden files the Python and TypeScript tests share:
-`.superpowers/sdd/2026-10-02-3d-mapping-elevation/binary-format-v1.md`, `ugv_nav/ugv_api/test/fixtures/map/*.bin`.
+`docs/mapping/map-contract.md`, `ugv_nav/ugv_api/test/fixtures/map/*.bin`.
 
 ## Run mapping and view it
 
@@ -129,7 +129,7 @@ npm run build`; in the container `colcon test --packages-select ugv_localization
 
 None of this has happened and no numbers exist for it. The synthetic screenshots in this folder are not UGV evidence.
 
-1. The recorded moving run (a 2-3 minute closed loop: `DEPTH_CLOUD_TOPIC="" GT_DEPTH_TOPIC="" bash record_eval_bag.sh eval_bags/loop1`, replayed through `bag_eval.launch.py`) and the four go/no-go gate numbers of Task 7: depth image rate >= 5 Hz, `/ugv/pose_valid` true while moving >= 90 %, visual odometry lost < 5 % of frames, closed-loop start-to-end error < 5 % of path length. Record them in `docs/mapping/gate-phase0.md`.
+1. The recorded moving run (a 2-3 minute closed loop: `DEPTH_CLOUD_TOPIC="" GT_DEPTH_TOPIC="" bash ugv_nav/ugv_localization/scripts/record_eval_bag.sh eval_bags/loop1` (`eval_bags/` is the output folder you choose; it is not in the repo), replayed through `bag_eval.launch.py`) and the four go/no-go gate numbers of Task 7: depth image rate >= 5 Hz, `/ugv/pose_valid` true while moving >= 90 %, visual odometry lost < 5 % of frames, closed-loop start-to-end error < 5 % of path length. Record them in `docs/mapping/gate-phase0.md`.
 2. Phone camera: lock focus and exposure, calibrate (`calibration_mode:=true` flow in `ugv_nav/ugv_bringup/README.md`), replace the placeholder YAML and remove the flag, measure the tunnel latency and set `transport_latency_s`.
 3. A re-measure in a lit scene (the baseline run used a black image, so its odometry and depth-stability rows are invalid) and the tape-measured wall test at 1-5 m (depth error per distance).
 4. The closed-loop end-to-end run on the UGV: mapping, save the database, restart in `localize`. Keep a screenshot of the map view and the stats values in this folder.
@@ -139,6 +139,7 @@ None of this has happened and no numbers exist for it. The synthetic screenshots
 
 | File | What |
 |---|---|
+| `docs/mapping/map-contract.md` | binary format v1 and the MapStatus/Pose JSON contract |
 | `docs/mapping/baseline.md` | baseline measurement; before/after numbers for depth rate and odometry QoS |
 | `docs/mapping/map-view-synthetic-*.jpg` | the map view on synthetic data (not UGV evidence) |
 | `ugv_nav/docs/localization/interfaces.md` | topic contracts, 3D map outputs, `mapData` consumer contract |
