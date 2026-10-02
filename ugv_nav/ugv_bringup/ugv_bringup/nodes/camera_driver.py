@@ -31,13 +31,15 @@ driver will not run without a calibration. In this mode it publishes ONLY raw im
 CameraInfo and no UI stream, at the requested width x height, so `camera_calibration` can run. Dev 1 and Dev 2
 reject frames without a CameraInfo and the safety arbiter sees the camera as silent, so nothing can use them.
 
-A calibration file flagged `placeholder: true` (stand-in numbers, not a calibration of this camera) loads, but
-the driver logs a WARN at start-up and every 10 s; it also logs the frames dropped by the network reader every
-10 s while that count changes.
+A calibration file flagged `placeholder: true` (stand-in numbers, not a calibration of this camera) is refused like a
+fake K: the driver logs an ERROR saying why and how to override, publishes nothing and exits. Only with
+`allow_placeholder_calibration:=true` (bring-up on a cart or by hand, never an autonomous run that counts) does it
+load, and then the driver logs a WARN at start-up and every 10 s. The driver also logs the frames dropped by the
+network reader every 10 s while that count changes.
 
 Params: calibration_file (required unless calibration_mode) device frame_id fps image_topic info_topic
         compressed_topic ui_info_topic compressed_rate_hz jpeg_quality calibration_mode width height
-        transport_latency_s (seconds, finite, 0 to 5)
+        transport_latency_s (seconds, finite, 0 to 5) allow_placeholder_calibration (bool, default false)
         (empty compressed_topic disables the UI stream; width/height only apply in calibration mode)
 """
 
@@ -55,8 +57,8 @@ from sensor_msgs.msg import CameraInfo, CompressedImage, Image
 from ugv_localization.camera import load_calibration
 
 from ugv_bringup.camera_core import (
-    CaptureError, LatestFrameReader, RatePacer, camera_info_fields, check_capture_size, check_transport_latency,
-    frame_stamp_ns, load_calibration_or_refuse, parse_device,
+    CaptureError, LatestFrameReader, RatePacer, camera_info_fields, check_capture_size, check_placeholder_calibration,
+    check_transport_latency, frame_stamp_ns, load_calibration_or_refuse, parse_device,
 )
 
 _MAX_FAILED_READS_BEFORE_ERROR = 30
@@ -96,6 +98,7 @@ class CameraDriver(Node):
         req_w = int(self.declare_parameter("width", 640).value)
         req_h = int(self.declare_parameter("height", 480).value)
         latency = self.declare_parameter("transport_latency_s", 0.0).value
+        allow_placeholder = bool(self.declare_parameter("allow_placeholder_calibration", False).value)
 
         if not fps > 0.0 or not 1 <= self._jpeg_quality <= 100:
             raise RuntimeError("fps must be > 0 and jpeg_quality in 1..100")
@@ -120,6 +123,11 @@ class CameraDriver(Node):
             try:
                 cal = load_calibration_or_refuse(load_calibration, cal_path)
             except CaptureError as exc:
+                raise RuntimeError(str(exc)) from exc
+            try:
+                check_placeholder_calibration(cal_path, cal.placeholder, allow_placeholder)
+            except CaptureError as exc:
+                self.get_logger().error(str(exc))  # in the node's log too, not only on stderr at exit
                 raise RuntimeError(str(exc)) from exc
             self._info_fields = camera_info_fields(cal)
             width, height = cal.width, cal.height
@@ -196,7 +204,8 @@ class CameraDriver(Node):
         if self._placeholder_file:
             self.get_logger().warning(
                 f"calibration {self._placeholder_file!r} is a PLACEHOLDER (placeholder: true), not a calibration of "
-                "this camera: depth scale and map geometry are wrong until it is replaced (config/cameras/README.md)"
+                "this camera, loaded only because allow_placeholder_calibration is true: depth scale and map geometry "
+                "are wrong until it is replaced (config/cameras/README.md)"
             )
         if self._reader is not None:
             total = self._reader.dropped

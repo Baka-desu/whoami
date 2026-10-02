@@ -21,8 +21,17 @@ The internal names (`/camera/*`) are what Dev 1 and Dev 2 already use; the UI de
 same capture, so neither side was renamed.
 
 `calibration_file` has no default and the driver fails closed: no valid calibration (Dev 2's
-`ugv_localization.camera` refuses zero or fake K), a missing, empty or malformed file, or a camera whose
-resolution differs from the calibration, means it exits with one clear message and publishes nothing.
+`ugv_localization.camera` refuses zero or fake K), a missing, empty or malformed file, a camera whose
+resolution differs from the calibration, or a calibration flagged `placeholder: true` (below), means it exits with
+one clear message and publishes nothing.
+
+**Placeholder calibrations are refused unless you opt in.** A YAML with `placeholder: true` holds another camera's
+numbers. By default the driver logs an ERROR naming the file, the reason and the override, publishes no Image and no
+CameraInfo, and exits; perception, RTAB-Map and the arbiter then see a silent camera, so nothing moves.
+`allow_placeholder_calibration:=true` (on `camera.launch.py` or `bringup.launch.py`, default false) loads it anyway,
+with a WARN at start-up and every 10 s. Use it only for bring-up (the robot on a cart or carried by hand, a recording
+for debugging): depth, the depth cloud Nav2 marks and the map are all scaled wrong, so never for an autonomous run or a
+mapping run that counts.
 
 ## Calibrating a real camera
 
@@ -60,7 +69,8 @@ every 10 s while it changes.
 
 ```
 ros2 launch ugv_bringup camera.launch.py calibration_file:=<repo>/ugv_nav/config/cameras/phone_640x480.yaml \
-    device:=http://<tunnel host>:<port>/<stream> transport_latency_s:=<measured seconds>
+    device:=http://<tunnel host>:<port>/<stream> transport_latency_s:=<measured seconds> \
+    allow_placeholder_calibration:=true   # only while phone_640x480.yaml is still the placeholder
 ```
 
 - `transport_latency_s` (seconds, finite, 0 to 5, default 0, refused at start-up otherwise, so `350` typed for
@@ -68,15 +78,19 @@ ros2 launch ugv_bringup camera.launch.py calibration_file:=<repo>/ugv_nav/config
   time minus this measured delay. `bringup.launch.py` takes the same argument. How to measure it:
   `config/cameras/README.md`.
 - `phone_640x480.yaml` ships as a flagged placeholder (`placeholder: true`, the laptop webcam's intrinsics). The
-  driver logs a WARN at start-up and every 10 s while it is loaded. Do not use it for a mapping run that counts:
-  replace it with a real calibration of the phone, locked focus and exposure, and remove the flag
-  (steps in `config/cameras/README.md`).
+  driver refuses it unless `allow_placeholder_calibration:=true` is given, and then logs a WARN at start-up and every
+  10 s while it is loaded. Do not use it for a mapping run that counts or for any autonomous run: replace it with a
+  real calibration of the phone, locked focus and exposure, and remove the flag (steps in `config/cameras/README.md`);
+  the override is then no longer needed.
 
 ## Full stack: `bringup.launch.py profile:=live_cam`
 
 ```
 ros2 launch ugv_bringup bringup.launch.py profile:=live_cam     calibration_file:=<camera yaml> device:=<V4L2 path or stream URL>     camera_x:=<m> camera_y:=<m> camera_z:=<m> camera_pitch_deg:=<deg>     perception_src:=<repo>/turing/src [mode:=mapping|localize] [robot:=primary]
 ```
+
+Optional: `transport_latency_s:=<s>`, `allow_placeholder_calibration:=true` (bring-up only, see above),
+`map_assembler:=false` (no 3D map for the viewer, for a long mission: `docs/mapping/README.md`).
 
 Starts camera driver, robot description (`ugv_robot_description`: base_link -> camera_optical_frame from the
 measured mount, no defaults), Dev 1 perception, Dev 2 localization, Dev 3 semantic costmap (`ugv_costmap`),

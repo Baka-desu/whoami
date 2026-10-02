@@ -9,8 +9,8 @@ import pytest
 import yaml
 
 from ugv_bringup.camera_core import (
-    CaptureError, LatestFrameReader, RatePacer, camera_info_fields, check_capture_size, check_transport_latency,
-    frame_stamp_ns, load_calibration_or_refuse, parse_device,
+    CaptureError, LatestFrameReader, RatePacer, camera_info_fields, check_capture_size, check_placeholder_calibration,
+    check_transport_latency, frame_stamp_ns, load_calibration_or_refuse, parse_device,
 )
 from ugv_localization.camera import CalibrationError, calibration_to_yaml_dict, load_calibration
 from ugv_localization.camera.calib import CameraCalibration
@@ -104,6 +104,21 @@ def test_a_zero_k_file_is_refused_cleanly(tmp_path):
     path.write_text(yaml.safe_dump(bad), encoding="utf-8")
     with pytest.raises(CaptureError, match="refusing to start"):
         load_calibration_or_refuse(load_calibration, str(path))
+
+
+def test_a_placeholder_calibration_is_refused_by_default_with_the_override_named():
+    with pytest.raises(CaptureError, match="refusing to start") as exc:
+        check_placeholder_calibration("phone.yaml", placeholder=True, allowed=False)
+    assert "PLACEHOLDER" in str(exc.value) and "allow_placeholder_calibration:=true" in str(exc.value)
+
+
+def test_a_placeholder_calibration_loads_only_with_the_explicit_override():
+    check_placeholder_calibration("phone.yaml", placeholder=True, allowed=True)  # no raise
+
+
+@pytest.mark.parametrize("allowed", [False, True], ids=["default", "override"])
+def test_a_real_calibration_is_never_refused_as_a_placeholder(allowed):
+    check_placeholder_calibration("cam.yaml", placeholder=False, allowed=allowed)  # no raise
 
 
 # --- newest-frame reader --------------------------------------------------------------------------------------

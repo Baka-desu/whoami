@@ -398,12 +398,38 @@ def test_an_out_of_range_transport_latency_is_refused_before_the_camera_is_opene
     assert calls == []  # fail closed, and without touching the camera
 
 
-def test_a_placeholder_calibration_is_warned_about_at_start_up_and_then_periodically(tmp_path, stream, log, monkeypatch):
+def test_a_placeholder_calibration_is_refused_by_default_and_nothing_is_published(tmp_path, open_video, log):
+    calls = open_video(False)
+    cal = write_cal(tmp_path, placeholder=True)
+    with pytest.raises(RuntimeError, match="PLACEHOLDER"):
+        try:
+            start(["-p", f"calibration_file:={cal}", "-p", "device:=/dev/video0"])
+        finally:
+            rclpy.shutdown()
+    assert calls == []  # fail closed before the camera is opened: no Image, no CameraInfo
+    assert log.count("error", "allow_placeholder_calibration:=true") == 1  # why, and how to override, in the log
+    assert log.count("warning", "placeholder") == 0
+
+
+def test_a_placeholder_calibration_with_the_override_publishes_and_is_warned_about_periodically(
+    tmp_path, stream, log, monkeypatch
+):
     monkeypatch.setattr("ugv_bringup.nodes.camera_driver._REPORT_PERIOD_S", 0.1)  # production: 10 s
     cal = write_cal(tmp_path, placeholder=True)
-    with running(["-p", f"calibration_file:={cal}", "-p", f"device:={_URL}"], stream) as (node, probe, ex):
+    args = ["-p", f"calibration_file:={cal}", "-p", f"device:={_URL}", "-p", "allow_placeholder_calibration:=true"]
+    with running(args, stream) as (node, probe, ex):
         assert log.count("warning", "placeholder") == 1  # at start-up, before any timer has fired
+        imgs: list = []
+        infos: list = []
+        probe.create_subscription(Image, "/camera/image_raw", imgs.append, _LIVE)
+        probe.create_subscription(CameraInfo, "/camera/camera_info", infos.append,
+                                  QoSProfile(depth=5, reliability=ReliabilityPolicy.RELIABLE,
+                                             durability=DurabilityPolicy.TRANSIENT_LOCAL))
+        assert spin_until(ex, lambda: node.count_subscribers("/camera/image_raw") == 1)
+        stream.push(9)
+        assert spin_until(ex, lambda: imgs and infos)  # the override really publishes
         assert spin_until(ex, lambda: log.count("warning", "placeholder") >= 3)  # and again on every report period
+    assert log.count("error", "placeholder") == 0
 
 
 def test_a_real_calibration_is_never_warned_about(tmp_path, stream, log, monkeypatch):
@@ -412,6 +438,7 @@ def test_a_real_calibration_is_never_warned_about(tmp_path, stream, log, monkeyp
     with running(["-p", f"calibration_file:={cal}", "-p", f"device:={_URL}"], stream) as (node, probe, ex):
         spin(ex, 0.6)  # several report periods
     assert log.count("warning", "placeholder") == 0
+    assert log.count("error", "placeholder") == 0  # and never refused: the default needs no override for a real file
 
 
 def test_dropped_frames_are_reported_only_when_the_count_changed(tmp_path, stream, log, monkeypatch):

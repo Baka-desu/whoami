@@ -15,7 +15,10 @@ What happens to it:
 
 - The loader accepts it and sets `CameraCalibration.placeholder`. Nothing else is relaxed: K is still
   validated, and the driver still refuses a camera that delivers another resolution.
-- The camera driver logs a WARN naming the file at start-up and again every 10 s for as long as it is loaded.
+- The camera driver **refuses it by default** (an ERROR naming the file, the reason and the override; no Image, no
+  CameraInfo, exit), so the default path fails closed as for a fake K. Only `allow_placeholder_calibration:=true`
+  (`camera.launch.py` or `bringup.launch.py`) loads it, for bring-up on a cart or by hand, never for an autonomous run;
+  the driver then logs a WARN naming the file at start-up and again every 10 s for as long as it is loaded.
 - It is not good enough for any mapping run that counts: depth is stretched along the viewing axis in
   proportion to the focal-length error, and RTAB-Map builds the map at that wrong scale with full confidence.
 - A real calibration never carries the key. `test_camera_calib.py` fails if a file that copies the laptop
@@ -29,7 +32,8 @@ Replacing the phone placeholder (hardware steps, done by the owner):
    `ros2 launch ugv_bringup camera.launch.py calibration_mode:=true device:=<stream URL> width:=640 height:=480`
 3. Calibrate with `cameracalibrator` (see "Real camera" below), at 640x480.
 4. Save the result as `ugv_nav/config/cameras/phone_640x480.yaml`, with the header described below.
-5. Remove the `placeholder` line (the flag only ever marks stand-in numbers).
+5. Remove the `placeholder` line (the flag only ever marks stand-in numbers). `allow_placeholder_calibration` is then
+   no longer needed.
 
 ## Network cameras: transport latency
 A stream reached through a tunnel carries no capture timestamps, and the driver stamps each frame with the time

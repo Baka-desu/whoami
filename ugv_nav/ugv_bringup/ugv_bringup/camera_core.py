@@ -1,5 +1,5 @@
 """Camera driver helpers (no ROS, no OpenCV): calibration -> CameraInfo fields, capture-size
-check, device parsing, the rate pacing of the UI stream, and the newest-frame reader for network cameras.
+check, the placeholder-calibration refusal, device parsing, the rate pacing of the UI stream, and the newest-frame reader for network cameras.
 
 The calibration itself is loaded and validated by Dev 2's ugv_localization.camera (the single place
 that refuses zero / fake K), so a driver can never publish a lying CameraInfo.
@@ -57,6 +57,19 @@ def load_calibration_or_refuse(loader: Callable[[str], T], path: str) -> T:
         return loader(path)
     except Exception as exc:  # any failure to get a real calibration means: do not start
         raise CaptureError(f"refusing to start: calibration file {path!r}: {type(exc).__name__}: {exc}") from exc
+
+
+def check_placeholder_calibration(path: str, placeholder: bool, allowed: bool) -> None:
+    """A calibration flagged `placeholder: true` holds stand-in numbers (another camera's K), not a calibration of this
+    camera: every DA3 distance, the depth cloud Nav2 marks and the RTAB-Map geometry would be scaled by the focal-length
+    error with full confidence. Refuse it (fail closed, dev.md Dev 1 task 1 "reject fake K") unless the operator opts in
+    with `allow_placeholder_calibration:=true` for bring-up (a cart or handheld run, never an autonomous one that counts)."""
+    if placeholder and not allowed:
+        raise CaptureError(
+            f"refusing to start: calibration file {path!r} is a PLACEHOLDER (placeholder: true), not a calibration of "
+            "this camera, so depth scale and map geometry would be wrong; calibrate the camera (config/cameras/README.md) "
+            "or, for bring-up only, launch with allow_placeholder_calibration:=true"
+        )
 
 
 def check_capture_size(cal_width: int, cal_height: int, got_width: int, got_height: int) -> None:

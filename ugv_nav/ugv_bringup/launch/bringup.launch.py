@@ -4,7 +4,12 @@
         calibration_file:=<camera yaml> device:=<V4L2 path or stream URL> \
         camera_x:=.. camera_y:=.. camera_z:=.. camera_pitch_deg:=.. \
         perception_src:=<repo>/turing/src [mode:=mapping|localize] [robot:=primary] \
-        [transport_latency_s:=<seconds, network camera>]
+        [transport_latency_s:=<seconds, network camera>] [allow_placeholder_calibration:=true] \
+        [map_assembler:=true|false]
+
+allow_placeholder_calibration (default false): the camera driver refuses a calibration flagged `placeholder: true`
+(another camera's K) and the whole camera chain stays silent, so the arbiter holds. true loads it with a WARN, for
+bring-up only (ugv_bringup README).
 
 live_cam starts, in the order the data flows:
   camera driver (Dev 5)          /camera/image_raw + /camera/camera_info (+ UI stream)
@@ -67,7 +72,8 @@ def _setup(context, *args, **kwargs):
     actions = [
         _include("ugv_bringup", "camera.launch.py",
                  {"calibration_file": arg("calibration_file"), "device": arg("device"),
-                  "transport_latency_s": arg("transport_latency_s")}),
+                  "transport_latency_s": arg("transport_latency_s"),
+                  "allow_placeholder_calibration": arg("allow_placeholder_calibration")}),
         _include("ugv_robot_description", "description.launch.py", {a: arg(a) for a in _MOUNT}),
         ExecuteProcess(
             cmd=["python3", "-m", "ugv_perception.node.adapter_node", "--ros-args", "-p",
@@ -76,7 +82,8 @@ def _setup(context, *args, **kwargs):
         ),
         _include("ugv_localization", "localization.launch.py",
                  {"mode": arg("mode"), "profile": profile, "database_path": arg("database_path"),
-                  "timing": arg("localization_timing"), "calibration_file": arg("calibration_file")}),
+                  "timing": arg("localization_timing"), "calibration_file": arg("calibration_file"),
+                  "map_assembler": arg("map_assembler")}),
         _include("ugv_costmap", "semantic_costmap.launch.py", {}),
         _include("ugv_navigation", "navigation.launch.py", {"robot": arg("robot")}),
         _include("ugv_safety", "safety.launch.py", {}),
@@ -92,6 +99,8 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument("device", default_value="/dev/video0"),
         DeclareLaunchArgument("transport_latency_s", default_value="0.0",
                               description="measured delay of a network camera stream, seconds (ugv_bringup README)"),
+        DeclareLaunchArgument("allow_placeholder_calibration", default_value="false",
+                              description="true: load a calibration flagged placeholder (bring-up only; refused otherwise)"),
         *[DeclareLaunchArgument(a, default_value="", description="measured camera mount (required)")
           for a in _MOUNT],
         DeclareLaunchArgument("perception_src", default_value=os.environ.get("UGV_PERCEPTION_SRC", "")),
@@ -101,6 +110,9 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument("robot", default_value=""),
         # laptop: Dev 2 timing profile for a slow-GPU laptop (ugv_localization config/*_laptop.yaml)
         DeclareLaunchArgument("localization_timing", default_value="default"),
+        # false: no 3D map for the web viewer (/rtabmap/cloud_map), for a long mission (docs/mapping/README.md)
+        DeclareLaunchArgument("map_assembler", default_value="true",
+                              description="false: no /rtabmap/cloud_map for the web viewer (long mission; ugv_localization)"),
         DeclareLaunchArgument("api_host", default_value="0.0.0.0"),
         DeclareLaunchArgument("api_port", default_value="8080"),
         OpaqueFunction(function=_setup),
