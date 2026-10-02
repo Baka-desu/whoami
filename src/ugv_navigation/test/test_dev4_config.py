@@ -389,6 +389,19 @@ def test_footprint_file_becomes_costmap_params_for_both_costmaps():
                                   'fp.yaml')[1:] == ['dev3.yaml', 'fp.yaml', 'robot.yaml']
 
 
+def _footprint_log(**overrides):
+    from launch.actions import LogInfo
+    actions = load_launch_module()._launch_setup(launch_context(**overrides))
+    return ' '.join(''.join(sub.text for sub in a.msg) for a in actions if isinstance(a, LogInfo))
+
+
+def test_launch_warns_when_the_costmap_placeholder_footprint_is_used():
+    """No Dev 5 footprint file -> costmaps.yaml's placeholder runs: say so loudly (mindmap D25)."""
+    log = _footprint_log()
+    assert 'WARNING' in log and 'placeholder' in log and 'before any outdoor run' in log
+    assert 'WARNING' not in _footprint_log(footprint_file=str(FIXTURE_FOOTPRINT))
+
+
 def test_footprint_only_goes_to_costmap_hosts():
     launch = load_launch_module()
     # planner_server hosts global_costmap, controller_server hosts local_costmap.

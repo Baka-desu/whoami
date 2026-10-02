@@ -12,11 +12,13 @@
 #
 # Never-observed space: this robot sees only its camera wedge, so both costmaps run with
 # track_unknown_space: false (unseen = free for planning, Smac2D allow_unknown is false). Observed class 0
-# ("unknown") is NOT unseen: the semantic node publishes it as a non-free cost (architecture §8.1).
+# ("unknown") is NOT unseen: the semantic node publishes it as a non-free cost (architecture §8.1). Accepted
+# §8.1 exception for never-observed cells only, owner 2026-10-02 (mindmap D22).
 #
 # Footprint: Dev 5's config/robots/footprint_<robot>.yaml overrides this when present (navigation.launch.py).
 # PLACEHOLDER below: a standard small UGV (Clearpath Jackal class, 0.50 x 0.43 m, base_link at the centre),
-# chosen by the owner on 2026-10-01 until the real platform is measured. Replace it with Dev 5's footprint.
+# chosen by the owner on 2026-10-01 until the real platform is measured. Replace it with Dev 5's footprint
+# before any outdoor run (mindmap D25); navigation.launch.py logs a WARNING while it is in use.
 
 global_costmap:
   global_costmap:

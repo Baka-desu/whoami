@@ -235,6 +235,12 @@ def _launch_setup(context, *args, **kwargs):
         footprint_file = find_footprint_file(robot)
     actions = [LogInfo(msg='navigation.launch.py: footprint from ' + (
         footprint_file or "Dev 3's costmap params (no footprint_file / Dev 5 file found)"))]
+    if not footprint_file:
+        # config/costmaps.yaml carries a Jackal-class PLACEHOLDER until Dev 5 measures the platform (mindmap D25).
+        actions.append(LogInfo(msg='navigation.launch.py: WARNING: no Dev 5 footprint_<robot>.yaml, so the '
+                                   'costmaps use the footprint in their params file (config/costmaps.yaml: a '
+                                   'placeholder). Use the real footprint before any outdoor run (architecture '
+                                   '§13 item 9).'))
     footprint_params = ''
     if footprint_file:
         if not Path(footprint_file).is_file():
