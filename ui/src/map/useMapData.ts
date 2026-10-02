@@ -271,5 +271,3 @@ export function useMapData(active: boolean, enabled: Enabled) {
 
   return { ...frames, status, stale }
 }
-
-export type MapData = ReturnType<typeof useMapData>

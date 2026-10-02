@@ -11,3 +11,6 @@ turing/ti4.avif
 __pycache__/
 .pytest_cache/
 .arena/
+# Owner's reference screenshots: local only, never committed (PR #40 review)
+/Screenshot *.png
+/docs/Screenshot *.png
