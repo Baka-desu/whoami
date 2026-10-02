@@ -1,7 +1,8 @@
 # UGV operator console (Dev 5)
 
-One web app. The **camera view is the main page**: the live camera with Dev 1's Perception Port drawn over it
-(class mask, metric depth, flat-ground path preview). The operator controls and status sit in two sidebars.
+One web app with two main views, switched in the top bar. The **camera view is the main page**: the live camera with
+Dev 1's Perception Port drawn over it (class mask, metric depth, flat-ground path preview). The **map view** shows the 3D
+map (see "Map view" below). The operator controls and status sit in two sidebars.
 
 | Where | What | Source |
 |---|---|---|
@@ -17,6 +18,27 @@ One web app. The **camera view is the main page**: the live camera with Dev 1's 
 Gateway values arrive over `GET /api/v1/telemetry/stream` (Server-Sent Events). `architecture.md` §14 defers a
 UI for v1 (the v1 operator interface is the CLI); this console is an approved extension.
 
+## Map view
+
+The **map** button in the top bar shows what RTAB-Map has built: the accumulated cloud, the live depth scan coloured by
+height, the trajectory, Nav2's cost grid halo, the robot pose, a depth panel and a camera panel, plus a statistics widget
+(keyframes, loop closures, path length, database size, last update, depth rate). Display only.
+
+- **Source:** the gateway's `GET /api/v1/map` family, as binary format v1 (`src/map/codec.ts` decodes; golden files in
+  `ugv_nav/ugv_api/test/fixtures/map/` are shared with the gateway's tests) and the pose and map events of the telemetry
+  stream. The view never opens rosbridge for map data. While the view is open it calls `GET /api/v1/map` as a heartbeat,
+  which keeps the gateway's heavy subscriptions alive; hidden tab or closed view, the gateway drops them after 10 s.
+- **Layers:** buttons for cloud, live, path, elev, cost and img; the set is kept in `localStorage`
+  (`ugv.console.map.layers`). A layer that is off is not fetched. Layers are refetched when their sequence number
+  changes, and all of them when the gateway's `epoch` changes (a restart).
+- **Elevation is not built yet** (deferred by the owner). The elev layer and its colour modes (height, conf, obst)
+  exist, but nothing publishes elevation, so the layer stays empty and the endpoint answers 503.
+- **Empty and broken states:** a 503 or truncated body decodes to nothing and the view says `NO MAP YET`. Banners:
+  `STALE`, with the reason (map not updating, telemetry lost), and `MAP INPUTS STOPPED` when the gateway reports its map
+  input thread gone. An error boundary keeps a failed map view from taking the console (e-stop, safety board) down.
+- three.js is a separate lazily loaded chunk, so the camera view's first paint does not pay for it.
+- Limits (monocular scale, 5 m fusion range, placeholder calibration): `docs/mapping/README.md`.
+
 ```
 npm install
 npm run dev      # http://localhost:5173, proxies /api to the gateway (UGV_API_URL, default http://127.0.0.1:8080)
@@ -27,11 +49,12 @@ npm run lint
 
 Start the gateway with `ros2 launch ugv_api api.launch.py` (package `ugv_nav/ugv_api`). The camera view needs a
 `rosbridge_server` on port 9090 of the page's host and Dev 5's camera driver (`/image_raw/compressed` +
-`/camera_info`).
+`/camera_info`). The map view needs only the gateway.
 
 ## Rules it keeps
 
-- **Commands only through Dev 5's gateway.** E-stop, mode and goals go to `/api/v1`. rosbridge is confined to the
+- **Commands only through Dev 5's gateway.** E-stop, mode and goals go to `/api/v1`. The map view is read-only GETs
+  against the same gateway (the guard in `source/api.test.ts` is narrowed to costmap topic names). rosbridge is confined to the
   read-only camera view (`CameraView`, `Viewport`, `Inspector`, `SourcePanel`, `source/rosbridge.ts`,
   `source/useCameraSource.ts`, `analysis/`). A test (`src/source/api.test.ts`) fails if any other file touches
   rosbridge or Dev 1/2/4 topics.

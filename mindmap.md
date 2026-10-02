@@ -21,6 +21,7 @@
 | D12 | Elevation semantics | `Reg/Force3DoF true` kept; elevation height is relief relative to the driving plane. General-purpose defaults, four layers only. | User 2026-10-02 |
 | D13 | Operator UI | Map, live cloud and Nav2 costmap shown in the web UI through `ugv_api` binary endpoints, display only. The UI guard's blanket ban on the word "costmap" is narrowed to costmap topic names. | User 2026-10-02 |
 | D14 | Depth vs mask | DA3 depth is published for every processed frame, no longer only when a mask was published, so a degraded mask does not starve SLAM. | User 2026-10-02 |
+| D15 | Elevation deferred | The elevation map (plan Tasks 10-12: tile/fuse kernels, `elevation_map_node`, `/ugv/elevation/*`) is **not built**: deferred by the owner 2026-10-02. The gateway elevation endpoint, the UI decoder and the ELEV layer stay in place and stay empty (503, "no map yet"). Nothing else in D9-D14 depends on it. | User 2026-10-02 |
 
 ## What architecture.md says (and doesn't)
 - §2/§6: brain = "RTAB-Map VO/SLAM" — now true in RGB-D mode (DA3 depth).
@@ -44,8 +45,14 @@
 - ~~Re-projecting Dev 1's point cloud into a depth image → lossy~~ — **reversed** 2026-09-29 (D8): re-projection with the same K at the same resolution is pixel-exact (verified in `test_ros_stack.py`).
 - ~~Depth Anything pseudo-RGB-D~~ — rejected 2026-09-23 for the Dev1→Dev2 dependency; **reversed** 2026-09-28 (D7/D8): the team switched to DA3 depth; dependency made explicit in interfaces.md + CONFLICTS C3.
 
+## Settled during execution (moved out of "Open / to verify")
+- DA3 latency / fps on the target GPU: measured in `docs/mapping/baseline.md`; depth now runs on every frame at about 7.1 Hz (was 3.2 Hz), odometry input QoS fixed (Task 23). Re-measure on the UGV with a lit scene (pending owner run).
+- Dev 5 topic names: camera `/camera/image_raw` + `/camera/camera_info` (and `/image_raw/compressed`, `/camera_info` for the UI) are fixed by `ugv_bringup`; the gateway's map topics are `map:` parameters in `ugv_api/config/api.yaml`. `/wheel/odom` and the GT depth camera are unused (visual odometry only, D5b, D10).
+
 ## Open / to verify
-- DA3 latency / fps on the target GPU (Dev 1) → `sync_queue_size`, `depth_max_age_s`, visual-mode TF rate.
-- Values in `rtabmap_rgbd.yaml` / `rgbd_odometry.yaml` (depth caps, grid heights, neighbor refining) — tune in sim.
-- Dev 5 topic names: camera image/info, GT depth camera, `/wheel/odom`, ground-truth pose.
+- Values in `rtabmap_rgbd.yaml` / `rgbd_odometry.yaml` (depth caps, grid heights, neighbor refining) — tune on the UGV run.
 - Owner approval of the architecture.md / dev.md amendment (CONFLICTS.md).
+- Pending owner runs (`docs/mapping/README.md`): recorded moving run and the Task 7 gate numbers; phone focus lock, calibration and tunnel latency; lit-scene re-measure and tape-measured wall test; closed-loop mapping -> save -> localize run with screenshot and stats.
+- Owner decision: mask freshness budget (a mask is held up to about 0.58 s against the 0.5 s limit).
+- Owner decision: keep `Grid/MaxObstacleHeight 1.0`? It clips `/rtabmap/cloud_map` at about 1 m above the robot.
+- Elevation map (D15): build, or drop the empty ELEV layer.

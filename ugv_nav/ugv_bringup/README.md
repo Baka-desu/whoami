@@ -82,6 +82,15 @@ Starts camera driver, robot description (`ugv_robot_description`: base_link -> c
 measured mount, no defaults), Dev 1 perception, Dev 2 localization, Dev 3 semantic costmap (`ugv_costmap`),
 Dev 4 Nav2, the safety arbiter and the operator API. `sim` and `bag` are refused until they are wired.
 
+## Mapping run and the map view
+
+`mode:=mapping` (default) builds the RTAB-Map database at `database_path` (default `~/.ros/ugv/rtabmap.db`, saved when
+the stack stops); `mode:=localize` loads it read-only. The operator API this profile starts (`api_host`, `api_port`,
+default `0.0.0.0:8080`) serves the 3D map to the web UI's map view (`GET /api/v1/map/...`), so open the UI
+(`cd ui && npm run dev`) and pick **map**. Before a run that counts, have the real phone calibration (not the
+placeholder), a measured `transport_latency_s` and a lit scene. What the map shows and where it is not to be trusted:
+`docs/mapping/README.md`. Elevation mapping is not built yet.
+
 ## live_cam on a Windows laptop (ROS in Docker)
 
 Docker on Windows cannot open a USB webcam, so the host serves it and the driver reads the stream.
