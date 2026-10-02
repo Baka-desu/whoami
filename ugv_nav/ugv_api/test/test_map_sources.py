@@ -78,6 +78,44 @@ def test_cloud_source_accepts_a_numpy_buffer_and_normalises_field_tuples():
     assert np.shares_memory(src["data"], data)
 
 
+def padded_rows_kw(**over):
+    """A 3 x 2 organised cloud of 12-byte points. Packed rows are 36 bytes; `row_step` says otherwise."""
+    kw = dict(fields=[("x", 0, F32, 1), ("y", 4, F32, 1), ("z", 8, F32, 1)], point_step=12, n_points=6,
+              is_bigendian=False, data=bytes(80), width=3, height=2)
+    kw.update(over)
+    return kw
+
+
+def test_cloud_source_refuses_an_organised_cloud_whose_rows_are_padded():
+    # data is read as n_points * point_step packed bytes; a row_step of 40 means 4 padding bytes after each row, so
+    # every point of the second row would be read 4 bytes early
+    with pytest.raises(ValueError, match="row_step"):
+        ms.cloud_source(**padded_rows_kw(row_step=40))
+    assert ms.cloud_source(**padded_rows_kw(row_step=36))["n_points"] == 6  # packed rows are fine
+
+
+def test_cloud_source_does_not_look_at_row_step_of_a_one_row_cloud():
+    # height 1: there is no second row to misplace, and row_step of such a cloud is often 0 or the full buffer
+    one_row = padded_rows_kw(n_points=3, width=3, height=1, data=bytes(36))
+    assert ms.cloud_source(**one_row, row_step=0)["n_points"] == 3
+    assert ms.cloud_source(**one_row, row_step=999)["n_points"] == 3
+    assert ms.cloud_source(**one_row)["n_points"] == 3  # and callers that do not know it still work
+
+
+def test_cloud_source_refuses_a_payload_shorter_than_its_points():
+    with pytest.raises(ValueError, match="fewer than"):
+        ms.cloud_source(fields=[("x", 0, F32, 1)], point_step=12, n_points=4, is_bigendian=False, data=bytes(47))
+    assert ms.cloud_source(fields=[("x", 0, F32, 1)], point_step=12, n_points=4, is_bigendian=False,
+                           data=bytes(48))["n_points"] == 4
+
+
+def test_cloud_columns_refuses_an_organised_cloud_whose_rows_are_padded():
+    kw = padded_rows_kw(names=("x",), data=bytes(72))
+    with pytest.raises(ValueError, match="row_step"):
+        ms.cloud_columns(**kw, row_step=40)
+    assert ms.cloud_columns(**kw, row_step=36)["x"].shape == (6,)
+
+
 # ------------------------------------------------------------------------------------------ cloud columns
 
 
@@ -256,6 +294,46 @@ def test_pairer_never_pairs_unequal_stamps_and_keeps_the_latest_of_each():
     src = pair.add_grid(3, **GRID)  # now 3 == 3, and it is the newer cloud
     assert src is not None and src["x"] is b["x"]
     assert pair.add_cloud(4, a) is None  # a stamp-4 cloud against the stamp-3 grid is not a pair
+
+
+def test_pairer_never_pairs_two_unstamped_halves():
+    pair = ms.ElevationPairer()
+    assert pair.add_cloud(0, elevation_columns()) is None
+    assert pair.add_grid(0, **GRID) is None  # 0 == 0 is "no stamp" twice, not the same moment
+    assert pair.unstamped == 2
+    assert pair.add_cloud(0, elevation_columns()) is None
+    assert pair.unstamped == 3
+    # an unstamped half is not kept either: it must not pair with a stamped one
+    assert pair.add_grid(5, **GRID) is None
+    assert pair.add_cloud(5, elevation_columns()) is not None
+
+
+def test_pairer_counts_a_half_that_was_replaced_before_it_found_its_partner():
+    pair = ms.ElevationPairer()
+    assert pair.unpaired == 0
+    pair.add_cloud(1, elevation_columns())
+    pair.add_cloud(3, elevation_columns())  # the stamp-1 cloud never met a grid
+    assert pair.unpaired == 1
+    pair.add_grid(2, **GRID)
+    pair.add_grid(3, **GRID)  # pairs with the stamp-3 cloud; the stamp-2 grid never met a cloud
+    assert pair.unpaired == 2
+    pair.add_cloud(4, elevation_columns())  # replaces the stamp-3 cloud, which did pair: not counted
+    assert pair.unpaired == 2
+    pair.add_cloud(5, elevation_columns())  # replaces the stamp-4 cloud, which did not
+    assert pair.unpaired == 3
+
+
+def test_pairer_does_not_count_a_repeated_half_or_a_reset():
+    pair = ms.ElevationPairer()
+    pair.add_cloud(8, elevation_columns())
+    pair.add_cloud(8, elevation_columns())  # the same sample again: its grid may still come
+    assert pair.unpaired == 0
+    assert pair.add_grid(8, **GRID) is not None
+    pair.reset()
+    pair.add_cloud(9, elevation_columns())
+    pair.reset()  # discarding what is held is not a publisher fault
+    pair.add_cloud(10, elevation_columns())
+    assert pair.unpaired == 0
 
 
 def test_pairer_matches_nanosecond_stamps_exactly():

@@ -155,32 +155,50 @@ def _bytes_view(data: Any) -> np.ndarray:
 # ------------------------------------------------------------------------------------------- point clouds
 
 
+def _check_cloud_layout(*, point_step: int, n_points: int, data_size: int, width: int | None, height: int,
+                        row_step: int | None) -> None:
+    """The payload is read as `n_points` packed records of `point_step` bytes. That is only right if it holds
+    that many bytes and, for an organised cloud (height > 1), if its rows are not padded: with a `row_step`
+    larger than width * point_step every point after the first row would be read from the wrong place."""
+    if point_step <= 0 or n_points < 0:
+        raise ValueError("point_step must be > 0 and n_points >= 0")
+    if data_size < point_step * n_points:
+        raise ValueError(f"data holds {data_size} bytes, fewer than point_step * n_points = {point_step * n_points}")
+    if height > 1 and width is not None and row_step is not None and row_step != width * point_step:
+        raise ValueError(f"organised cloud ({width} x {height}) has row_step {row_step}, not width * point_step = "
+                         f"{width * point_step}: padded rows are not supported")
+
+
 def cloud_source(*, fields: Sequence[Sequence[Any]], point_step: int, n_points: int, is_bigendian: bool,
-                 data: Any) -> dict[str, Any]:
+                 data: Any, width: int | None = None, height: int = 1,
+                 row_step: int | None = None) -> dict[str, Any]:
     """`cloud` source: the PointCloud2 layout plus a read-only view of its payload. The payload is not
-    parsed here: the HTTP thread's `cloud_view` does that once per request, over the same memory."""
+    parsed here: the HTTP thread's `cloud_view` does that once per request, over the same memory.
+    `width`, `height` and `row_step` are only checked (see `_check_cloud_layout`); the source does not carry them."""
+    view = _bytes_view(data)
+    _check_cloud_layout(point_step=int(point_step), n_points=int(n_points), data_size=view.size, width=width,
+                        height=int(height), row_step=row_step)
     return {
         "fields": [(str(name), int(offset), int(datatype), int(count)) for name, offset, datatype, count in fields],
         "point_step": int(point_step),
         "n_points": int(n_points),
         "is_bigendian": bool(is_bigendian),
-        "data": _bytes_view(data),
+        "data": view,
     }
 
 
 def cloud_columns(*, fields: Sequence[Sequence[Any]], point_step: int, n_points: int, is_bigendian: bool,
-                  data: Any, names: Sequence[str]) -> dict[str, np.ndarray]:
+                  data: Any, names: Sequence[str], width: int | None = None, height: int = 1,
+                  row_step: int | None = None) -> dict[str, np.ndarray]:
     """The named FLOAT32 fields of a PointCloud2 as independent contiguous float32 arrays, one entry per point.
     Copies, so the message buffer is free to go."""
     if is_bigendian:
         raise ValueError("big-endian point clouds are not supported")
     point_step, n_points = int(point_step), int(n_points)
-    if point_step <= 0 or n_points < 0:
-        raise ValueError("point_step must be > 0 and n_points >= 0")
     by_name = {str(name): (int(offset), int(datatype)) for name, offset, datatype, _count in fields}
     base = np.frombuffer(data, dtype=np.uint8)
-    if base.size < point_step * n_points:
-        raise ValueError(f"data holds {base.size} bytes, fewer than point_step * n_points = {point_step * n_points}")
+    _check_cloud_layout(point_step=point_step, n_points=n_points, data_size=base.size, width=width,
+                        height=int(height), row_step=row_step)
     out: dict[str, np.ndarray] = {}
     for name in names:
         if name not in by_name:
@@ -242,35 +260,60 @@ class ElevationPairer:
 
     The two topics are published together and carry one `header.stamp`; the cloud holds the cells and the grid
     holds their geometry (resolution, size, origin). A source is built only from a cloud and a grid with equal
-    stamps: the latest of each is kept, and the pair is emitted when the second half of it arrives. Not
-    thread-safe: both callbacks run in one mutually exclusive callback group.
+    stamps: the latest of each is kept, and the pair is emitted when the second half of it arrives. A half with
+    no stamp (0) is never kept: two unset stamps are equal but say nothing about being the same sample.
+
+    Two counters make a publisher that stamps the halves differently visible instead of silent: `unstamped`
+    (halves refused for having no stamp) and `unpaired` (halves replaced by a newer one of the same kind before
+    their partner arrived; one that had already been paired, or is replaced by the same stamp, or is dropped
+    by `reset`, is not counted). Not thread-safe: both callbacks run in one mutually exclusive callback group.
     """
 
     def __init__(self) -> None:
         self._cloud: tuple[int, dict[str, np.ndarray]] | None = None
         self._grid: tuple[int, dict[str, Any]] | None = None
+        self._cloud_paired = False
+        self._grid_paired = False
+        self.unpaired = 0
+        self.unstamped = 0
 
     def reset(self) -> None:
         self._cloud = None
         self._grid = None
+        self._cloud_paired = self._grid_paired = False
 
     def add_cloud(self, stamp_ns: int, columns: dict[str, np.ndarray]) -> dict[str, Any] | None:
-        self._cloud = (int(stamp_ns), columns)
+        stamp_ns = int(stamp_ns)
+        if stamp_ns == 0:
+            self.unstamped += 1
+            return None
+        if self._cloud is not None and not self._cloud_paired and self._cloud[0] != stamp_ns:
+            self.unpaired += 1
+        self._cloud = (stamp_ns, columns)
+        self._cloud_paired = False
         return self._pair()
 
     def add_grid(self, stamp_ns: int, *, resolution: float, width: int, height: int, origin_x: float,
                  origin_y: float) -> dict[str, Any] | None:
-        self._grid = (int(stamp_ns), {
+        stamp_ns = int(stamp_ns)
+        if stamp_ns == 0:
+            self.unstamped += 1
+            return None
+        if self._grid is not None and not self._grid_paired and self._grid[0] != stamp_ns:
+            self.unpaired += 1
+        self._grid = (stamp_ns, {
             "origin_xy": (float(origin_x), float(origin_y)),
             "resolution": float(resolution),
             "width": int(width),
             "height": int(height),
         })
+        self._grid_paired = False
         return self._pair()
 
     def _pair(self) -> dict[str, Any] | None:
         if self._cloud is None or self._grid is None or self._cloud[0] != self._grid[0]:
             return None
+        self._cloud_paired = self._grid_paired = True
         cols, geometry = self._cloud[1], self._grid[1]
         return {
             "x": cols["x"], "y": cols["y"], "z": cols["z"],
