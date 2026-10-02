@@ -5,6 +5,7 @@ import { enabledLayers, parseToggles, toggled, type MapToggles, type ToggleKey }
 import { MapScene } from '../map/scene'
 import { useMapData } from '../map/useMapData'
 import { LAYERS, type MapStatus, type Telemetry } from '../source/api'
+import { mapBanner } from './mapStats'
 
 // The map view, as in the owner's reference picture: the 3D map (accumulated cloud, live depth scan coloured by
 // height, elevation, trajectory, the cost grid's halo around obstacles, the robot) with the depth image and the
@@ -138,6 +139,7 @@ export function MapView({ telemetry, live }: Props) {
   }
 
   const staleReason = data.stale ? 'map not updating' : !live ? 'telemetry lost' : null
+  const banner = mapBanner(noMap, staleReason, status?.stats)
   const ok = !noMap && staleReason === null
   const slamMode = typeof status?.stats.mode === 'string' ? status.stats.mode : null
   const depthPanel = toggles.images ? depth : null // a panel shows only with data and with the images toggle on
@@ -189,7 +191,7 @@ export function MapView({ telemetry, live }: Props) {
             <span>{data.stale ? 'waiting for the gateway' : 'no map layer has data yet'}</span>
           </div>
         ) : null}
-        {!noMap && staleReason && <div className="banner stale">STALE · {staleReason}</div>}
+        {banner && <div className="banner stale">{banner}</div>}
         {(depthPanel || cameraPanel) && (
           <div className="mapview-insets">
             {depthPanel && <DepthPanel frame={depthPanel} />}

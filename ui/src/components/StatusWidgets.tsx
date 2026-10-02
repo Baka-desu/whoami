@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react'
 import type { BaseCommand, EStop, Localization, MapStatus, Navigation } from '../source/api'
-import { mapRows, placeholderCalibration } from './mapStats'
+import { mapInputsStopped, mapRows, placeholderCalibration } from './mapStats'
 import DraggableWidgetGrid, { type WidgetItem, type WidgetSize } from './ui/draggable-widget-grid'
 
 function Section({ title, children }: { title: string; children: ReactNode }) {
@@ -12,9 +12,9 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
   )
 }
 
-function Row({ k, v, tone }: { k: string; v: ReactNode; tone?: 'trip' | 'warn' }) {
+function Row({ k, v, tone, title }: { k: string; v: ReactNode; tone?: 'trip' | 'warn'; title?: string }) {
   return (
-    <div className={`row ${tone ?? ''}`}>
+    <div className={`row ${tone ?? ''}`} title={title}>
       <span>{k}</span>
       <b>{v}</b>
     </div>
@@ -110,7 +110,8 @@ export function StatusWidgets({ live, command, navigation: nav, localization: lo
       case 'map':
         return (
           <Section title="Map">
-            {mapRows(map?.stats).map((r) => <Row key={r.k} k={r.k} v={r.v} />)}
+            {mapInputsStopped(map?.stats) && <p className="reason">map inputs stopped</p>}
+            {mapRows(map?.stats).map((r) => <Row key={r.k} k={r.k} v={r.v} title={r.title} />)}
             {placeholderCalibration(map?.stats) && <p className="reason">placeholder calibration</p>}
           </Section>
         )

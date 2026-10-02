@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { mapRows, placeholderCalibration } from './mapStats'
+import { mapBanner, mapInputsStopped, mapRows, placeholderCalibration } from './mapStats'
 
 const row = (rows: { k: string; v: string }[], k: string) => rows.find((r) => r.k === k)?.v
 
@@ -13,7 +13,7 @@ describe('map widget values', () => {
       { k: 'keyframes', v: '12' },
       { k: 'loop closures', v: '3' },
       { k: 'path length', v: '41.3 m' },
-      { k: 'cloud points', v: '1,234,567' },
+      { k: 'cloud source pts', v: '1,234,567' },
       { k: 'elevation cells', v: '8,800' },
       { k: 'database', v: '52.4 MB' },
       { k: 'depth rate', v: '3.2 Hz' },
@@ -62,5 +62,116 @@ describe('map widget values', () => {
     expect(placeholderCalibration({ calibration_placeholder: 'true' })).toBe(false)
     expect(placeholderCalibration({})).toBe(false)
     expect(placeholderCalibration(undefined)).toBe(false)
+  })
+
+  it('prints a value that rounds to negative zero as zero', () => {
+    const rows = mapRows({ keyframes: -0.4, loop_closures: -0, path_length_m: -0.04, db_bytes: -1000, depth_hz: -0.02, cloud_source_points: -0.2 })
+    expect(row(rows, 'keyframes')).toBe('0')
+    expect(row(rows, 'loop closures')).toBe('0')
+    expect(row(rows, 'path length')).toBe('0.0 m')
+    expect(row(rows, 'database')).toBe('0.0 MB')
+    expect(row(rows, 'depth rate')).toBe('0.0 Hz')
+    expect(row(rows, 'cloud source pts')).toBe('0')
+    for (const r of rows) expect(r.v).not.toMatch(/-0/)
+  })
+
+  it('keeps a real negative reading negative', () => {
+    expect(row(mapRows({ path_length_m: -1.26 }), 'path length')).toBe('-1.3 m')
+    expect(row(mapRows({ keyframes: -3 }), 'keyframes')).toBe('-3')
+  })
+
+  it('shows a negative last-update age as 0.0 s', () => {
+    expect(row(mapRows({ last_update_age_s: -0.3 }), 'last update')).toBe('0.0 s')
+    expect(row(mapRows({ last_update_age_s: -12 }), 'last update')).toBe('0.0 s')
+    expect(row(mapRows({ last_update_age_s: 1.26 }), 'last update')).toBe('1.3 s')
+  })
+
+  it('labels the gateway source point count as such', () => {
+    expect(row(mapRows({ cloud_source_points: 5 }), 'cloud source pts')).toBe('5')
+    expect(row(mapRows({ cloud_source_points: 5 }), 'cloud points')).toBeUndefined()
+  })
+})
+
+describe('map input health rows', () => {
+  it('lists rejects and restarts only when they are finite numbers above zero', () => {
+    expect(mapRows({ map_rejects: 4, map_restarts: 2 }).slice(-2)).toEqual([
+      { k: 'rejects', v: '4' },
+      { k: 'restarts', v: '2' },
+    ])
+    for (const bad of [0, -1, -0, Number.NaN, Infinity, null, '3', true]) {
+      const rows = mapRows({ map_rejects: bad, map_restarts: bad })
+      expect(row(rows, 'rejects')).toBeUndefined()
+      expect(row(rows, 'restarts')).toBeUndefined()
+    }
+    expect(row(mapRows({}), 'rejects')).toBeUndefined()
+    expect(row(mapRows(undefined), 'restarts')).toBeUndefined()
+  })
+
+  it('keeps the base rows first and the optional rows after them', () => {
+    const rows = mapRows({ keyframes: 1, mode: 'mapping', map_rejects: 3, map_restarts: 1 })
+    expect(rows.map((r) => r.k)).toEqual([
+      'keyframes', 'loop closures', 'path length', 'cloud source pts', 'elevation cells', 'database', 'depth rate', 'last update',
+      'mode', 'rejects', 'restarts',
+    ])
+  })
+
+  it('attaches the last reject to the rejects row when there are rejects', () => {
+    const rows = mapRows({ map_rejects: 3, map_last_reject: 'cloud: frame odom is not map' })
+    expect(rows.find((r) => r.k === 'rejects')).toEqual({ k: 'rejects', v: '3', title: 'cloud: frame odom is not map' })
+    expect(rows.find((r) => r.k === 'restarts')).toBeUndefined()
+  })
+
+  it('shows no last reject when it is empty, null, not a string or there are no rejects', () => {
+    for (const last of ['', null, 7, true]) {
+      expect(mapRows({ map_rejects: 3, map_last_reject: last }).find((r) => r.k === 'rejects')).toEqual({ k: 'rejects', v: '3' })
+    }
+    expect(mapRows({ map_rejects: 0, map_last_reject: 'x: y' }).find((r) => r.k === 'rejects')).toBeUndefined()
+    expect(mapRows({ map_last_reject: 'x: y' }).find((r) => r.k === 'rejects')).toBeUndefined()
+    // the restarts row never carries it
+    expect(mapRows({ map_restarts: 2, map_last_reject: 'x: y' }).find((r) => r.k === 'restarts')).toEqual({ k: 'restarts', v: '2' })
+  })
+})
+
+describe('map inputs stopped', () => {
+  it('is true only when the gateway reports false', () => {
+    expect(mapInputsStopped({ map_inputs_alive: false })).toBe(true)
+    expect(mapInputsStopped({ map_inputs_alive: true })).toBe(false)
+    expect(mapInputsStopped({ map_inputs_alive: null })).toBe(false)
+    expect(mapInputsStopped({ map_inputs_alive: 'false' })).toBe(false)
+    expect(mapInputsStopped({ map_inputs_alive: 0 })).toBe(false)
+    expect(mapInputsStopped({})).toBe(false)
+    expect(mapInputsStopped(undefined)).toBe(false)
+  })
+})
+
+describe('map view banner', () => {
+  const stopped = { map_inputs_alive: false }
+  const STOPPED = 'MAP INPUTS STOPPED — layers are not updating'
+
+  it('says nothing when the map is healthy', () => {
+    expect(mapBanner(false, null, {})).toBeNull()
+    expect(mapBanner(false, null, undefined)).toBeNull()
+    expect(mapBanner(false, null, { map_inputs_alive: true })).toBeNull()
+    expect(mapBanner(false, null, { map_inputs_alive: null })).toBeNull()
+  })
+
+  it('shows the stopped banner when the inputs are reported stopped', () => {
+    expect(mapBanner(false, null, stopped)).toBe(STOPPED)
+  })
+
+  it('shows the stopped banner over an empty map too, so the operator learns why nothing arrives', () => {
+    expect(mapBanner(true, null, stopped)).toBe(STOPPED)
+  })
+
+  it('shows the STALE banner for a stale or unlive view, and that takes precedence over the stopped one', () => {
+    expect(mapBanner(false, 'map not updating', {})).toBe('STALE · map not updating')
+    expect(mapBanner(false, 'telemetry lost', { map_inputs_alive: true })).toBe('STALE · telemetry lost')
+    expect(mapBanner(false, 'map not updating', stopped)).toBe('STALE · map not updating')
+    expect(mapBanner(false, 'telemetry lost', stopped)).toBe('STALE · telemetry lost')
+  })
+
+  it('keeps the existing rule that an empty map shows no STALE banner (the NO MAP YET overlay says it)', () => {
+    expect(mapBanner(true, 'map not updating', {})).toBeNull()
+    expect(mapBanner(true, 'map not updating', stopped)).toBeNull() // stale status: its health claim is not trusted
   })
 })

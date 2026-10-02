@@ -226,14 +226,19 @@ describe('operator boundary', () => {
   // The camera view (the main page, its rosbridge reader, source picker and perception widgets) is display-only,
   // by the owner's call.
   const LIVE_VIEW = /\/src\/(components\/(CameraView|Viewport|TopDownMap|Inspector|SourcePanel)\.tsx|source\/(rosbridge|rosimage|camera|useCameraSource)\.ts|analysis\/.*|types\.ts)$/
-  // A direct costmap topic name ('/global_costmap/costmap', "/local_costmap/costmap", ...) is banned outside the live view;
-  // the plain word may appear in labels and prose.
-  const COSTMAP_TOPIC = /['"]\/[a-z_]*costmap\//
+  // A direct costmap topic name ('/global_costmap/costmap', "/local_costmap/costmap", a namespaced one, a template
+  // literal, or a bare '/local_costmap') is banned outside the live view; the plain word may appear in labels and prose.
+  const COSTMAP_TOPIC = /['"`]\/[\w/]*costmap\b/
 
   it('bans direct costmap topic names but not the word in a label', () => {
     expect(COSTMAP_TOPIC.test(`'/global_costmap/costmap'`)).toBe(true)
     expect(COSTMAP_TOPIC.test(`"/local_costmap/costmap"`)).toBe(true)
     expect(COSTMAP_TOPIC.test(`'/costmap/costmap_updates'`)).toBe(true)
+    expect(COSTMAP_TOPIC.test(`'/ugv/local_costmap/costmap'`)).toBe(true) // namespaced
+    expect(COSTMAP_TOPIC.test('`/global_costmap/costmap`')).toBe(true) // template literal
+    expect(COSTMAP_TOPIC.test('`/ugv/local_costmap/costmap`')).toBe(true)
+    expect(COSTMAP_TOPIC.test(`'/local_costmap'`)).toBe(true) // no trailing slash
+    expect(COSTMAP_TOPIC.test(`"/costmap"`)).toBe(true)
     expect(COSTMAP_TOPIC.test(`'Costmap'`)).toBe(false)
     expect(COSTMAP_TOPIC.test(`label: 'Costmap grid'`)).toBe(false)
     expect(COSTMAP_TOPIC.test('// the costmap is built server-side')).toBe(false)
