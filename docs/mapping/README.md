@@ -41,7 +41,7 @@ the gateway subscribes to the heavy topics only while a client keeps calling `GE
 | `/rtabmap/mapPath` | `nav_msgs/Path` | `rtabmap` | gateway (on demand) | optimised graph poses in `map` |
 | `/rtabmap/mapGraph` | `rtabmap_msgs/MapGraph` | `rtabmap` | `map_stats` | cheap, transient local |
 | `/rtabmap/mapData` | `rtabmap_msgs/MapData` | `rtabmap` | none today | meant for the elevation mapper (not built); contract in `ugv_nav/docs/localization/interfaces.md` |
-| `/ugv/map/stats` | `std_msgs/String` (JSON) | `map_stats` (`ugv_localization`) | gateway, always on | `keyframes`, `loop_closures` (distinct closure-type graph links), `path_length_m`, `db_bytes`, `last_update_age_s` (null before the first graph and in `localize` mode), `mode`, `calibration_placeholder` |
+| `/ugv/map/stats` | `std_msgs/String` (JSON) | `map_stats` (`ugv_localization`) | gateway, always on | `keyframes`, `loop_closures` (distinct closure-type graph links; rtabmap's closure constraints, not "returns to a known place": it rises roughly with the node count while driving, even with no revisit, and does not grow while parked), `path_length_m`, `db_bytes`, `last_update_age_s` (null before the first graph and in `localize` mode), `mode`, `calibration_placeholder` |
 | `/ugv/perception/stats` | `std_msgs/String` (JSON) | Dev 1 perception | gateway, always on | `mask_hz`, `depth_hz`, `stage_ms`, `depth_errors` |
 | `/perception/depth/image` | `sensor_msgs/Image` 32FC1 | Dev 1 perception | RTAB-Map, gateway (depth layer, live cloud) | published for every processed frame, not only when a mask is published (D14) |
 | `/global_costmap/costmap` | `nav_msgs/OccupancyGrid` | Nav2 | gateway (on demand) | the cost grid layer, display only |
@@ -101,8 +101,7 @@ gateway's input thread is gone).
 Drive the loop, then stop the stack: the database is saved at `~/.ros/ugv/rtabmap.db` (override with `database_path`). To
 localize on it, relaunch with `mode:=localize`. The localization stack alone:
 `ros2 launch ugv_localization localization.launch.py mode:=mapping|localize` (`fresh_db:=true` starts an empty database).
-Task 8 may move map assembly into a separate `map_assembler` process if assembling inside the SLAM callback delays
-`/rtabmap/info` and trips `slam_stale`; check `ugv_nav/ugv_localization/launch/localization.launch.py` for which is in force.
+Map assembly runs outside the SLAM step: `rtabmap_util/map_assembler` (`/rtabmap/assembler/map_assembler`, started by `localization.launch.py`) builds the whole cloud from `/rtabmap/mapData` and publishes `/rtabmap/cloud_map`. rtabmap's own cloud goes to `/rtabmap/slam/cloud_map`, which nothing should subscribe, so opening the viewer does not load the SLAM loop. Known limits (numbers in `docs/mapping/baseline.md`, section "Task 8 fix round 1"): the first open of the map view takes about 1.4-2.9 s for the first cloud (about 5 ms per node); a few nodes (about 3 per run) can be missing from the viewer cloud (map_assembler's `mapData` queue depth is 1, upstream); map_assembler memory grows (about 1 GB at about 470 nodes; to be checked on a long live run).
 
 Tests: `python -m pytest ugv_nav/ugv_api/test -k map` (codec, store, endpoints); `cd ui && npm run lint && npm test &&
 npm run build`; in the container `colcon test --packages-select ugv_localization ugv_bringup ugv_api`.

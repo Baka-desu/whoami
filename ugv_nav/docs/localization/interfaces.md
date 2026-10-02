@@ -55,11 +55,11 @@ Sim ground-truth depth camera for bring-up / DA3 benchmark: `depth_topic:=<its t
 | `/ugv/localization/distance_travelled` | `std_msgs/Float64` | humans / eval / Dev 4 testbench | metres driven along `/odom` since start or reset, 5 Hz always. An **odometry estimate**, not surveyed: with no wheel sensor it is visual odometry, so DA3 scale bias = distance bias; motion while VO is lost is not counted; jitter < 5 cm and jumps > 3 m/s are ignored (`config/distance.yaml`) |
 | `/ugv/localization/distance_basis` | `std_msgs/String` | whoever reads the distance | what the total is made of: `none`, `visual_odometry_estimate`, `wheel_odometry`, `odometry_estimate` (mixed / unattributed); latched, on change |
 | `/ugv/localization/reset_distance` | `std_srvs/Empty` (service) | Dev 4 / operator | zero the total, e.g. at each new goal |
-| `/ugv/map/stats` | `std_msgs/String` (one JSON object) | web viewer (gateway: the `stats` of the map status) | `map_stats` node, 1 Hz, reliable + transient local (a late subscriber gets the latest). Scalars only: `keyframes` (int, poses in the latest graph), `loop_closures` (int, loop-closure and proximity-detection matches seen on `/rtabmap/info` since start; each matched node counts once per kind, so a parked robot that keeps re-matching the same node adds nothing), `path_length_m` (float, x/y polyline through the graph poses in id order), `db_bytes` (int or null, size of the database file, null if there is none), `last_update_age_s` (float or null, seconds since the graph last changed, null before the first graph), `mode` (`mapping` or `localize`), `calibration_placeholder` (bool, the `placeholder` flag of the `calibration_file` launch argument, false when none). A non-finite float is null. Reads only `/rtabmap/mapGraph` and `/rtabmap/info`, never `cloud_map` or `mapData` (a subscriber on either makes RTAB-Map assemble and send the whole map every step) |
+| `/ugv/map/stats` | `std_msgs/String` (one JSON object) | web viewer (gateway: the `stats` of the map status) | `map_stats` node, ~1 Hz, reliable + transient local (a late subscriber gets the latest). Scalars only: `keyframes` (int, graph poses with id > 0; tag landmarks, negative ids, are not keyframes), `loop_closures` (int, distinct unordered node pairs among the latest `/rtabmap/mapGraph` links of type global, local-space or user closure; neighbour, local-time, merged, virtual, prior, landmark and gravity links are excluded, so a parked robot on a never-repeating scene reads 0). It counts rtabmap's closure constraints, the same thing rtabmap reports, not "times the robot returned to a known place": while driving, rtabmap links almost every new node to an older, non-adjacent node with an overlapping view, so it rises roughly with the node count during normal driving (0 to 92 in 60 s with no revisit on a live graph) and does not grow while parked. `path_length_m` (float or null, x/y polyline through the graph poses in id order), `db_bytes` (int or null; null unless the database path is a regular file), `last_update_age_s` (float or null; seconds since the graph's ids or poses changed; null before the first graph and always null in `localize` mode because the map is read-only), `mode` (`mapping` or `localize`), `calibration_placeholder` (bool, the `placeholder` flag of the `calibration_file` launch argument, false when none). A non-finite float is null. Reads only `/rtabmap/mapGraph`, never `cloud_map`, `mapData` or `/rtabmap/info` (a subscriber on `cloud_map` or `mapData` makes RTAB-Map assemble and send the whole map every step) |
 | `/rtabmap/info` | `rtabmap_msgs/Info` | eval | RTAB-Map native |
 | `/rtabmap/cloud_map` | `sensor_msgs/PointCloud2` | web viewer (gateway, on demand) | the whole 3D map, coloured, from `map_assembler`, once per SLAM step while subscribed. See **3D map outputs** |
 | `/rtabmap/mapPath` | `nav_msgs/Path` | web viewer (gateway, on demand) | graph poses in `map`. See **3D map outputs** |
-| `/rtabmap/mapData` | `rtabmap_msgs/MapData` | elevation mapper (Task 12) | each new graph node's depth, camera info and camera pose, **once**. See **`/rtabmap/mapData` consumer contract** |
+| `/rtabmap/mapData` | `rtabmap_msgs/MapData` | future elevation mapper (not built; Task 12 deferred) | each new graph node's depth, camera info and camera pose, **once**. See **`/rtabmap/mapData` consumer contract** |
 | `rtabmap.db` | file | Dev 2 localize mode | `~/.ros/ugv/rtabmap.db` by default |
 
 **Not published:** `/cmd_vel*`, anything from the perception mask.
@@ -87,7 +87,7 @@ subscribes them.
   (5 cm). It is the **whole map, republished every SLAM step** (about 2 Hz): 57k points (0.9 MB) after 190 s of motion,
   growing with the map, so a consumer needs a point budget. **Clipped at about 1 m above `base_link`** by
   `Grid/MaxObstacleHeight: "1.0"` (it filters the 3D local maps the cloud is made of): upper walls, trees and overhangs
-  are missing from it. Owner decision pending; the elevation mapper is not affected (it reads `mapData` depth).
+  are missing from it. Owner decision pending; a future elevation mapper would not be affected (it would read `mapData` depth).
   **Late attach** (the gateway subscribes only while a viewer is open): `map_assembler` builds the whole cloud when the
   first subscriber attaches (1.4-1.7 s at 270-285 nodes, about 5 ms per node, growing with the map; the cloud arrives
   1.4-2.3 s after the attach) and adds only the new nodes after that. `map_cleanup: false` (assembler only) keeps its
@@ -96,13 +96,15 @@ subscribes them.
   the same as with no viewer (docs/mapping/baseline.md "Task 8 fix round 1"). Limits: the assembler's `mapData` subscription keeps 1 message
   (hard-coded in rtabmap_util 0.23.7), so the messages that arrive while it assembles are dropped and those nodes (1-2
   at the first attach, 1-2 at start-up) stay missing from the cloud for the run. The cloud is for display only; the
-  elevation mapper reads `mapData` itself. It also holds every node's data plus the grid cache in memory (RSS 0.9-1.1 GB
+  a future elevation mapper would read `mapData` itself. It also holds every node's data plus the grid cache in memory (RSS 0.9-1.1 GB
   at 460-480 nodes in the synthetic runs, next to rtabmap's 1.2-1.3 GB).
 - **`mapPath`**: frame `map`, one pose per graph node (optimised; it changes on loop closure).
 
-### `/rtabmap/mapData` consumer contract (what the elevation node, Task 12, builds against)
+### `/rtabmap/mapData` consumer contract (what a future elevation node would build against)
 
-Checked by `test/test_ros_stack.py::test_x4_rtabmap_3d_map_outputs` (`_map_data_problems`, `_depth_png_problem`).
+> **Elevation (not built).** The owner deferred the elevation map (plan Tasks 10-12). No node publishes `/ugv/elevation/cloud` or `/ugv/elevation/obstacles`; the gateway subscribes to them on demand and the `elevation` layer stays at seq 0 (`GET /api/v1/map/elevation` answers 503). `/rtabmap/mapData` therefore has no consumer today except `map_assembler`; the contract below is for a future elevation mapper.
+
+Which points a test asserts and which were measured once (`test/test_ros_stack.py`): `test_x4_rtabmap_3d_map_outputs` (`_map_data_problems`, `_depth_png_problem`) asserts points 2-4 (first entry per id with data, every id of the final graph delivered, float32-in-PNG depth at camera size) and that `left_camera_info` and `local_transform` are non-empty; unit tests `test_x4a_*` cover those checks. Points 1 and 5-7 (one node per message, pose z = 0, JPEG left image, empty camera-info `frame_id`, the `local_transform` values) were measured once and are not asserted.
 
 1. **One node per message.** `graph` is the whole graph (`poses_id`, optimised `poses` in `map`; take node poses from the
    latest message's graph, not from the message that delivered the node: loop closures move them). `nodes` holds one

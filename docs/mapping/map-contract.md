@@ -8,7 +8,7 @@ Little-endian. Decoders reject an unknown `format` and any length that does not 
 
 ```
 prelude (24 bytes, all layers)
- 0 char[4] magic   "UGVC" cloud | "UGVE" elevation | "UGVT" trajectory | "UGVG" cost grid
+ 0 char[4] magic   "UGVC" cloud | "UGVE" elevation | "UGVT" trajectory | "UGVG" cost grid | "UGVD" depth
  4 u16 format = 1          6 u16 header_bytes
  8 u32 epoch (random per gateway process)      12 u32 seq       16 f64 stamp_s
 
