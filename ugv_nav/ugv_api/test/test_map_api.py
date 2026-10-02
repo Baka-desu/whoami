@@ -189,13 +189,17 @@ def test_cloud_is_cut_to_the_configured_budget_and_spacing():
     assert d["spacing_m"] == pytest.approx(0.2)
 
 
-def test_live_cloud_is_never_decimated_and_has_no_colour():
-    rig = Rig(MapStore(epoch=9), cloud_point_budget=2)  # a budget far below N must not touch the live scan
+def test_live_cloud_has_no_colour_and_its_own_budget():
+    rig = Rig(MapStore(epoch=9), cloud_point_budget=2)  # the map cloud's budget does not cut the live scan
     rig.maps.put("live", live_source(6), 7.0)
     d = codec.decode_cloud(get_binary(rig, "live").content)
     assert (d["epoch"], d["seq"], d["stamp_s"]) == (9, 1, 7.0)
     assert d["count"] == 6 and d["source_count"] == 6 and not d["has_rgb"]
     np.testing.assert_array_equal(d["xyz"], live_source(6)["xyz"])
+    cut = Rig(MapStore(), live_point_budget=4)  # Dev 1's cloud is full resolution: the live budget cuts it
+    cut.maps.put("live", live_source(6), 7.0)
+    d = codec.decode_cloud(get_binary(cut, "live").content)
+    assert d["count"] == 4 and d["source_count"] == 6
 
 
 def test_trajectory_decodes(rig):
@@ -387,7 +391,7 @@ def test_map_handlers_are_sync_so_encoding_runs_in_the_threadpool(rig):
 
 
 @pytest.mark.parametrize("tunable,value", [
-    ("cloud_point_budget", -1), ("cloud_spacing_m", 0.0), ("cloud_spacing_m", float("nan")),
+    ("cloud_point_budget", -1), ("cloud_spacing_m", 0.0), ("cloud_spacing_m", float("nan")), ("live_point_budget", -1),
 ])
 def test_bad_tunables_fail_at_construction(tunable, value):
     with pytest.raises(ValueError, match=tunable):

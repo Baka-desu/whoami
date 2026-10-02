@@ -46,7 +46,8 @@ demand" below) only while a client keeps calling `GET /api/v1/map`.
 | `/rtabmap/mapData` | `rtabmap_msgs/MapData` | `rtabmap` | `map_assembler`, always (while it runs) | every SLAM step: the new node's data and the graph. Also the input a future elevation mapper would use (not built); contract in `ugv_nav/docs/localization/interfaces.md` |
 | `/ugv/map/stats` | `std_msgs/String` (JSON) | `map_stats` (`ugv_localization`) | gateway, always on | `keyframes`, `loop_closures` (distinct closure-type graph links; rtabmap's closure constraints, not "returns to a known place": it rises roughly with the node count while driving, even with no revisit, and does not grow while parked), `path_length_m`, `db_bytes`, `last_update_age_s` (null before the first graph and in `localize` mode), `mode`, `calibration_placeholder` |
 | `/ugv/perception/stats` | `std_msgs/String` (JSON) | Dev 1 perception | gateway, always on | `mask_hz`, `depth_hz`, `stage_ms`, `depth_errors` |
-| `/perception/depth/image` | `sensor_msgs/Image` 32FC1 | Dev 1 perception | RTAB-Map, gateway (live cloud), UI camera view | published for every processed frame, not only when a mask is published (D14) |
+| `/perception/depth/image` | `sensor_msgs/Image` 32FC1 | Dev 1 perception | RTAB-Map, UI camera view | published for every processed frame, not only when a mask is published (D14) |
+| `/perception/depth_cloud` | `sensor_msgs/PointCloud2` | Dev 1 perception | gateway (on demand), Nav2 VoxelLayer | the live cloud layer; the gateway does not back-project depth itself |
 | `/global_costmap/costmap` | `nav_msgs/OccupancyGrid` | Nav2 | gateway (on demand) | the cost grid layer, display only |
 | `/image_raw/compressed` | `sensor_msgs/CompressedImage` | camera driver | UI camera view (read only) | also drawn in the map view's camera panel; the gateway does not carry it |
 
@@ -73,7 +74,7 @@ body. Decoders reject an unknown format and any length that is not exact.
 
 | Layer | Magic | Body |
 |---|---|---|
-| cloud, live | `UGVC` | `f32 xyz`, then `u8 rgb` if flag bit 0; at most `cloud_point_budget` points (default 500000) picked by spatial hash at `cloud_spacing_m` (0.05). `live` is the current depth scan back-projected with CameraInfo K (every 4th pixel, 0.3-8 m) and transformed to `map` |
+| cloud, live | `UGVC` | `f32 xyz`, then `u8 rgb` if flag bit 0; at most `cloud_point_budget` points (default 500000) picked by spatial hash at `cloud_spacing_m` (0.05). `live` is Dev 1's `/perception/depth_cloud` (already back-projected by perception, full resolution), range-gated on optical depth (0.3-8 m), transformed to `map` and cut to `live_point_budget` (20000) points the same way |
 | trajectory | `UGVT` | `f32 x y z qx qy qz qw` per pose |
 | grid | `UGVG` | `i8` cells (-1 unknown, 0..100); size, resolution, origin and yaw in the header |
 

@@ -17,7 +17,7 @@ ugv_api:
     map:
       cloud_point_budget: 500000      # points in a served cloud, picked by spatial hash at cloud_spacing_m
       cloud_spacing_m: 0.05
-      live_stride: 4                  # live scan: every 4th depth pixel, back-projected with CameraInfo K
+      live_point_budget: 20000        # live scan (Dev 1's depth cloud, full resolution): points served
       live_range_min_m: 0.3
       live_range_max_m: 8.0
       idle_timeout_s: 10.0
@@ -25,7 +25,7 @@ ugv_api:
       cloud_topic: /rtabmap/cloud_map
       trajectory_topic: /rtabmap/mapPath
       grid_topic: /global_costmap/costmap
-      depth_topic: /perception/depth/image
+      live_cloud_topic: /perception/depth_cloud
       map_stats_topic: /ugv/map/stats
       perception_stats_topic: /ugv/perception/stats
     # DISPLAY limits for the §12 table shown to the operator. The enforcing limits are Dev 5's

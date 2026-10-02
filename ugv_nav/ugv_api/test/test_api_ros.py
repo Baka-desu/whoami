@@ -50,9 +50,9 @@ IDLE_S = 1.5
 STATS_STALE_S = 1.5
 
 CLOUD, PATH = "/rtabmap/cloud_map", "/rtabmap/mapPath"
-GRID, DEPTH = "/global_costmap/costmap", "/perception/depth/image"
+GRID, DEPTH_CLOUD = "/global_costmap/costmap", "/perception/depth_cloud"
 MAP_STATS, PERCEPTION_STATS = "/ugv/map/stats", "/ugv/perception/stats"
-HEAVY_TOPICS = (CLOUD, PATH, GRID, DEPTH)
+HEAVY_TOPICS = (CLOUD, PATH, GRID, DEPTH_CLOUD)
 GATEWAY_STAT_KEYS = {"cloud_source_points", "map_inputs_alive", "map_rejects", "map_restarts", "map_last_reject"}
 # A map thread that stopped ticking is reported not alive after MAP_ALIVE_S; the gateway checks every 0.5 s.
 MAP_ALIVE_BOUND = ros_node.MAP_ALIVE_S + 3.0
@@ -117,7 +117,7 @@ class Inputs:
 
 class MapPubs:
     """Publishers for the map inputs, with the durability each real publisher uses: RTAB-Map's cloud and the
-    map stats are latched (transient local); the path, the depth image and the perception stats are volatile."""
+    map stats are latched (transient local); the path, the depth cloud and the perception stats are volatile."""
 
     def __init__(self, node) -> None:
         latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
@@ -125,7 +125,7 @@ class MapPubs:
         self.node = node
         self.cloud = node.create_publisher(PointCloud2, CLOUD, latched)
         self.path = node.create_publisher(Path, PATH, volatile)
-        self.depth = node.create_publisher(Image, DEPTH, volatile)
+        self.depth_cloud = node.create_publisher(PointCloud2, DEPTH_CLOUD, volatile)
         self.map_stats = node.create_publisher(String, MAP_STATS, latched)
         self.perception_stats = node.create_publisher(String, PERCEPTION_STATS, QoSProfile(depth=10))
 
@@ -472,6 +472,16 @@ def make_rgb_cloud(xyz, rgb, stamp, frame="map"):
     return msg
 
 
+def make_xyz_cloud(xyz, stamp, frame="camera_optical_frame"):
+    """Dev 1's /perception/depth_cloud layout: x y z float32, 12-byte records, unorganised, not dense."""
+    msg = PointCloud2()
+    msg.header.stamp, msg.header.frame_id = stamp, frame
+    msg.height, msg.width, msg.point_step, msg.row_step, msg.is_dense = 1, len(xyz), 12, 12 * len(xyz), False
+    msg.fields = _fields("x", "y", "z")
+    msg.data = _pack([xyz[:, 0], xyz[:, 1], xyz[:, 2]], [0, 4, 8], 12)
+    return msg
+
+
 def make_path(rows, stamp, frame="map"):
     msg = Path()
     msg.header.stamp, msg.header.frame_id = stamp, frame
@@ -492,15 +502,6 @@ def make_grid(cells, resolution, origin, stamp, yaw=0.0, frame="map"):
     msg.info.origin.position.x, msg.info.origin.position.y = origin
     msg.info.origin.orientation.z, msg.info.origin.orientation.w = math.sin(yaw / 2), math.cos(yaw / 2)
     msg.data = cells.astype(np.int8).reshape(-1).tolist()
-    return msg
-
-
-def make_depth(frame, stamp, depth_m):
-    msg = Image()
-    msg.header.stamp, msg.header.frame_id = stamp, frame
-    msg.height, msg.width = depth_m.shape
-    msg.encoding, msg.is_bigendian, msg.step = "32FC1", False, 4 * depth_m.shape[1]
-    msg.data = depth_m.astype("<f4").tobytes()
     return msg
 
 
@@ -614,12 +615,13 @@ def test_a_latched_costmap_is_received_when_its_publisher_appears_after_the_subs
     assert out["origin_yaw"] == pytest.approx(0.5, abs=1e-6)
 
 
-def _expected_live_points():
-    """Pixels (0,0) (4,0) (0,4) (4,4) of an 8 x 6 image at 2 m, through the optical -> base -> map chain, with
-    plain numpy and the numbers published above."""
-    fx, fy, cx, cy = K[0], K[4], K[2], K[5]
-    z = 2.0
-    optical = np.array([[(u - cx) * z / fx, (v - cy) * z / fy, z] for v in (0, 4) for u in (0, 4)])
+# Four optical-frame points 2 m ahead, then what the range gate (0.3-8 m) and the NaN check drop.
+LIVE_IN_RANGE = np.array([[-0.8, -0.4, 2.0], [0.0, -0.4, 2.0], [-0.8, 0.4, 2.0], [0.0, 0.4, 2.0]], dtype=np.float32)
+LIVE_DROPPED = np.array([[0.0, 0.0, 0.1], [0.0, 0.0, 9.0], [np.nan, 0.0, 2.0]], dtype=np.float32)
+
+
+def _expected_live_points(optical):
+    """`optical` through the optical -> base -> map chain, with plain numpy and the numbers published above."""
     r_opt = np.array([[0, 0, 1], [-1, 0, 0], [0, -1, 0]], dtype=float)  # body = (z, -x, -y)
     yaw = POSE["yaw"]
     r_yaw = np.array([[math.cos(yaw), -math.sin(yaw), 0], [math.sin(yaw), math.cos(yaw), 0], [0, 0, 1]])
@@ -627,29 +629,28 @@ def _expected_live_points():
     return in_base @ r_yaw.T + np.array([POSE["x"], POSE["y"], POSE["z"]])
 
 
-def test_live_layer_is_the_depth_image_in_the_map_frame(graph):
+def test_live_layer_is_the_depth_cloud_in_the_map_frame(graph):
     c, pubs = graph["client"], graph["pubs"]
-    depth = np.full((CAM_H, CAM_W), 2.0, dtype=np.float32)
+    cloud = np.concatenate([LIVE_IN_RANGE, LIVE_DROPPED])
 
     def publish():
-        pubs.depth.publish(make_depth("camera_optical_frame", pubs.now(), depth))
+        pubs.depth_cloud.publish(make_xyz_cloud(cloud, pubs.now()))
 
     with watching(c):
         live = codec.decode_cloud(_fetch(c, "/map/live", publish=publish).content)
-    assert live["count"] == 4 and not live["has_rgb"]  # live_stride 4: columns 0 4, rows 0 4
-    assert np.allclose(live["xyz"], _expected_live_points(), atol=1e-4)
+    assert live["count"] == 4 and not live["has_rgb"]  # too near, too far and NaN are dropped
+    assert np.allclose(live["xyz"], _expected_live_points(LIVE_IN_RANGE), atol=1e-4)
 
 
 def test_live_is_skipped_without_a_transform(graph):
     c, pubs, gw = graph["client"], graph["pubs"], graph["gw"]
-    depth = np.full((CAM_H, CAM_W), 2.0, dtype=np.float32)
     with watching(c):
         before = _map_status(c)
         rejects_before = gw.map_rejects.get("live_no_transform", 0)
         deadline = time.monotonic() + 8.0
         # frames keep arriving (each one is counted as skipped), none of them becomes a live layer
         while time.monotonic() < deadline and gw.map_rejects.get("live_no_transform", 0) < rejects_before + 3:
-            pubs.depth.publish(make_depth("no_such_frame", pubs.now(), depth))
+            pubs.depth_cloud.publish(make_xyz_cloud(LIVE_IN_RANGE, pubs.now(), frame="no_such_frame"))
             time.sleep(0.1)
         after = _map_status(c)
         stats = _wait(lambda: (lambda s: s if s["map_rejects"] > before["stats"]["map_rejects"] else None)(

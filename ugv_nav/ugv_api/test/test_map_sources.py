@@ -183,123 +183,6 @@ def test_grid_source_refuses_a_size_that_disagrees_with_the_data():
                        origin_q=(0, 0, 0, 1))
 
 
-# -------------------------------------------------------------------------------------------- depth
-
-
-def test_depth_source_is_a_float32_h_by_w_copy_with_nan_holes_kept():
-    h, w = 3, 4
-    image = np.arange(h * w, dtype=np.float32).reshape(h, w) / 4
-    image[1, 2] = np.nan
-    buffer = array.array("B", image.tobytes())
-    src = ms.depth_source(encoding="32FC1", height=h, width=w, step=w * 4, is_bigendian=False, data=buffer)
-    assert set(src) == {"depth_m"}
-    d = src["depth_m"]
-    assert d.dtype == np.float32 and d.shape == (3, 4) and d.flags.c_contiguous and d.flags.writeable is False
-    assert np.array_equal(d, image, equal_nan=True)
-    assert not np.shares_memory(d, np.frombuffer(buffer, dtype=np.uint8))
-
-
-def test_depth_source_honours_row_padding():
-    h, w, step = 2, 3, 20  # 8 padding bytes per row
-    rows = np.zeros((h, step), dtype=np.uint8)
-    values = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], dtype=np.float32)
-    rows[:, : w * 4] = values.view(np.uint8).reshape(h, w * 4)
-    rows[:, w * 4 :] = 0xAB
-    src = ms.depth_source(encoding="32FC1", height=h, width=w, step=step, is_bigendian=False, data=rows.tobytes())
-    assert src["depth_m"].tolist() == values.tolist()
-
-
-def test_depth_source_reads_big_endian_images():
-    values = np.array([[1.5, 2.5]], dtype=np.float32)
-    src = ms.depth_source(encoding="32FC1", height=1, width=2, step=8, is_bigendian=True,
-                          data=values.astype(">f4").tobytes())
-    assert src["depth_m"].tolist() == [[1.5, 2.5]]
-
-
-@pytest.mark.parametrize(
-    "kw",
-    [
-        dict(encoding="16UC1"),  # millimetres: not this layer's unit
-        dict(encoding="mono8"),
-        dict(step=4),  # a row is 3 floats, 4 bytes is not enough
-        dict(data=b"\x00" * 23),  # one byte short
-        dict(width=0),
-        dict(height=0),
-    ],
-)
-def test_depth_source_refuses_anything_but_a_complete_32fc1_image(kw):
-    args = dict(encoding="32FC1", height=2, width=3, step=12, is_bigendian=False, data=b"\x00" * 24)
-    args.update(kw)
-    with pytest.raises(ValueError):
-        ms.depth_source(**args)
-
-
-# ------------------------------------------------------------------------------------ intrinsics
-
-
-K = (10.0, 0.0, 4.0, 0.0, 10.0, 2.0, 0.0, 0.0, 1.0)
-
-
-def test_intrinsics_reads_fx_fy_cx_cy_from_the_row_major_k():
-    assert ms.intrinsics(K, width=8, height=6) == (10.0, 10.0, 4.0, 2.0)
-
-
-def test_intrinsics_scales_k_when_the_image_is_a_resized_calibration_frame():
-    assert ms.intrinsics(K, width=4, height=3, info_width=8, info_height=6) == (5.0, 5.0, 2.0, 1.0)
-    assert ms.intrinsics(K, width=8, height=6, info_width=8, info_height=6) == (10.0, 10.0, 4.0, 2.0)
-    assert ms.intrinsics(K, width=8, height=6, info_width=0, info_height=0) == (10.0, 10.0, 4.0, 2.0)  # unknown
-
-
-@pytest.mark.parametrize(
-    "k",
-    [(0.0,) * 9, (math.nan, 0, 4, 0, 10, 2, 0, 0, 1), (10, 0, 4, 0, -10, 2, 0, 0, 1), (10, 0, 4), (10, 0, math.inf, 0, 10, 2, 0, 0, 1)],
-    ids=["all-zero", "nan", "negative-fy", "short", "inf-cx"],
-)
-def test_intrinsics_rejects_a_missing_or_fake_k(k):
-    assert ms.intrinsics(k, width=8, height=6) is None
-
-
-# -------------------------------------------------------------------------------------- back-projection
-
-
-INTR = (10.0, 10.0, 4.0, 2.0)
-
-
-def test_backproject_lands_each_pixel_where_the_pinhole_model_puts_it():
-    depth = np.full((6, 8), 2.0, dtype=np.float32)
-    pts = ms.backproject(depth, INTR, stride=2, min_range_m=0.3, max_range_m=8.0)
-    # stride 2 keeps columns 0 2 4 6 and rows 0 2 4: 12 pixels, row-major
-    assert pts.dtype == np.float32 and pts.shape == (12, 3)
-    expect = [((u - 4.0) * 2.0 / 10.0, (v - 2.0) * 2.0 / 10.0, 2.0) for v in (0, 2, 4) for u in (0, 2, 4, 6)]
-    assert np.allclose(pts, np.array(expect, dtype=np.float32), atol=1e-6)
-    assert pts[6].tolist() == pytest.approx([0.0, 0.0, 2.0])  # pixel (4, 2) is on the optical axis: row 1, col 2
-
-
-def test_backproject_stride_picks_every_nth_pixel():
-    depth = np.full((6, 8), 1.0, dtype=np.float32)
-    assert len(ms.backproject(depth, INTR, stride=1, min_range_m=0.3, max_range_m=8.0)) == 48
-    assert len(ms.backproject(depth, INTR, stride=4, min_range_m=0.3, max_range_m=8.0)) == 4  # cols 0 4, rows 0 4
-    assert len(ms.backproject(depth, INTR, stride=3, min_range_m=0.3, max_range_m=8.0)) == 6  # cols 0 3 6, rows 0 3
-
-
-def test_backproject_gates_on_range_inclusively_and_drops_holes():
-    depth = np.array([[0.1, 0.3, 1.0, 8.0, 8.5, np.nan, np.inf, -1.0, 0.0]], dtype=np.float32)
-    pts = ms.backproject(depth, (10.0, 10.0, 0.0, 0.0), stride=1, min_range_m=0.3, max_range_m=8.0)
-    assert pts[:, 2].tolist() == pytest.approx([0.3, 1.0, 8.0])  # 0.1 too near, 8.5 too far, the rest holes
-    assert pts[:, 0].tolist() == pytest.approx([1 * 0.3 / 10, 2 * 1.0 / 10, 3 * 8.0 / 10])  # keeps its own column
-
-
-def test_backproject_of_an_all_hole_image_is_an_empty_n_by_3():
-    pts = ms.backproject(np.full((4, 4), np.nan, dtype=np.float32), INTR, stride=1, min_range_m=0.3, max_range_m=8.0)
-    assert pts.shape == (0, 3) and pts.dtype == np.float32
-
-
-def test_backproject_does_not_modify_its_input():
-    depth = np.full((6, 8), 2.0, dtype=np.float32)
-    depth.flags.writeable = False
-    ms.backproject(depth, INTR, stride=2, min_range_m=0.3, max_range_m=8.0)
-
-
 # ---------------------------------------------------------------------------------- transform_points
 
 # optical (x right, y down, z forward) -> body (x forward, y left, z up): body = (z, -x, -y)
@@ -314,18 +197,33 @@ def test_transform_points_rotates_then_translates_by_a_yaw_and_an_offset():
     assert np.allclose(out, [[1, 3, 3], [0, 2, 3], [1, 2, 4]], atol=1e-6)
 
 
-def test_a_camera_pixel_lands_at_the_expected_map_point():
+def test_a_camera_point_lands_at_the_expected_map_point():
     """Camera 0.1 m ahead and 0.3 m above the base, base at (1, 2, 0.25) turned 90 degrees left: a point 2 m in
     front of the camera and 0.4 m below its axis ends up where the chain of frames says."""
-    depth = np.full((6, 8), 2.0, dtype=np.float32)
-    cam = ms.backproject(depth, INTR, stride=4, min_range_m=0.3, max_range_m=8.0)  # pixels (0,0) (4,0) (0,4) (4,4)
+    cam = np.array([[-0.8, -0.4, 2.0], [0.0, -0.4, 2.0], [-0.8, 0.4, 2.0], [0.0, 0.4, 2.0]], dtype=np.float32)
     in_base = ms.transform_points(cam, (0.1, 0.0, 0.3), Q_OPTICAL_TO_BODY)
     in_map = ms.transform_points(in_base, (1.0, 2.0, 0.25), yaw_to_quaternion(math.pi / 2))
-    # pixel (4, 4): optical (0, 0.4, 2) -> base (2, 0, -0.4) + (0.1, 0, 0.3) = (2.1, 0, -0.1) -> map (1, 4.1, 0.15)
+    # optical (0, 0.4, 2) -> base (2, 0, -0.4) + (0.1, 0, 0.3) = (2.1, 0, -0.1) -> map (1, 4.1, 0.15)
     assert np.allclose(in_map[3], [1.0, 4.1, 0.15], atol=1e-5)
-    # pixel (0, 0): optical (-0.8, -0.4, 2) -> base (2, 0.8, 0.4) + (0.1, 0, 0.3) = (2.1, 0.8, 0.7)
+    # optical (-0.8, -0.4, 2) -> base (2, 0.8, 0.4) + (0.1, 0, 0.3) = (2.1, 0.8, 0.7)
     #   -> yaw 90: (-0.8, 2.1, 0.7) + (1, 2, 0.25) = (0.2, 4.1, 0.95)
     assert np.allclose(in_map[0], [0.2, 4.1, 0.95], atol=1e-5)
+
+
+def test_within_range_keeps_finite_points_whose_optical_depth_is_in_range_inclusively():
+    xyz = np.array([[1, 1, 0.1], [1, 1, 0.3], [2, 2, 1.0], [3, 3, 8.0], [4, 4, 8.5], [np.nan, 0, 2], [0, np.inf, 2],
+                    [0, 0, np.nan], [0, 0, -1.0]], dtype=np.float32)
+    out = ms.within_range(xyz, 0.3, 8.0)
+    assert out.dtype == np.float32 and out.flags.c_contiguous
+    assert out.tolist() == [[1, 1, 0.30000001192092896], [2, 2, 1.0], [3, 3, 8.0]]  # order kept
+    assert ms.within_range(np.zeros((0, 3), np.float32), 0.3, 8.0).shape == (0, 3)
+
+
+def test_within_range_copies_a_read_only_view():
+    buffer = np.array([[0, 0, 2.0]], dtype=np.float32)
+    buffer.flags.writeable = False
+    out = ms.within_range(buffer, 0.3, 8.0)
+    assert not np.shares_memory(out, buffer)
 
 
 def test_transform_points_normalises_a_slightly_off_quaternion():
@@ -368,18 +266,18 @@ def test_stamp_seconds_uses_the_message_stamp_and_falls_back_for_an_unstamped_on
 def test_map_config_defaults_are_the_values_the_gateway_ships_with():
     c = ms.MapConfig()
     assert (c.cloud_point_budget, c.cloud_spacing_m) == (500_000, 0.05)
-    assert (c.live_stride, c.live_range_min_m, c.live_range_max_m) == (4, 0.3, 8.0)
+    assert (c.live_point_budget, c.live_range_min_m, c.live_range_max_m) == (20_000, 0.3, 8.0)
     assert c.idle_timeout_s == 10.0
     assert (c.cloud_topic, c.trajectory_topic, c.grid_topic) == ("/rtabmap/cloud_map", "/rtabmap/mapPath",
                                                                   "/global_costmap/costmap")
-    assert c.depth_topic == "/perception/depth/image"
+    assert c.live_cloud_topic == "/perception/depth_cloud"
     assert (c.map_stats_topic, c.perception_stats_topic) == ("/ugv/map/stats", "/ugv/perception/stats")
 
 
 def test_map_config_app_kwargs_are_exactly_the_tunables_create_app_takes():
     accepted = set(inspect.signature(create_app).parameters)
     kwargs = ms.MapConfig(cloud_point_budget=10, cloud_spacing_m=0.25).app_kwargs()
-    assert set(kwargs) == {"cloud_point_budget", "cloud_spacing_m"}
+    assert set(kwargs) == {"cloud_point_budget", "cloud_spacing_m", "live_point_budget"}
     assert set(kwargs) <= accepted
     assert kwargs["cloud_point_budget"] == 10 and kwargs["cloud_spacing_m"] == 0.25
 
@@ -388,9 +286,9 @@ def test_map_config_app_kwargs_are_exactly_the_tunables_create_app_takes():
     "bad",
     [
         dict(cloud_point_budget=-1), dict(cloud_spacing_m=0.0), dict(cloud_spacing_m=math.nan),
-        dict(live_stride=0), dict(live_range_min_m=-0.1), dict(live_range_max_m=0.0),
+        dict(live_point_budget=-1), dict(live_range_min_m=-0.1), dict(live_range_max_m=0.0),
         dict(live_range_min_m=5.0, live_range_max_m=5.0), dict(idle_timeout_s=0.0), dict(idle_timeout_s=math.nan),
-        dict(stats_stale_s=0.0), dict(cloud_topic=""), dict(depth_topic="relative/topic"),
+        dict(stats_stale_s=0.0), dict(cloud_topic=""), dict(live_cloud_topic="relative/topic"),
     ],
 )
 def test_map_config_refuses_a_bad_value_naming_it(bad):

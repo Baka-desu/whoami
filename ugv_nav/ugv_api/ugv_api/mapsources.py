@@ -6,7 +6,7 @@ ros_node.py copies the few fields it needs out of a message and calls one of the
   cloud       cloud_source          {"fields", "point_step", "n_points", "is_bigendian", "data"}
   trajectory  trajectory_source     (N, 7) float32 x y z qx qy qz qw
   grid        grid_source           {"cells", "resolution", "origin_xy", "origin_yaw"}
-  live        backproject + transform_points -> {"xyz": (N, 3) float32}   (built by the caller)
+  live        cloud_source -> within_range -> transform_points: {"xyz": (N, 3) float32}   (built by the caller)
 
 A source is immutable once it is in the store. What a message hands over is therefore either copied or a
 read-only view of a buffer nobody writes again (rclpy builds a fresh message, and a fresh `data` buffer, for
@@ -28,16 +28,14 @@ import numpy as np
 
 __all__ = [
     "MapConfig",
-    "backproject",
     "cloud_source",
-    "depth_source",
     "grid_source",
-    "intrinsics",
     "parse_stats",
     "quaternion_yaw",
     "stamp_seconds",
     "trajectory_source",
     "transform_points",
+    "within_range",
 ]
 
 
@@ -67,8 +65,9 @@ class MapConfig:
     # --- what the HTTP layer encodes with (create_app tunables)
     cloud_point_budget: int = 500_000
     cloud_spacing_m: float = 0.05
-    # --- the live scan built from the depth image
-    live_stride: int = 4
+    # --- the live scan: Dev 1's depth cloud, range-gated on its optical depth, in the map frame; at most
+    # live_point_budget points served (spatial hash at cloud_spacing_m, like the map cloud)
+    live_point_budget: int = 20_000
     live_range_min_m: float = 0.3
     live_range_max_m: float = 8.0
     # --- demand: heavy subscriptions live this long after the last GET /api/v1/map; stats go quiet after
@@ -79,7 +78,7 @@ class MapConfig:
     cloud_topic: str = "/rtabmap/cloud_map"
     trajectory_topic: str = "/rtabmap/mapPath"
     grid_topic: str = "/global_costmap/costmap"
-    depth_topic: str = "/perception/depth/image"
+    live_cloud_topic: str = "/perception/depth_cloud"
     map_stats_topic: str = "/ugv/map/stats"
     perception_stats_topic: str = "/ugv/perception/stats"
 
@@ -87,7 +86,7 @@ class MapConfig:
         if not isinstance(self.cloud_point_budget, int) or self.cloud_point_budget < 0:
             raise ValueError(f"cloud_point_budget must be an integer >= 0, got {self.cloud_point_budget!r}")
         _finite_positive("cloud_spacing_m", self.cloud_spacing_m)
-        _int_at_least("live_stride", self.live_stride, 1)
+        _int_at_least("live_point_budget", self.live_point_budget, 0)
         _finite_positive("live_range_max_m", self.live_range_max_m)
         if not (isinstance(self.live_range_min_m, (int, float)) and math.isfinite(self.live_range_min_m)
                 and 0 <= self.live_range_min_m < self.live_range_max_m):
@@ -104,6 +103,7 @@ class MapConfig:
         return {
             "cloud_point_budget": self.cloud_point_budget,
             "cloud_spacing_m": self.cloud_spacing_m,
+            "live_point_budget": self.live_point_budget,
         }
 
 
@@ -205,56 +205,7 @@ def grid_source(*, data: Any, width: int, height: int, resolution: float, origin
     }
 
 
-# ------------------------------------------------------------------------------- depth image, live scan
-
-
-def depth_source(*, encoding: str, height: int, width: int, step: int, is_bigendian: bool,
-                 data: Any) -> dict[str, np.ndarray]:
-    """A 32FC1 depth image in metres (NaN = hole) as a native-order (H, W) float32 copy, for the live scan."""
-    if encoding != "32FC1":
-        raise ValueError(f"depth image encoding must be 32FC1 (metres), got {encoding!r}")
-    height, width, step = int(height), int(width), int(step)
-    if height <= 0 or width <= 0:
-        raise ValueError(f"depth image size {width} x {height} is empty")
-    if step < width * 4:
-        raise ValueError(f"row step {step} is shorter than {width} float32 values")
-    base = np.frombuffer(data, dtype=np.uint8)
-    if base.size < step * (height - 1) + width * 4:
-        raise ValueError(f"depth data holds {base.size} bytes, too few for {width} x {height} with step {step}")
-    view = np.ndarray((height, width), dtype=">f4" if is_bigendian else "<f4", buffer=base, strides=(step, 4))
-    return {"depth_m": _readonly(np.array(view, dtype=np.float32))}
-
-
-def intrinsics(k: Sequence[float], *, width: int, height: int, info_width: int = 0,
-               info_height: int = 0) -> tuple[float, float, float, float] | None:
-    """(fx, fy, cx, cy) from a row-major 3x3 K, or None for a missing or fake K (zero, negative or non-finite
-    focal length or centre). When CameraInfo says which size it was calibrated for and the image is another,
-    K is scaled to the image."""
-    if len(k) != 9:
-        return None
-    fx, fy, cx, cy = float(k[0]), float(k[4]), float(k[2]), float(k[5])
-    if not all(math.isfinite(v) for v in (fx, fy, cx, cy)) or fx <= 0 or fy <= 0:
-        return None
-    if info_width > 0 and info_height > 0 and (info_width, info_height) != (width, height):
-        sx, sy = width / info_width, height / info_height
-        fx, cx, fy, cy = fx * sx, cx * sx, fy * sy, cy * sy
-    return fx, fy, cx, cy
-
-
-def backproject(depth_m: np.ndarray, intr: tuple[float, float, float, float], *, stride: int,
-                min_range_m: float, max_range_m: float) -> np.ndarray:
-    """Every `stride`-th pixel of a depth image (metres along the optical axis) as an (N, 3) float32 array of
-    points in the camera optical frame (x right, y down, z forward), row-major. Pixels that are not finite
-    or whose depth is outside [min_range_m, max_range_m] are dropped."""
-    fx, fy, cx, cy = intr
-    z = depth_m[::stride, ::stride]
-    rows = np.arange(0, depth_m.shape[0], stride, dtype=np.float64)[:, None]
-    cols = np.arange(0, depth_m.shape[1], stride, dtype=np.float64)[None, :]
-    keep = np.isfinite(z) & (z >= min_range_m) & (z <= max_range_m)
-    zk = z[keep].astype(np.float64)
-    u = np.broadcast_to(cols, z.shape)[keep]
-    v = np.broadcast_to(rows, z.shape)[keep]
-    return np.stack([(u - cx) * zk / fx, (v - cy) * zk / fy, zk], axis=1).astype(np.float32)
+# --------------------------------------------------------------------------------------------- live scan
 
 
 def transform_points(xyz: np.ndarray, translation: Sequence[float], quaternion: Sequence[float]) -> np.ndarray:
@@ -271,6 +222,15 @@ def transform_points(xyz: np.ndarray, translation: Sequence[float], quaternion: 
     ])
     t = np.array([float(c) for c in translation])
     return (xyz.astype(np.float64) @ rot.T + t).astype(np.float32)
+
+
+def within_range(xyz: np.ndarray, min_range_m: float, max_range_m: float) -> np.ndarray:
+    """The rows of an (N, 3) camera optical-frame cloud (z forward) that are finite and whose depth z lies in
+    [min_range_m, max_range_m], as a new float32 array (the input may be a view of a message buffer)."""
+    pts = np.asarray(xyz, dtype=np.float32)
+    with np.errstate(invalid="ignore"):
+        keep = np.isfinite(pts).all(axis=1) & (pts[:, 2] >= min_range_m) & (pts[:, 2] <= max_range_m)
+    return np.ascontiguousarray(pts[keep])
 
 
 # ------------------------------------------------------------------------------------------------- stats

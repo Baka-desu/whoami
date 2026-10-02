@@ -14,7 +14,7 @@ Subscribes : /camera/camera_info          sensor_msgs/CameraInfo  stamp only (§
              map viewer inputs, on a node of their own (ugv_api_map) in a second rclpy context (class _MapInputs):
                always on : /ugv/map/stats, /ugv/perception/stats        std_msgs/String (JSON)
                on demand : /rtabmap/cloud_map, /rtabmap/mapPath, /global_costmap/costmap,
-                           /perception/depth/image (live)
+                           /perception/depth_cloud (live)
 Publishes  : /ugv/e_stop                  std_msgs/Bool           latched; re-published while asserted
 Clients    : /navigate_to_pose            nav2_msgs/action/NavigateToPose (map-frame goals, §11)
              <rtabmap ns>/set_mode_mapping, set_mode_localization  std_srvs/Empty (§10)
@@ -48,6 +48,7 @@ from std_msgs.msg import Bool, String
 from std_srvs.srv import Empty
 from tf2_ros import Buffer, TransformException, TransformListener
 
+from ugv_api import mapcodec as codec
 from ugv_api import mapsources as ms
 from ugv_api import state as k
 from ugv_api.errors import ServiceUnavailable
@@ -108,9 +109,6 @@ class GatewayNode(Node):
         self._estop_asserted = False
         self._handles: dict[str, object] = {}
         self.requested_mode: str | None = None
-        # (K row-major, width, height) of the last CameraInfo, for the live scan. Written by the camera_info
-        # callback here, read by the map node's thread: one reference swap, never mutated in place.
-        self.camera_k: tuple[tuple[float, ...], int, int] | None = None
 
         best_effort = qos_profile_sensor_data  # matches reliable and best-effort publishers
         flags = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT)
@@ -174,7 +172,6 @@ class GatewayNode(Node):
 
     def _on_camera_info(self, msg: CameraInfo) -> None:
         self._store.put(k.CAMERA_INFO, None, self.now_ns(), _stamp_ns(msg.header.stamp))  # §12 camera watch
-        self.camera_k = (tuple(map(float, msg.k)), int(msg.width), int(msg.height))
 
     def _poll_tf(self) -> None:
         try:
@@ -387,7 +384,7 @@ class _MapInputs:
 
     def __init__(self, gateway: GatewayNode, maps: MapStore, cfg: MapConfig, tf_buffer: Buffer,
                  map_frame: str) -> None:
-        self._gw = gateway  # logger, clock (sim-time aware, the one the HTTP layer touches with), camera K
+        self._gw = gateway  # logger, clock (sim-time aware, the one the HTTP layer touches with)
         self._maps = maps
         self._cfg = cfg
         self._tf = tf_buffer
@@ -423,7 +420,7 @@ class _MapInputs:
                 "cloud": (c.cloud_topic, PointCloud2, guard("cloud", self._on_cloud)),
                 "trajectory": (c.trajectory_topic, Path, guard("trajectory", self._on_path)),
                 "grid": (c.grid_topic, OccupancyGrid, guard("grid", self._on_grid)),
-                "depth": (c.depth_topic, Image, guard("depth", self._on_depth)),
+                "live": (c.live_cloud_topic, PointCloud2, guard("live", self._on_live)),
             }
             # reliable + volatile matches a latched publisher (/ugv/map/stats) and a plain one alike
             stats_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE)
@@ -648,30 +645,17 @@ class _MapInputs:
             origin_q=(o.orientation.x, o.orientation.y, o.orientation.z, o.orientation.w))
         self._maps.put("grid", source, self._stamp_s(msg))
 
-    def _on_depth(self, msg: Image) -> None:
-        depth = ms.depth_source(encoding=msg.encoding, height=msg.height, width=msg.width, step=msg.step,
-                                is_bigendian=msg.is_bigendian, data=msg.data)
-        self._put_live(msg, depth["depth_m"], self._stamp_s(msg))
-
-    def _put_live(self, msg: Image, depth_m: Any, stamp_s: float) -> None:
-        """The depth image back-projected with CameraInfo K and moved into the map frame. Without K or without
-        any TF map <- camera the layer is skipped for this frame: camera-frame points are never published as
+    def _on_live(self, msg: PointCloud2) -> None:
+        """Dev 1's depth cloud (camera optical frame, back-projected by perception) range-gated and moved into the
+        map frame. Without any TF map <- camera the frame is skipped: camera-frame points are never published as
         map-frame points."""
-        cam = self._gw.camera_k
-        intr = None
-        if cam is not None:
-            intr = ms.intrinsics(cam[0], width=msg.width, height=msg.height, info_width=cam[1], info_height=cam[2])
-        if intr is None:
-            self._reject("live_no_intrinsics", "no usable CameraInfo K yet, live layer skipped")
-            return
         transform = self._camera_to_map(msg.header.frame_id, msg.header.stamp)
         if transform is None:
             self._reject("live_no_transform", f"no TF {self._frame} <- '{msg.header.frame_id}', live layer skipped")
             return
-        cfg = self._cfg
-        points = ms.backproject(depth_m, intr, stride=cfg.live_stride, min_range_m=cfg.live_range_min_m,
-                                max_range_m=cfg.live_range_max_m)
-        self._maps.put("live", {"xyz": ms.transform_points(points, *transform)}, stamp_s)
+        xyz, _ = codec.cloud_view(**ms.cloud_source(**self._cloud_args(msg)))  # a view of msg.data, no copy
+        points = ms.within_range(xyz, self._cfg.live_range_min_m, self._cfg.live_range_max_m)
+        self._maps.put("live", {"xyz": ms.transform_points(points, *transform)}, self._stamp_s(msg))
 
     def _camera_to_map(self, frame_id: str, stamp: Any) -> tuple[tuple[float, ...], tuple[float, ...]] | None:
         """(translation, quaternion) of `frame_id` in the map frame at the image stamp, else the latest one."""

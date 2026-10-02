@@ -116,7 +116,7 @@ def _pose_values(value: Any) -> tuple[float, ...] | None:
 
 
 def _layer_encoders(
-    *, point_budget: int, spacing_m: float
+    *, point_budget: int, spacing_m: float, live_budget: int
 ) -> dict[str, Callable[[Any, int, int, float], bytes]]:
     """layer -> encode(source, epoch, seq, stamp_s) -> bytes, in the form MapStore.blob calls it. The `source`
     each layer takes is what MapStore.put was given (documented per layer below); the ROS side builds exactly
@@ -129,9 +129,8 @@ def _layer_encoders(
                                   spacing_m=spacing_m)
 
     def live(src: dict, epoch: int, seq: int, stamp_s: float) -> bytes:
-        # {"xyz": (N, 3) float32}. The live scan is small and shown as it is: a budget never cuts it.
-        xyz = src["xyz"]
-        return codec.encode_cloud(xyz, None, epoch=epoch, seq=seq, stamp_s=stamp_s, budget=len(xyz),
+        # {"xyz": (N, 3) float32} in the map frame: Dev 1's full-resolution depth cloud, cut to its own budget
+        return codec.encode_cloud(src["xyz"], None, epoch=epoch, seq=seq, stamp_s=stamp_s, budget=live_budget,
                                   spacing_m=spacing_m)
 
     def trajectory(src: Any, epoch: int, seq: int, stamp_s: float) -> bytes:
@@ -148,14 +147,18 @@ def _layer_encoders(
 
 def create_app(robot: Robot, store: StateStore, goals: GoalRegistry, *, telemetry_hz: float = 5.0,
                cors_origins: list[str] | None = None, maps: MapStore | None = None,
-               cloud_point_budget: int = 500_000, cloud_spacing_m: float = 0.05) -> FastAPI:
+               cloud_point_budget: int = 500_000, cloud_spacing_m: float = 0.05,
+               live_point_budget: int = 20_000) -> FastAPI:
     if not telemetry_hz > 0:
         raise ValueError("telemetry_hz must be > 0")
     if cloud_point_budget < 0:
         raise ValueError("cloud_point_budget must be >= 0")
     if not (math.isfinite(cloud_spacing_m) and cloud_spacing_m > 0):
         raise ValueError("cloud_spacing_m must be finite and > 0")
-    encoders = _layer_encoders(point_budget=cloud_point_budget, spacing_m=cloud_spacing_m)
+    if live_point_budget < 0:
+        raise ValueError("live_point_budget must be >= 0")
+    encoders = _layer_encoders(point_budget=cloud_point_budget, spacing_m=cloud_spacing_m,
+                               live_budget=live_point_budget)
     app = FastAPI(
         title="UGV operator API",
         version=__version__,
