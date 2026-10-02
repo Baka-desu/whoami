@@ -6,7 +6,7 @@ const row = (rows: { k: string; v: string }[], k: string) => rows.find((r) => r.
 describe('map widget values', () => {
   it('formats every known stat', () => {
     const rows = mapRows({
-      keyframes: 12, loop_closures: 3, path_length_m: 41.26, cloud_source_points: 1234567, elevation_known_cells: 8800,
+      keyframes: 12, loop_closures: 3, path_length_m: 41.26, cloud_source_points: 1234567,
       db_bytes: 52_428_800, depth_hz: 3.24, last_update_age_s: 0.51, mode: 'mapping', calibration_placeholder: false,
     })
     expect(rows).toEqual([
@@ -14,7 +14,6 @@ describe('map widget values', () => {
       { k: 'closure links', v: '3' },
       { k: 'path length', v: '41.3 m' },
       { k: 'cloud source pts', v: '1,234,567' },
-      { k: 'elevation cells', v: '8,800' },
       { k: 'database', v: '52.4 MB' },
       { k: 'depth rate', v: '3.2 Hz' },
       { k: 'last update', v: '0.5 s' },
@@ -24,7 +23,7 @@ describe('map widget values', () => {
 
   it('shows the neutral placeholder for an absent, null or unusable value, never undefined or NaN', () => {
     const blank = mapRows({}).map((r) => r.v)
-    expect(blank).toEqual(new Array(8).fill('—'))
+    expect(blank).toEqual(new Array(7).fill('—'))
     expect(mapRows(undefined).map((r) => r.v)).toEqual(blank)
     expect(mapRows({ keyframes: null, depth_hz: null, db_bytes: null }).map((r) => r.v)).toEqual(blank)
     const junk = mapRows({ keyframes: Number.NaN, path_length_m: Infinity, db_bytes: 'big', depth_hz: true, loop_closures: '3' })
@@ -51,7 +50,7 @@ describe('map widget values', () => {
 
   it('tolerates stats keys it does not know', () => {
     const rows = mapRows({ keyframes: 2, mask_hz: 3.1, depth_errors: 0, brand_new_stat: 'x' })
-    expect(rows).toHaveLength(8)
+    expect(rows).toHaveLength(7)
     expect(row(rows, 'keyframes')).toBe('2')
   })
 
@@ -110,7 +109,7 @@ describe('map input health rows', () => {
   it('keeps the base rows first and the optional rows after them', () => {
     const rows = mapRows({ keyframes: 1, mode: 'mapping', map_rejects: 3, map_restarts: 1 })
     expect(rows.map((r) => r.k)).toEqual([
-      'keyframes', 'closure links', 'path length', 'cloud source pts', 'elevation cells', 'database', 'depth rate', 'last update',
+      'keyframes', 'closure links', 'path length', 'cloud source pts', 'database', 'depth rate', 'last update',
       'mode', 'rejects', 'restarts',
     ])
   })

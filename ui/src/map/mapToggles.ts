@@ -2,7 +2,6 @@
 // map), the map view's persisted layer toggles, and the error state of the slot both views mount in (App.tsx's
 // boundary, so a failed map view never takes the e-stop and the rest of the console down with it).
 
-import type { ElevationColorMode } from './geometry'
 import type { Enabled } from './useMapData'
 
 // ---- the map view's layer toggles -----------------------------------------------------------------
@@ -10,24 +9,18 @@ export interface MapToggles {
   cloud: boolean // accumulated map cloud
   live: boolean // current depth scan
   trajectory: boolean
-  elevation: boolean
   grid: boolean // cost grid
   images: boolean // the depth and camera panels
-  mode: ElevationColorMode
 }
 
-export type ToggleKey = Exclude<keyof MapToggles, 'mode'>
+export type ToggleKey = keyof MapToggles
 
-// Elevation starts off: it is the busiest layer, and with it the view is far from the owner's reference picture.
-export const DEFAULT_TOGGLES: MapToggles = {
-  cloud: true, live: true, trajectory: true, elevation: false, grid: true, images: true, mode: 'height',
-}
+export const DEFAULT_TOGGLES: MapToggles = { cloud: true, live: true, trajectory: true, grid: true, images: true }
 
-const TOGGLE_KEYS: readonly ToggleKey[] = ['cloud', 'live', 'trajectory', 'elevation', 'grid', 'images']
-const MODES: readonly ElevationColorMode[] = ['height', 'confidence', 'obstacle']
+const TOGGLE_KEYS: readonly ToggleKey[] = ['cloud', 'live', 'trajectory', 'grid', 'images']
 
 // What localStorage held, read leniently: every value that is understood is kept (a saved choice always beats a
-// default), anything else (absent, wrong type, unknown mode, unparsable text) falls back to its default.
+// default), anything else (absent, wrong type, unparsable text) falls back to its default.
 export function parseToggles(raw: string | null): MapToggles {
   let v: unknown = null
   try {
@@ -41,7 +34,6 @@ export function parseToggles(raw: string | null): MapToggles {
     const b = o[k]
     if (typeof b === 'boolean') out[k] = b
   }
-  if (MODES.includes(o.mode as ElevationColorMode)) out.mode = o.mode as ElevationColorMode
   return out
 }
 
@@ -51,8 +43,7 @@ export const toggled = (t: MapToggles, key: ToggleKey): MapToggles => ({ ...t, [
 // The layers the data hook fetches: a layer that is toggled off is not requested at all.
 export function enabledLayers(t: MapToggles): Enabled {
   return {
-    cloud: t.cloud, live: t.live, trajectory: t.trajectory, elevation: t.elevation, grid: t.grid,
-    depth: t.images, camera: t.images,
+    cloud: t.cloud, live: t.live, trajectory: t.trajectory, grid: t.grid, depth: t.images, camera: t.images,
   }
 }
 

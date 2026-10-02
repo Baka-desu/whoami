@@ -21,7 +21,8 @@
 | D12 | Elevation semantics | `Reg/Force3DoF true` kept; elevation height is relief relative to the driving plane. General-purpose defaults, four layers only. | User 2026-10-02 |
 | D13 | Operator UI | Map, live cloud and Nav2 costmap shown in the web UI through `ugv_api` binary endpoints, display only. The UI guard's blanket ban on the word "costmap" is narrowed to costmap topic names. | User 2026-10-02 |
 | D14 | Depth vs mask | DA3 depth is published for every processed frame, no longer only when a mask was published, so a degraded mask does not starve SLAM. | User 2026-10-02 |
-| D15 | Elevation deferred | The elevation map (plan Tasks 10-12: tile/fuse kernels, `elevation_map_node`, `/ugv/elevation/*`) is **not built**: deferred by the owner 2026-10-02. The gateway elevation endpoint, the UI decoder and the ELEV layer stay in place and stay empty (503, "no map yet"). Nothing else in D9-D14 depends on it. | User 2026-10-02 |
+| D15 | Elevation deferred | The elevation map (plan Tasks 10-12: tile/fuse kernels, `elevation_map_node`, `/ugv/elevation/*`) is **not built**: deferred by the owner 2026-10-02. Its gateway endpoint, UI decoder and ELEV layer were removed in the PR #40 review (D16). Nothing else in D9-D14 depends on it. | User 2026-10-02 |
+| D16 | Elevation consumers removed | PR #40 review (code bloat): no in-tree node publishes `/ugv/elevation/*`, so the gateway's elevation codec, stamp pairer, subscriptions and endpoint, and the viewer's ELEV layer, decoder and mesh were removed. They come back in the same change as the Phase 2 elevation node (plan Tasks 10-12). | User 2026-10-02, PR #40 review |
 
 ## What architecture.md says (and doesn't)
 - §2/§6: brain = "RTAB-Map VO/SLAM" — now true in RGB-D mode (DA3 depth).
@@ -55,4 +56,3 @@
 - Pending owner runs (`docs/mapping/README.md`): recorded moving run and the Task 7 gate numbers; phone focus lock, calibration and tunnel latency; lit-scene re-measure and tape-measured wall test; closed-loop mapping -> save -> localize run with screenshot and stats.
 - Owner decision: mask freshness budget (a mask is held up to about 0.58 s against the 0.5 s limit).
 - Owner decision: keep `Grid/MaxObstacleHeight 1.0`? It clips `/rtabmap/cloud_map` at about 1 m above the robot.
-- Elevation map (D15): build, or drop the empty ELEV layer.

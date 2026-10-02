@@ -5,8 +5,6 @@ ros_node.py copies the few fields it needs out of a message and calls one of the
 
   cloud       cloud_source          {"fields", "point_step", "n_points", "is_bigendian", "data"}
   trajectory  trajectory_source     (N, 7) float32 x y z qx qy qz qw
-  elevation   ElevationPairer       {"x", "y", "z", "confidence", "obstacle_h", "origin_xy", "resolution",
-                                     "width", "height"}
   grid        grid_source           {"cells", "resolution", "origin_xy", "origin_yaw"}
   depth       depth_source          {"depth_m": (H, W) float32}
   live        backproject + transform_points -> {"xyz": (N, 3) float32}   (built by the caller)
@@ -30,13 +28,9 @@ from typing import Any
 
 import numpy as np
 
-from ugv_api.mapcodec import POINTFIELD_FLOAT32
-
 __all__ = [
-    "ElevationPairer",
     "MapConfig",
     "backproject",
-    "cloud_columns",
     "cloud_source",
     "depth_source",
     "grid_source",
@@ -76,7 +70,6 @@ class MapConfig:
     # --- what the HTTP layer encodes with (create_app tunables)
     cloud_point_budget: int = 500_000
     cloud_spacing_m: float = 0.05
-    elevation_max_side: int = 512
     depth_stride: int = 2
     depth_max_range_m: float = 8.0
     # --- the live scan built from the depth image
@@ -90,8 +83,6 @@ class MapConfig:
     # --- inputs
     cloud_topic: str = "/rtabmap/cloud_map"
     trajectory_topic: str = "/rtabmap/mapPath"
-    elevation_cloud_topic: str = "/ugv/elevation/cloud"
-    elevation_obstacles_topic: str = "/ugv/elevation/obstacles"
     grid_topic: str = "/global_costmap/costmap"
     depth_topic: str = "/perception/depth/image"
     camera_topic: str = "/image_raw/compressed"
@@ -102,7 +93,6 @@ class MapConfig:
         if not isinstance(self.cloud_point_budget, int) or self.cloud_point_budget < 0:
             raise ValueError(f"cloud_point_budget must be an integer >= 0, got {self.cloud_point_budget!r}")
         _finite_positive("cloud_spacing_m", self.cloud_spacing_m)
-        _int_at_least("elevation_max_side", self.elevation_max_side, 1)
         _int_at_least("depth_stride", self.depth_stride, 1)
         _finite_positive("depth_max_range_m", self.depth_max_range_m)
         _int_at_least("live_stride", self.live_stride, 1)
@@ -122,7 +112,6 @@ class MapConfig:
         return {
             "cloud_point_budget": self.cloud_point_budget,
             "cloud_spacing_m": self.cloud_spacing_m,
-            "elevation_max_side": self.elevation_max_side,
             "depth_stride": self.depth_stride,
             "depth_max_range_m": self.depth_max_range_m,
         }
@@ -187,35 +176,6 @@ def cloud_source(*, fields: Sequence[Sequence[Any]], point_step: int, n_points: 
     }
 
 
-def cloud_columns(*, fields: Sequence[Sequence[Any]], point_step: int, n_points: int, is_bigendian: bool,
-                  data: Any, names: Sequence[str], width: int | None = None, height: int = 1,
-                  row_step: int | None = None) -> dict[str, np.ndarray]:
-    """The named FLOAT32 fields of a PointCloud2 as independent contiguous float32 arrays, one entry per point.
-    Copies, so the message buffer is free to go."""
-    if is_bigendian:
-        raise ValueError("big-endian point clouds are not supported")
-    point_step, n_points = int(point_step), int(n_points)
-    by_name = {str(name): (int(offset), int(datatype)) for name, offset, datatype, _count in fields}
-    base = np.frombuffer(data, dtype=np.uint8)
-    _check_cloud_layout(point_step=point_step, n_points=n_points, data_size=base.size, width=width,
-                        height=int(height), row_step=row_step)
-    out: dict[str, np.ndarray] = {}
-    for name in names:
-        if name not in by_name:
-            raise ValueError(f"point cloud has no '{name}' field")
-        offset, datatype = by_name[name]
-        if datatype != POINTFIELD_FLOAT32:
-            raise ValueError(f"'{name}' field must be FLOAT32 (7), got datatype {datatype}")
-        if offset < 0 or offset + 4 > point_step:
-            raise ValueError(f"field '{name}' at offset {offset} does not fit in point_step {point_step}")
-        if n_points == 0:
-            out[name] = np.zeros(0, dtype=np.float32)
-        else:
-            column = np.ndarray((n_points,), dtype="<f4", buffer=base, offset=offset, strides=(point_step,))
-            out[name] = np.array(column, dtype=np.float32)  # contiguous copy
-    return out
-
-
 # ---------------------------------------------------------------------------------------- path and grid
 
 
@@ -253,73 +213,6 @@ def grid_source(*, data: Any, width: int, height: int, resolution: float, origin
         "origin_xy": (float(origin_x), float(origin_y)),
         "origin_yaw": quaternion_yaw(*(float(c) for c in origin_q)),
     }
-
-
-class ElevationPairer:
-    """Pairs the elevation cloud with its obstacle grid by header stamp.
-
-    The two topics are published together and carry one `header.stamp`; the cloud holds the cells and the grid
-    holds their geometry (resolution, size, origin). A source is built only from a cloud and a grid with equal
-    stamps: the latest of each is kept, and the pair is emitted when the second half of it arrives. A half with
-    no stamp (0) is never kept: two unset stamps are equal but say nothing about being the same sample.
-
-    Two counters make a publisher that stamps the halves differently visible instead of silent: `unstamped`
-    (halves refused for having no stamp) and `unpaired` (halves replaced by a newer one of the same kind before
-    their partner arrived; one that had already been paired, or is replaced by the same stamp, or is dropped
-    by `reset`, is not counted). Not thread-safe: both callbacks run in one mutually exclusive callback group.
-    """
-
-    def __init__(self) -> None:
-        self._cloud: tuple[int, dict[str, np.ndarray]] | None = None
-        self._grid: tuple[int, dict[str, Any]] | None = None
-        self._cloud_paired = False
-        self._grid_paired = False
-        self.unpaired = 0
-        self.unstamped = 0
-
-    def reset(self) -> None:
-        self._cloud = None
-        self._grid = None
-        self._cloud_paired = self._grid_paired = False
-
-    def add_cloud(self, stamp_ns: int, columns: dict[str, np.ndarray]) -> dict[str, Any] | None:
-        stamp_ns = int(stamp_ns)
-        if stamp_ns == 0:
-            self.unstamped += 1
-            return None
-        if self._cloud is not None and not self._cloud_paired and self._cloud[0] != stamp_ns:
-            self.unpaired += 1
-        self._cloud = (stamp_ns, columns)
-        self._cloud_paired = False
-        return self._pair()
-
-    def add_grid(self, stamp_ns: int, *, resolution: float, width: int, height: int, origin_x: float,
-                 origin_y: float) -> dict[str, Any] | None:
-        stamp_ns = int(stamp_ns)
-        if stamp_ns == 0:
-            self.unstamped += 1
-            return None
-        if self._grid is not None and not self._grid_paired and self._grid[0] != stamp_ns:
-            self.unpaired += 1
-        self._grid = (stamp_ns, {
-            "origin_xy": (float(origin_x), float(origin_y)),
-            "resolution": float(resolution),
-            "width": int(width),
-            "height": int(height),
-        })
-        self._grid_paired = False
-        return self._pair()
-
-    def _pair(self) -> dict[str, Any] | None:
-        if self._cloud is None or self._grid is None or self._cloud[0] != self._grid[0]:
-            return None
-        self._cloud_paired = self._grid_paired = True
-        cols, geometry = self._cloud[1], self._grid[1]
-        return {
-            "x": cols["x"], "y": cols["y"], "z": cols["z"],
-            "confidence": cols["confidence"], "obstacle_h": cols["obstacle_h"],
-            **geometry,
-        }
 
 
 # ------------------------------------------------------------------------------- depth image, live scan

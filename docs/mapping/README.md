@@ -5,9 +5,8 @@ and what it can and cannot tell you. Where the plan and the code disagree, this 
 
 **Status.** The map, live cloud, trajectory, cost grid, depth and camera layers and the statistics widget are built and
 tested on synthetic data and on the real stack with synthetic sensors. **Nothing has run on the UGV yet** (see "Pending
-owner runs"). The **elevation map (plan Tasks 10-12) is not built yet**: the owner deferred it. The gateway endpoint, the
-decoder and the viewer's ELEV layer exist, but nothing publishes elevation, so the layer stays empty ("no map yet", the
-endpoint answers 503). Nothing here feeds Nav2: the map is mapping and display only (mindmap D9, architecture §9 unchanged).
+owner runs"). The **elevation map (plan Tasks 10-12) is not built yet**: the owner deferred it, and its gateway endpoint,
+decoder and viewer layer were removed until a producer lands with them (mindmap D16). Nothing here feeds Nav2: the map is mapping and display only (mindmap D9, architecture §9 unchanged).
 
 ## Data flow
 
@@ -50,7 +49,6 @@ demand" below) only while a client keeps calling `GET /api/v1/map`.
 | `/perception/depth/image` | `sensor_msgs/Image` 32FC1 | Dev 1 perception | RTAB-Map, gateway (depth layer, live cloud) | published for every processed frame, not only when a mask is published (D14) |
 | `/global_costmap/costmap` | `nav_msgs/OccupancyGrid` | Nav2 | gateway (on demand) | the cost grid layer, display only |
 | `/image_raw/compressed` | `sensor_msgs/CompressedImage` | camera driver | gateway (on demand) | camera panel, passed through |
-| `/ugv/elevation/cloud`, `/ugv/elevation/obstacles` | `sensor_msgs/PointCloud2` | **nobody yet** | gateway (configured, on demand) | elevation deferred; the subscriptions exist and stay silent |
 
 Topic names are gateway parameters under `map:` in `ugv_nav/ugv_api/config/api.yaml`.
 
@@ -58,9 +56,9 @@ Topic names are gateway parameters under `map:` in `ugv_nav/ugv_api/config/api.y
 
 | Endpoint | Body | Notes |
 |---|---|---|
-| `GET /api/v1/map` | `MapStatus` JSON: `epoch`, `seq` for the seven layers, flat `stats` | also the demand heartbeat: only an explicit GET keeps the heavy subscriptions alive (`idle_timeout_s`, default 10 s) |
+| `GET /api/v1/map` | `MapStatus` JSON: `epoch`, `seq` for every layer, flat `stats` | also the demand heartbeat: only an explicit GET keeps the heavy subscriptions alive (`idle_timeout_s`, default 10 s) |
 | `GET /api/v1/map/pose` | `Pose` JSON, `map -> base_link` from TF | `available: false` and null fields until a transform is seen |
-| `GET /api/v1/map/{cloud,elevation,trajectory,grid,live,depth}` | binary format v1 (below) | 503 `application/problem+json` until the layer has data |
+| `GET /api/v1/map/{cloud,trajectory,grid,live,depth}` | binary format v1 (below) | 503 `application/problem+json` until the layer has data |
 | `GET /api/v1/map/camera` | `image/jpeg` | the camera driver's JPEG, unchanged |
 | `GET /api/v1/telemetry/stream` | SSE | gains the `map` (MapStatus) and `pose` events |
 
@@ -80,7 +78,6 @@ body. Decoders reject an unknown format and any length that is not exact.
 | trajectory | `UGVT` | `f32 x y z qx qy qz qw` per pose |
 | grid | `UGVG` | `i8` cells (-1 unknown, 0..100); size, resolution, origin and yaw in the header |
 | depth | `UGVD` | `u16` millimetres, every 2nd pixel (320x240), 0 = hole |
-| elevation | `UGVE` | `f32` height, `u8` obstacle (5 cm units), `u8` confidence. **Encoder and decoder exist; no data source yet** |
 
 Authoritative layout and the golden files the Python and TypeScript tests share:
 `docs/mapping/map-contract.md`, `ugv_nav/ugv_api/test/fixtures/map/*.bin`.
@@ -102,7 +99,7 @@ camera driver refuses the file and publishes nothing (`ugv_nav/ugv_bringup/READM
 
 Open the console and pick **map** in the top bar. The view shows the accumulated cloud (camera colours), the live depth scan
 (height colours), the trajectory, the Nav2 cost grid halo, the robot pose, the depth and camera image panels and the
-statistics widget. Layer buttons: cloud, live, path, elev (empty, see above), cost, img; the choice is kept in
+statistics widget. Layer buttons: cloud, live, path, cost, img; the choice is kept in
 `localStorage`. Banners: `NO MAP YET`, `STALE · map not updating`, `STALE · telemetry lost`, `MAP INPUTS STOPPED` (the
 gateway's input thread is gone).
 

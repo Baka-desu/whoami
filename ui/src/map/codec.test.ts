@@ -1,10 +1,10 @@
 /// <reference types="node" />
-// Golden-file tests for the binary map layer decoders. The five .bin files are produced by the gateway's own
+// Golden-file tests for the binary map layer decoders. The .bin files are produced by the gateway's own
 // encoder (ugv_nav/ugv_api/ugv_api/mapcodec.py) with epoch=7, seq=3, stamp_s=1234.5; their inputs are listed in
 // ugv_nav/ugv_api/test/test_mapcodec.py (build_golden). They are read in place, never copied into ui/.
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
-import { decodeCloud, decodeDepth, decodeElevation, decodeGrid, decodeTrajectory } from './codec'
+import { decodeCloud, decodeDepth, decodeGrid, decodeTrajectory } from './codec'
 
 const FIXTURES = new URL('../../../ugv_nav/ugv_api/test/fixtures/map/', import.meta.url)
 
@@ -13,12 +13,11 @@ function golden(name: string): ArrayBuffer {
   return Uint8Array.from(readFileSync(new URL(`${name}.bin`, FIXTURES))).buffer
 }
 
-const LAYERS = ['cloud', 'elevation', 'trajectory', 'grid', 'depth'] as const
+const LAYERS = ['cloud', 'trajectory', 'grid', 'depth'] as const
 type Layer = (typeof LAYERS)[number]
 
 const DECODERS: Record<Layer, (buf: ArrayBuffer) => unknown> = {
   cloud: decodeCloud,
-  elevation: decodeElevation,
   trajectory: decodeTrajectory,
   grid: decodeGrid,
   depth: decodeDepth,
@@ -27,7 +26,6 @@ const DECODERS: Record<Layer, (buf: ArrayBuffer) => unknown> = {
 // Exact sizes from the spec: prelude 24 + layer header, then the body.
 const SIZES: Record<Layer, { total: number; header: number }> = {
   cloud: { total: 184, header: 64 },
-  elevation: { total: 120, header: 48 },
   trajectory: { total: 116, header: 32 },
   grid: { total: 60, header: 48 },
   depth: { total: 72, header: 40 },
@@ -63,23 +61,6 @@ describe('golden files', () => {
     expect(f.xyz.byteOffset).toBe(64)
     expect(f.rgb!.buffer).toBe(buf)
     expect(f.rgb!.byteOffset).toBe(64 + 12 * 8)
-  })
-
-  it('decodes elevation.bin', () => {
-    const buf = golden('elevation')
-    const f = decodeElevation(buf)!
-    expect(f).not.toBeNull()
-    expect(f).toMatchObject({ ...prelude, width: 4, height: 3, resolution: 0.5, originX: -1, originY: 2, knownCells: 11 })
-    expect(Array.from(f.heightM)).toEqual([0, 0.25, 0.5, 0.75, 1, NaN, 1.5, 1.75, 2, 2.25, 2.5, 2.75])
-    expect(Number.isNaN(f.heightM[5])).toBe(true)
-    expect(Array.from(f.obstacle)).toEqual([0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0])
-    expect(Array.from(f.confidence)).toEqual([255, 204, 153, 102, 51, 0, 255, 204, 153, 102, 51, 255])
-    expect(f.heightM.buffer).toBe(buf)
-    expect(f.heightM.byteOffset).toBe(48)
-    expect(f.obstacle.buffer).toBe(buf)
-    expect(f.obstacle.byteOffset).toBe(48 + 4 * 12)
-    expect(f.confidence.buffer).toBe(buf)
-    expect(f.confidence.byteOffset).toBe(48 + 5 * 12)
   })
 
   it('decodes trajectory.bin', () => {
@@ -201,21 +182,6 @@ describe('cloud edge cases', () => {
   it('rejects a count that is larger than the body', () => {
     expect(decodeCloud(edited(golden('cloud'), (dv) => dv.setUint32(24, 9, true)))).toBeNull()
     expect(decodeCloud(edited(golden('cloud'), (dv) => dv.setUint32(24, 0xffffffff, true)))).toBeNull()
-  })
-})
-
-describe('elevation edge cases', () => {
-  it.each([[0, 3], [4, 0], [0, 0]])('accepts an empty %i x %i grid with the exact header-only length', (w, h) => {
-    const f = decodeElevation(edited(golden('elevation'), (dv) => { dv.setUint32(24, w, true); dv.setUint32(28, h, true); dv.setUint32(44, 0, true) }, 48))!
-    expect(f).toMatchObject({ width: w, height: h, knownCells: 0 })
-    expect(f.heightM).toHaveLength(0)
-    expect(f.obstacle).toHaveLength(0)
-    expect(f.confidence).toHaveLength(0)
-  })
-
-  it('rejects dimensions that disagree with the body', () => {
-    expect(decodeElevation(edited(golden('elevation'), (dv) => dv.setUint32(24, 5, true)))).toBeNull()
-    expect(decodeElevation(edited(golden('elevation'), (dv) => dv.setUint32(28, 2, true)))).toBeNull()
   })
 })
 

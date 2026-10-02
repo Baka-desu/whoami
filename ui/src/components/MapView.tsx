@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { DepthFrame } from '../map/codec'
-import { depthToRgba, type ElevationColorMode } from '../map/geometry'
+import { depthToRgba } from '../map/geometry'
 import { enabledLayers, parseToggles, toggled, type MapToggles, type ToggleKey } from '../map/mapToggles'
 import { MapScene } from '../map/scene'
 import { useMapData } from '../map/useMapData'
@@ -8,7 +8,7 @@ import { LAYERS, type MapStatus, type Telemetry } from '../source/api'
 import { mapBanner } from './mapStats'
 
 // The map view, as in the owner's reference picture: the 3D map (accumulated cloud, live depth scan coloured by
-// height, elevation, trajectory, the cost grid's halo around obstacles, the robot) with the depth image and the
+// height, trajectory, the cost grid's halo around obstacles, the robot) with the depth image and the
 // camera image stacked on its left edge. Display only: everything comes from the gateway's map endpoints (GETs) and
 // the telemetry stream's pose; nothing here commands anything.
 
@@ -21,14 +21,8 @@ const LAYER_BUTTONS: { key: ToggleKey; label: string; name: string; title: strin
   { key: 'cloud', label: 'cloud', name: 'Map cloud', title: 'Map cloud: the accumulated 3D map, in camera colours' },
   { key: 'live', label: 'live', name: 'Live cloud', title: 'Live cloud: the current depth scan, coloured by height' },
   { key: 'trajectory', label: 'path', name: 'Trajectory path', title: 'Trajectory: the path the robot has travelled' },
-  { key: 'elevation', label: 'elev', name: 'Elevation', title: 'Elevation map of the ground' },
   { key: 'grid', label: 'cost', name: 'Cost grid', title: 'Cost grid: obstacles and their inflation halo' },
   { key: 'images', label: 'img', name: 'Image panels', title: 'Image panels: depth and camera' },
-]
-const MODES: { value: ElevationColorMode; label: string }[] = [
-  { value: 'height', label: 'height' },
-  { value: 'confidence', label: 'conf' },
-  { value: 'obstacle', label: 'obst' },
 ]
 const count = (n: number) => n.toLocaleString('en-US')
 
@@ -108,7 +102,6 @@ export function MapView({ telemetry, live }: Props) {
   const pose = telemetry?.pose ?? null
   const cloud = ofEpoch(data.cloud, status)
   const liveCloud = ofEpoch(data.live, status)
-  const elevation = ofEpoch(data.elevation, status)
   const trajectory = ofEpoch(data.trajectory, status)
   const grid = ofEpoch(data.grid, status)
   const depth = ofEpoch(data.depth, status)
@@ -118,13 +111,12 @@ export function MapView({ telemetry, live }: Props) {
   // goes first: the first layer to arrive frames the camera on it within the same commit.
   const shownPose = live ? pose : null
   useEffect(() => { scene?.setPose(shownPose) }, [scene, shownPose])
-  const { cloud: showCloud, live: showLive, trajectory: showTrajectory, elevation: showElevation, grid: showGrid, mode } = toggles
+  const { cloud: showCloud, live: showLive, trajectory: showTrajectory, grid: showGrid } = toggles
   useEffect(() => {
-    scene?.setLayers({ cloud: showCloud, live: showLive, trajectory: showTrajectory, elevation: showElevation, grid: showGrid })
-  }, [scene, showCloud, showLive, showTrajectory, showElevation, showGrid])
+    scene?.setLayers({ cloud: showCloud, live: showLive, trajectory: showTrajectory, grid: showGrid })
+  }, [scene, showCloud, showLive, showTrajectory, showGrid])
   useEffect(() => { scene?.setCloud(cloud) }, [scene, cloud])
   useEffect(() => { scene?.setLive(liveCloud) }, [scene, liveCloud])
-  useEffect(() => { scene?.setElevation(elevation, mode) }, [scene, elevation, mode])
   useEffect(() => { scene?.setTrajectory(trajectory) }, [scene, trajectory])
   useEffect(() => { scene?.setGrid(grid) }, [scene, grid])
 
@@ -132,10 +124,6 @@ export function MapView({ telemetry, live }: Props) {
   const flip = (key: ToggleKey) => {
     touched.current = true
     setToggles((t) => toggled(t, key))
-  }
-  const pickMode = (m: ElevationColorMode) => {
-    touched.current = true
-    setToggles((t) => ({ ...t, mode: m }))
   }
 
   const banner = mapBanner({ noMap, statusStale: data.stale, telemetryLost: !live, stats: status?.stats })
@@ -165,10 +153,6 @@ export function MapView({ telemetry, live }: Props) {
               {label}
             </button>
           ))}
-          <select aria-label="Elevation colour" title="Elevation colour: height, confidence or obstacle" value={toggles.mode}
-            disabled={!toggles.elevation} onChange={(e) => pickMode(e.target.value as ElevationColorMode)}>
-            {MODES.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
-          </select>
           <button type="button" aria-label="Reset view" title="Reset view: back behind the robot" disabled={!scene}
             onClick={() => scene?.resetView()}>
             reset

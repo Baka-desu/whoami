@@ -398,8 +398,7 @@ code { font-size: 10px; color: var(--text); overflow-wrap: anywhere; }
 .mapview .livefeed-bar > span:nth-child(2) { flex: 1 1 0; min-width: 0; }
 .mapview .livefeed-layers { flex: 0 1 auto; flex-wrap: wrap; justify-content: flex-end; gap: 4px; }
 .mapview .livefeed-layers button { padding: 3px 6px; }
-.mapview .livefeed-layers select { font: inherit; font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; padding: 2px 2px; background: var(--bg); color: var(--text); border: 1px solid var(--line-strong); cursor: pointer; }
-.mapview .livefeed-layers button:disabled, .mapview .livefeed-layers select:disabled { opacity: 0.4; cursor: not-allowed; }
+.mapview .livefeed-layers button:disabled { opacity: 0.4; cursor: not-allowed; }
 .mapview-stage { position: relative; min-height: 0; overflow: hidden; background: var(--bg); }
 .mapview-gl { position: absolute; inset: 0; }
 .mapview-stage::before, .mapview-stage::after {

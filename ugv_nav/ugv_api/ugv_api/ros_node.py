@@ -13,8 +13,8 @@ Subscribes : /camera/camera_info          sensor_msgs/CameraInfo  stamp only (§
              TF map->base_link (polled; the pose is what GET /map/pose and the SSE `pose` event report)
              map viewer inputs, on a node of their own (ugv_api_map) in a second rclpy context (class _MapInputs):
                always on : /ugv/map/stats, /ugv/perception/stats        std_msgs/String (JSON)
-               on demand : /rtabmap/cloud_map, /rtabmap/mapPath, /ugv/elevation/cloud + /ugv/elevation/obstacles,
-                           /global_costmap/costmap, /perception/depth/image (depth + live), /image_raw/compressed
+               on demand : /rtabmap/cloud_map, /rtabmap/mapPath, /global_costmap/costmap,
+                           /perception/depth/image (depth + live), /image_raw/compressed
 Publishes  : /ugv/e_stop                  std_msgs/Bool           latched; re-published while asserted
 Clients    : /navigate_to_pose            nav2_msgs/action/NavigateToPose (map-frame goals, §11)
              <rtabmap ns>/set_mode_mapping, set_mode_localization  std_srvs/Empty (§10)
@@ -360,7 +360,7 @@ class _MapInputs:
     worker thread can land between rclpy marking a subscription's QoS event handler in use and adding it to
     the wait set; the second entry raises InvalidHandle out of `spin` (reproduced within seconds with a
     toggling demand) and ends the thread. One group and one thread also mean these callbacks never run
-    concurrently, so `_subs` and the elevation pairer need no lock.
+    concurrently, so `_subs` needs no lock.
 
     Health. A map thread that hangs or dies cannot report that itself, so the gateway does it
     (`publish_health`, called by a timer of the gateway node): `map_inputs_alive` is false when the thread is
@@ -381,11 +381,9 @@ class _MapInputs:
     publisher turned out to offer something else. Losing the publisher does not change anything: the
     subscription is kept for when it comes back.
 
-    Frames: cloud, trajectory, grid and elevation are served as map-frame layers, so a message whose
+    Frames: cloud, trajectory and grid are served as map-frame layers, so a message whose
     `frame_id` is neither the map frame nor empty (a local costmap is in `odom`) is refused and counted.
     """
-
-    ELEVATION_FIELDS = ("x", "y", "z", "confidence", "obstacle_h")
 
     def __init__(self, gateway: GatewayNode, maps: MapStore, cfg: MapConfig, tf_buffer: Buffer,
                  map_frame: str) -> None:
@@ -404,8 +402,6 @@ class _MapInputs:
         self._gateway_stats: dict[str, int] = {}
         self._stats_seen: dict[str, float] = {}  # source -> time.monotonic() of its last message
         self._last_tick = time.monotonic()
-        self._pairer = ms.ElevationPairer()
-        self._pairer_seen = {"unpaired": 0, "unstamped": 0}
         self._subs: dict[str, tuple[Any, DurabilityPolicy]] = {}
         self._node: Node | None = None
         self._executor: SingleThreadedExecutor | None = None
@@ -426,10 +422,6 @@ class _MapInputs:
             self._specs: dict[str, tuple[str, type, Callable[[Any], None]]] = {
                 "cloud": (c.cloud_topic, PointCloud2, guard("cloud", self._on_cloud)),
                 "trajectory": (c.trajectory_topic, Path, guard("trajectory", self._on_path)),
-                "elevation_cloud": (c.elevation_cloud_topic, PointCloud2,
-                                    guard("elevation_cloud", self._on_elevation_cloud)),
-                "elevation_obstacles": (c.elevation_obstacles_topic, OccupancyGrid,
-                                        guard("elevation_obstacles", self._on_elevation_grid)),
                 "grid": (c.grid_topic, OccupancyGrid, guard("grid", self._on_grid)),
                 "depth": (c.depth_topic, Image, guard("depth", self._on_depth)),
                 "camera": (c.camera_topic, CompressedImage, guard("camera", self._on_camera)),
@@ -596,7 +588,6 @@ class _MapInputs:
         for sub, _durability in self._subs.values():
             self._node.destroy_subscription(sub)
         self._subs.clear()
-        self._pairer.reset()
 
     def _expire_stats(self, now: float) -> None:
         """Drop a stats source that has been silent for `stats_stale_s` (monotonic seconds): it must not keep
@@ -657,38 +648,6 @@ class _MapInputs:
             origin_x=o.position.x, origin_y=o.position.y,
             origin_q=(o.orientation.x, o.orientation.y, o.orientation.z, o.orientation.w))
         self._maps.put("grid", source, self._stamp_s(msg))
-
-    def _on_elevation_cloud(self, msg: PointCloud2) -> None:
-        if not self._in_map_frame("elevation_cloud", msg):
-            return
-        columns = ms.cloud_columns(**self._cloud_args(msg), names=self.ELEVATION_FIELDS)
-        self._elevation_pair(self._pairer.add_cloud(_stamp_ns(msg.header.stamp), columns), msg)
-
-    def _on_elevation_grid(self, msg: OccupancyGrid) -> None:
-        if not self._in_map_frame("elevation_obstacles", msg):
-            return
-        info = msg.info
-        source = self._pairer.add_grid(
-            _stamp_ns(msg.header.stamp), resolution=info.resolution, width=info.width, height=info.height,
-            origin_x=info.origin.position.x, origin_y=info.origin.position.y)
-        self._elevation_pair(source, msg)
-
-    def _elevation_pair(self, source: dict[str, Any] | None, msg: Any) -> None:
-        """What the pairer made of the half that just arrived: a source to store, and/or halves it had to drop,
-        which are counted as rejects (a publisher that stamps the halves differently must not look like a layer
-        that is merely slow). Known cells are counted only for a pair that was emitted."""
-        for attr, name, why in (
-            ("unstamped", "elevation_unstamped", "an elevation half has no header.stamp and cannot be paired"),
-            ("unpaired", "elevation_unpaired", "an elevation half was replaced before a half with its stamp "
-                                               "arrived: the cloud and the obstacle grid are stamped differently"),
-        ):
-            now = getattr(self._pairer, attr)
-            if now != self._pairer_seen[attr]:
-                delta, self._pairer_seen[attr] = now - self._pairer_seen[attr], now
-                self._reject(name, why, delta)
-        if source is not None:
-            self._maps.put("elevation", source, self._stamp_s(msg))
-            self._count("elevation_known_cells", len(source["x"]))
 
     def _on_camera(self, msg: CompressedImage) -> None:
         self._maps.put("camera", ms.jpeg_source(msg.data), self._stamp_s(msg))

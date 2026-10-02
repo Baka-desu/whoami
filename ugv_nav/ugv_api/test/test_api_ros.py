@@ -50,12 +50,10 @@ IDLE_S = 1.5
 STATS_STALE_S = 1.5
 
 CLOUD, PATH = "/rtabmap/cloud_map", "/rtabmap/mapPath"
-ELEV_CLOUD, ELEV_GRID = "/ugv/elevation/cloud", "/ugv/elevation/obstacles"
 GRID, DEPTH, CAMERA = "/global_costmap/costmap", "/perception/depth/image", "/image_raw/compressed"
 MAP_STATS, PERCEPTION_STATS = "/ugv/map/stats", "/ugv/perception/stats"
-HEAVY_TOPICS = (CLOUD, PATH, ELEV_CLOUD, ELEV_GRID, GRID, DEPTH, CAMERA)
-GATEWAY_STAT_KEYS = {"cloud_source_points", "elevation_known_cells", "map_inputs_alive", "map_rejects",
-                     "map_restarts", "map_last_reject"}
+HEAVY_TOPICS = (CLOUD, PATH, GRID, DEPTH, CAMERA)
+GATEWAY_STAT_KEYS = {"cloud_source_points", "map_inputs_alive", "map_rejects", "map_restarts", "map_last_reject"}
 # A map thread that stopped ticking is reported not alive after MAP_ALIVE_S; the gateway checks every 0.5 s.
 MAP_ALIVE_BOUND = ros_node.MAP_ALIVE_S + 3.0
 
@@ -118,9 +116,9 @@ class Inputs:
 
 
 class MapPubs:
-    """Publishers for the map inputs, with the durability each real publisher uses: RTAB-Map's cloud, the
-    elevation pair and the map stats are latched (transient local); the path, the depth image, the camera
-    stream and the perception stats are volatile."""
+    """Publishers for the map inputs, with the durability each real publisher uses: RTAB-Map's cloud and the
+    map stats are latched (transient local); the path, the depth image, the camera stream and the perception
+    stats are volatile."""
 
     def __init__(self, node) -> None:
         latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
@@ -128,8 +126,6 @@ class MapPubs:
         self.node = node
         self.cloud = node.create_publisher(PointCloud2, CLOUD, latched)
         self.path = node.create_publisher(Path, PATH, volatile)
-        self.elev_cloud = node.create_publisher(PointCloud2, ELEV_CLOUD, latched)
-        self.elev_grid = node.create_publisher(OccupancyGrid, ELEV_GRID, latched)
         self.depth = node.create_publisher(Image, DEPTH, volatile)
         self.camera = node.create_publisher(CompressedImage, CAMERA, volatile)
         self.map_stats = node.create_publisher(String, MAP_STATS, latched)
@@ -491,16 +487,6 @@ def make_path(rows, stamp, frame="map"):
     return msg
 
 
-def make_elevation_cloud(columns, stamp, frame="map"):
-    msg = PointCloud2()
-    msg.header.stamp, msg.header.frame_id = stamp, frame
-    n = len(columns[0])
-    msg.height, msg.width, msg.point_step, msg.is_dense, msg.row_step = 1, n, 20, True, 20 * n
-    msg.fields = _fields("x", "y", "z", "confidence", "obstacle_h")
-    msg.data = _pack(columns, [0, 4, 8, 12, 16], 20)
-    return msg
-
-
 def make_grid(cells, resolution, origin, stamp, yaw=0.0, frame="map"):
     msg = OccupancyGrid()
     msg.header.stamp, msg.header.frame_id = stamp, frame
@@ -607,51 +593,6 @@ def test_pose_resource_and_event_report_the_published_transform(graph):
                     break
     assert got and got["available"] and got["x"] == pytest.approx(POSE["x"])
     assert got["qz"] == pytest.approx(math.sin(POSE["yaw"] / 2))
-
-
-def test_elevation_is_built_only_from_a_cloud_and_a_grid_with_equal_stamps(graph):
-    c, pubs, node, gw = graph["client"], graph["pubs"], graph["pub_node"], graph["gw"]
-    cols = [np.array(v, dtype=np.float32) for v in (
-        [-1.75, -1.25, -0.25],  # x: cell columns 0 1 3 of the grid below
-        [1.75, 2.25, 3.25],  # y: rows 0 1 3
-        [0.5, 1.0, 1.5],  # z
-        [1.0, 0.5, 0.25],  # confidence
-        [0.0, 0.15, 0.0],  # obstacle_h
-    )]
-    s1 = pubs.now()
-    time.sleep(0.01)
-    s2 = pubs.now()  # a later stamp: same publishers, different sample
-    assert (s1.sec, s1.nanosec) != (s2.sec, s2.nanosec)
-    cells = np.zeros((6, 8), dtype=np.int8)
-    unpaired_before = gw.map_rejects.get("elevation_unpaired", 0)
-
-    def served():  # judged by what is served, not by a seq: a latched replay of an older pair also bumps that
-        r = c.get("/map/elevation")
-        return codec.decode_elevation(r.content) if r.status_code == 200 else None
-
-    def ours():
-        out = served()
-        return out if out and out["known_cells"] == 3 and out["resolution_m"] == pytest.approx(0.5) else None
-
-    with watching(c):
-        assert _wait(lambda: _subscribed(node, HEAVY_TOPICS), timeout=8.0)
-        pubs.elev_cloud.publish(make_elevation_cloud(cols, s1))
-        pubs.elev_grid.publish(make_grid(cells, 0.25, (5.0, 5.0), s2))  # stamps differ: no pair (and its own geometry)
-        time.sleep(0.8)
-        wrong = served()
-        assert wrong is None or wrong["resolution_m"] != pytest.approx(0.25), "an unequal pair was used"
-        pubs.elev_grid.publish(make_grid(cells, 0.5, (-2.0, 1.5), s1))  # now they match
-        out = _wait(ours, timeout=8.0)
-        stats = _map_status(c)["stats"]
-    assert out, "the matching pair was never served"
-    assert (out["origin_x"], out["origin_y"]) == pytest.approx((-2.0, 1.5))
-    assert out["heights"][0, 0] == pytest.approx(0.5) and out["heights"][1, 1] == pytest.approx(1.0)
-    assert out["heights"][3, 3] == pytest.approx(1.5)
-    assert out["obstacle"][1, 1] == 3  # 0.15 m in 5 cm units
-    assert stats["elevation_known_cells"] == 3
-    # the stamp-s2 grid was replaced before it found its cloud: a publisher that stamps the halves differently
-    # shows up as rejects, not as a silent 503
-    assert gw.map_rejects.get("elevation_unpaired", 0) > unpaired_before
 
 
 def test_a_latched_costmap_is_received_when_its_publisher_appears_after_the_subscription(graph):
@@ -942,8 +883,7 @@ def test_a_failing_map_health_update_never_stops_the_gateways_executor():
 def test_layers_in_another_frame_are_refused_and_an_empty_frame_is_accepted(graph):
     c, pubs, node, gw = graph["client"], graph["pubs"], graph["pub_node"], graph["gw"]
     cells = np.zeros((6, 8), dtype=np.int8)
-    elevation = [np.array(v, dtype=np.float32) for v in ([-1.75], [1.75], [0.5], [1.0], [0.0])]
-    kinds = ("frame_cloud", "frame_trajectory", "frame_elevation_cloud", "frame_elevation_obstacles", "frame_grid")
+    kinds = ("frame_cloud", "frame_trajectory", "frame_grid")
 
     def counts():
         rejects = gw.map_rejects
@@ -963,8 +903,6 @@ def test_layers_in_another_frame_are_refused_and_an_empty_frame_is_accepted(grap
             pubs.cloud.publish(make_rgb_cloud(np.array([[901, 902, 903]], dtype=np.float32),
                                               np.zeros((1, 3), dtype=np.uint8), now, frame="odom"))
             pubs.path.publish(make_path([(901, 902, 903, 0, 0, 0, 1)], now, frame="odom"))
-            pubs.elev_cloud.publish(make_elevation_cloud(elevation, now, frame="odom"))
-            pubs.elev_grid.publish(make_grid(cells, 0.3125, (0.0, 0.0), now, frame="odom"))
             costmap.publish(make_grid(cells, 0.2, (0.0, 0.0), now, frame="odom"))  # a local costmap, say
 
         refused = _wait(lambda: (publish_odom_layers(), all(counts()[k] > before[k] for k in kinds))[1], timeout=12.0)
@@ -974,8 +912,6 @@ def test_layers_in_another_frame_are_refused_and_an_empty_frame_is_accepted(grap
         assert cloud is None or 901.0 not in cloud["xyz"]
         trajectory = served("/map/trajectory", codec.decode_trajectory)
         assert trajectory is None or 901.0 not in trajectory["poses"][:, 0]
-        elevation_out = served("/map/elevation", codec.decode_elevation)
-        assert elevation_out is None or elevation_out["resolution_m"] != pytest.approx(0.3125)
         grid = served("/map/grid", codec.decode_grid)
         assert grid is None or grid["resolution_m"] != pytest.approx(0.2)
 
@@ -1002,23 +938,6 @@ def test_an_organised_cloud_with_padded_rows_is_refused(graph):
         assert _wait(lambda: gw.map_rejects.get("cloud", 0) > before)
         r = c.get("/map/cloud")
     assert r.status_code != 200 or codec.decode_cloud(r.content)["source_count"] != 6
-
-
-def test_elevation_halves_without_a_stamp_never_pair(graph):
-    c, pubs, node, gw = graph["client"], graph["pubs"], graph["pub_node"], graph["gw"]
-    four = [np.arange(4, dtype=np.float32) + i for i in range(5)]
-    cells = np.zeros((6, 8), dtype=np.int8)
-    unset = Time().to_msg()  # sec 0, nanosec 0
-    before = gw.map_rejects.get("elevation_unstamped", 0)
-    with watching(c):
-        assert _wait(lambda: _subscribed(node, HEAVY_TOPICS), timeout=8.0)
-        pubs.elev_cloud.publish(make_elevation_cloud(four, unset))
-        pubs.elev_grid.publish(make_grid(cells, 0.375, (-2.0, 1.5), unset))
-        assert _wait(lambda: gw.map_rejects.get("elevation_unstamped", 0) >= before + 2)
-        r = c.get("/map/elevation")
-        stats = _map_status(c)["stats"]
-    assert r.status_code != 200 or codec.decode_elevation(r.content)["resolution_m"] != pytest.approx(0.375)
-    assert stats.get("elevation_known_cells") != 4, "cells were counted for a half that never paired"
 
 
 def test_a_latched_arbiter_status_published_before_discovery_is_received(graph):

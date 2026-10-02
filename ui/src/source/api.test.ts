@@ -20,7 +20,7 @@ const goal = { id: 'abc', state: 'executing', frameId: 'map', x: 3, y: 0, yaw: 0
 // MapStatus / Pose exactly as the gateway's map-json-contract.md serialises them.
 const mapStatus = () => ({
   epoch: 123456789,
-  seq: { cloud: 4, elevation: 3, trajectory: 2, grid: 1, live: 0, depth: 7, camera: 9 },
+  seq: { cloud: 4, trajectory: 2, grid: 1, live: 0, depth: 7, camera: 9 },
   stats: { keyframes: 12, depth_hz: 3.2, mode: 'mapping', calibration_placeholder: false, last_update_age_s: null },
 })
 const pose = () => ({ available: true, x: 1, y: 2, z: 0, qx: 0, qy: 0, qz: 0, qw: 1, ageS: 0.05 })
@@ -68,14 +68,14 @@ describe('gateway payload checks', () => {
 })
 
 describe('map status and pose checks', () => {
-  it('names the seven layers', () => {
-    expect([...LAYERS]).toEqual(['cloud', 'elevation', 'trajectory', 'grid', 'live', 'depth', 'camera'])
+  it('names the layers', () => {
+    expect([...LAYERS]).toEqual(['cloud', 'trajectory', 'grid', 'live', 'depth', 'camera'])
   })
 
   it('accepts a valid map status, passing every stats key through', () => {
     const m = asMapStatus(mapStatus())
     expect(m?.epoch).toBe(123456789)
-    expect(m?.seq).toEqual({ cloud: 4, elevation: 3, trajectory: 2, grid: 1, live: 0, depth: 7, camera: 9 })
+    expect(m?.seq).toEqual({ cloud: 4, trajectory: 2, grid: 1, live: 0, depth: 7, camera: 9 })
     expect(m?.stats).toEqual({ keyframes: 12, depth_hz: 3.2, mode: 'mapping', calibration_placeholder: false, last_update_age_s: null })
   })
 

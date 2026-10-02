@@ -20,9 +20,9 @@ describe('layerKey', () => {
 
 describe('nextFetches', () => {
   it('fetches a layer whose epoch:seq key differs from the one held, and only that one', () => {
-    const status = mapStatus(5, { cloud: 3, elevation: 2 })
-    const have = { ...none<string | null>(null), cloud: '5:3', elevation: '5:1' }
-    expect(nextFetches(status, have, ALL)).toEqual(['elevation'])
+    const status = mapStatus(5, { cloud: 3, trajectory: 2 })
+    const have = { ...none<string | null>(null), cloud: '5:3', trajectory: '5:1' }
+    expect(nextFetches(status, have, ALL)).toEqual(['trajectory'])
   })
 
   it('fetches nothing when every held key matches', () => {
@@ -36,12 +36,12 @@ describe('nextFetches', () => {
   })
 
   it('refetches every enabled layer when the epoch changes even though no seq did', () => {
-    const before = mapStatus(5, { cloud: 3, elevation: 2, trajectory: 4, grid: 1, live: 8, depth: 6, camera: 9 })
+    const before = mapStatus(5, { cloud: 3, trajectory: 4, grid: 1, live: 8, depth: 6, camera: 9 })
     const have = Object.fromEntries(LAYERS.map((l) => [l, layerKey(before, l)])) as Record<Layer, string | null>
     expect(nextFetches(before, have, ALL)).toEqual([])
     const restarted = { ...before, epoch: 6 }
     expect(nextFetches(restarted, have, ALL)).toEqual([...LAYERS])
-    expect(nextFetches(restarted, have, only('elevation', 'camera'))).toEqual(['elevation', 'camera'])
+    expect(nextFetches(restarted, have, only('trajectory', 'camera'))).toEqual(['trajectory', 'camera'])
   })
 
   it('never fetches a layer whose seq is 0, whatever is held', () => {
@@ -51,8 +51,8 @@ describe('nextFetches', () => {
   })
 
   it('never fetches a disabled layer', () => {
-    const status = mapStatus(5, { cloud: 1, elevation: 1, camera: 1 })
-    expect(nextFetches(status, none<string | null>(null), only('elevation'))).toEqual(['elevation'])
+    const status = mapStatus(5, { cloud: 1, trajectory: 1, camera: 1 })
+    expect(nextFetches(status, none<string | null>(null), only('trajectory'))).toEqual(['trajectory'])
     expect(nextFetches(status, none<string | null>(null), none(false))).toEqual([])
   })
 
@@ -69,7 +69,7 @@ describe('nextFetches', () => {
 
 describe('MIN_INTERVAL_MS', () => {
   it('is the specified minimum between fetch starts of one layer', () => {
-    expect(MIN_INTERVAL_MS).toEqual({ cloud: 2000, elevation: 1000, trajectory: 1000, grid: 1000, live: 500, depth: 500, camera: 500 })
+    expect(MIN_INTERVAL_MS).toEqual({ cloud: 2000, trajectory: 1000, grid: 1000, live: 500, depth: 500, camera: 500 })
   })
 })
 
@@ -91,11 +91,11 @@ describe('schedule', () => {
   })
 
   it('holds a layer back until its own minimum interval since the last start has passed', () => {
-    const lastStart = { ...never, cloud: 10_000, elevation: 10_000 }
-    // 999 ms later elevation (1000) is still too early, cloud (2000) needs 1001 ms more
-    expect(schedule(['cloud', 'elevation'], 10_999, lastStart, idle)).toEqual({ start: [], retryInMs: 1 })
-    // exactly the interval later elevation may start; cloud still waits another 1000 ms
-    expect(schedule(['cloud', 'elevation'], 11_000, lastStart, idle)).toEqual({ start: ['elevation'], retryInMs: 1000 })
+    const lastStart = { ...never, cloud: 10_000, trajectory: 10_000 }
+    // 999 ms later trajectory (1000) is still too early, cloud (2000) needs 1001 ms more
+    expect(schedule(['cloud', 'trajectory'], 10_999, lastStart, idle)).toEqual({ start: [], retryInMs: 1 })
+    // exactly the interval later trajectory may start; cloud still waits another 1000 ms
+    expect(schedule(['cloud', 'trajectory'], 11_000, lastStart, idle)).toEqual({ start: ['trajectory'], retryInMs: 1000 })
     expect(schedule(['cloud'], 12_000, lastStart, idle)).toEqual({ start: ['cloud'], retryInMs: null })
   })
 
@@ -113,13 +113,13 @@ describe('schedule', () => {
   })
 
   it('keeps the order it was given and mixes started and held-back layers', () => {
-    const lastStart = { ...never, elevation: 9_900 }
-    const plan = schedule(['cloud', 'elevation', 'camera'], 10_000, lastStart, idle)
+    const lastStart = { ...never, trajectory: 9_900 }
+    const plan = schedule(['cloud', 'trajectory', 'camera'], 10_000, lastStart, idle)
     expect(plan).toEqual({ start: ['cloud', 'camera'], retryInMs: 900 })
   })
 
   it('never waits longer than the layer interval if the clock went backwards', () => {
-    const plan = schedule(['elevation'], 5_000, { ...never, elevation: 10_000 }, idle)
+    const plan = schedule(['trajectory'], 5_000, { ...never, trajectory: 10_000 }, idle)
     expect(plan).toEqual({ start: [], retryInMs: 1000 })
   })
 })
@@ -254,19 +254,19 @@ describe('createMapSession', () => {
   it('fetches a changed layer once, then again only when its key changes', async () => {
     const h = harness()
     h.session.start()
-    await h.answer('/map', statusBody(1, { elevation: 3 }))
-    expect(h.paths()).toEqual(['/map', '/map/elevation'])
-    await h.answer('/map/elevation', 'e3')
-    expect(h.frames).toEqual([{ layer: 'elevation', text: 'e3' }])
+    await h.answer('/map', statusBody(1, { trajectory: 3 }))
+    expect(h.paths()).toEqual(['/map', '/map/trajectory'])
+    await h.answer('/map/trajectory', 'e3')
+    expect(h.frames).toEqual([{ layer: 'trajectory', text: 'e3' }])
 
     await vi.advanceTimersByTimeAsync(1000)
-    await h.answer('/map', statusBody(1, { elevation: 3 }))
-    expect(h.count('/map/elevation')).toBe(1) // same epoch:seq, held
+    await h.answer('/map', statusBody(1, { trajectory: 3 }))
+    expect(h.count('/map/trajectory')).toBe(1) // same epoch:seq, held
 
     await vi.advanceTimersByTimeAsync(1000)
-    await h.answer('/map', statusBody(1, { elevation: 4 }))
-    expect(h.count('/map/elevation')).toBe(2)
-    await h.answer('/map/elevation', 'e4')
+    await h.answer('/map', statusBody(1, { trajectory: 4 }))
+    expect(h.count('/map/trajectory')).toBe(2)
+    await h.answer('/map/trajectory', 'e4')
     expect(h.frames.map((f) => f.text)).toEqual(['e3', 'e4'])
     h.session.dispose()
   })
@@ -383,9 +383,9 @@ describe('createMapSession', () => {
   })
 
   it('aborts in-flight layer fetches on stop() and treats the abort as no error, no frame', async () => {
-    const h = harness(only('elevation', 'camera'))
+    const h = harness(only('trajectory', 'camera'))
     h.session.start()
-    await h.answer('/map', statusBody(1, { elevation: 1, camera: 1 }))
+    await h.answer('/map', statusBody(1, { trajectory: 1, camera: 1 }))
     const inFlight = h.pending.filter((p) => p.path.startsWith('/map/'))
     expect(inFlight).toHaveLength(2)
     h.session.stop()

@@ -5,7 +5,7 @@ decoder. `build_golden()` below holds the exact inputs each file is encoded from
 can read what a file must decode to without running Python. Rewrite the files (only when the format
 changes on purpose) with:  python3 test/test_mapcodec.py --write
 
-All five fixtures use epoch=7, seq=3, stamp_s=1234.5. Arrays are row-major, row = y index, column = x
+All four fixtures use epoch=7, seq=3, stamp_s=1234.5. Arrays are row-major, row = y index, column = x
 index. Floats are float32 on the wire, and every value below is exactly representable unless noted.
 
   cloud.bin       UGVC, 184 bytes (64 + 15 * 8)   count 8, source_count 8, spacing_m 0.25, flags 1 (rgb),
@@ -14,12 +14,6 @@ index. Floats are float32 on the wire, and every value below is exactly represen
                     1 ( 1.00,  0.00, 0.0) (  0, 255,   0)    5 ( 1.0, 0.0, 0.5) (255,   0, 255)
                     2 ( 0.00,  1.00, 0.0) (  0,   0, 255)    6 (-1.5, 2.25, 3.0) ( 16,  32,  48)
                     3 ( 1.00,  1.00, 0.0) (255, 255,   0)    7 ( 0.25, -0.75, 1.5) (250, 128,   7)
-  elevation.bin   UGVE, 120 bytes (48 + 6 * 12)   width 4, height 3, resolution_m 0.5, origin (-1, 2),
-                  known_cells 11. heights (NaN = unknown), obstacle bytes (5 cm units), confidence bytes:
-                    heights   0.00 0.25 0.50 0.75 | 1.00  NaN 1.50 1.75 | 2.00 2.25 2.50 2.75
-                    obstacle     0    0    0    0 |    0    0    3    0 |    0    0    0    0
-                    conf       255  204  153  102 |   51    0  255  204 |  153  102   51  255
-                  (the 0.12 m obstacle at row 1, col 2 rounds up to 3 units = 15 cm.)
   trajectory.bin  UGVT, 116 bytes (32 + 28 * 3)   count 3, length_m 17 (3-D polyline: 5 + 12).
                   poses (x y z qx qy qz qw):  (0 0 0  0 0 0 1)  (3 4 0  0 0 1 0)  (3 4 12  .5 .5 .5 .5)
   grid.bin        UGVG, 60 bytes (48 + 12)        width 4, height 3, resolution_m 0.25, origin (-0.5, 1),
@@ -69,11 +63,6 @@ CLOUD_RGB = np.array(
     [[255, 0, 0], [0, 255, 0], [0, 0, 255], [255, 255, 0], [0, 255, 255], [255, 0, 255], [16, 32, 48], [250, 128, 7]],
     dtype=np.uint8,
 )
-ELEV_HEIGHT = np.array(
-    [[0.0, 0.25, 0.5, 0.75], [1.0, NAN, 1.5, 1.75], [2.0, 2.25, 2.5, 2.75]], dtype=np.float32
-)
-ELEV_OBSTACLE = np.array([[0, 0, 0, 0], [0, 0, 0.12, 0], [0, 0, 0, 0]], dtype=np.float32)
-ELEV_CONFIDENCE = np.array([[1.0, 0.8, 0.6, 0.4], [0.2, 0.0, 1.0, 0.8], [0.6, 0.4, 0.2, 1.0]], dtype=np.float32)
 TRAJ_POSES = np.array(
     [[0, 0, 0, 0, 0, 0, 1], [3, 4, 0, 0, 0, 1, 0], [3, 4, 12, 0.5, 0.5, 0.5, 0.5]], dtype=np.float32
 )
@@ -83,15 +72,12 @@ DEPTH_M = np.array(
     dtype=np.float32,
 )
 
-GOLDEN_NAMES = ("cloud.bin", "elevation.bin", "trajectory.bin", "grid.bin", "depth.bin")
+GOLDEN_NAMES = ("cloud.bin", "trajectory.bin", "grid.bin", "depth.bin")
 
 
 def build_golden() -> dict[str, bytes]:
     return {
         "cloud.bin": mc.encode_cloud(CLOUD_XYZ, CLOUD_RGB, budget=100, spacing_m=0.25, **KW),
-        "elevation.bin": mc.encode_elevation(
-            ELEV_HEIGHT, ELEV_OBSTACLE, ELEV_CONFIDENCE, origin_xy=(-1.0, 2.0), resolution=0.5, max_side=64, **KW
-        ),
         "trajectory.bin": mc.encode_trajectory(TRAJ_POSES, **KW),
         "grid.bin": mc.encode_grid(GRID_CELLS, resolution=0.25, origin_xy=(-0.5, 1.0), origin_yaw=0.5, **KW),
         "depth.bin": mc.encode_depth(DEPTH_M, stride=1, max_range_m=10.0, **KW),
@@ -406,224 +392,6 @@ def test_cloud_view_feeds_encode_cloud():
     assert mc.encode_cloud(xyz, rgb, budget=100, spacing_m=0.25, **KW) == build_golden()["cloud.bin"]
 
 
-# --------------------------------------------------------------------------------- grid_from_cells
-
-
-def test_grid_from_cells_places_cells_and_leaves_the_rest_unknown():
-    # origin (10, 20), 0.5 m cells, 4 wide x 3 high. Cell centres: (i + 0.5) * res.
-    x = np.array([10.25, 11.75, 11.25, 99.0, 9.9], np.float32)  # last two fall outside the grid
-    y = np.array([20.25, 20.75, 21.25, 20.25, 20.25], np.float32)
-    z = np.array([1.0, 2.0, 3.0, 4.0, 5.0], np.float32)
-    conf = np.array([0.1, 0.2, 0.3, 0.4, 0.5], np.float32)
-    obs = np.array([0.0, 0.5, 1.0, 1.5, 2.0], np.float32)
-    h, o, c = mc.grid_from_cells(x, y, z, conf, obs, origin_xy=(10.0, 20.0), resolution=0.5, width=4, height=3)
-    assert h.shape == o.shape == c.shape == (3, 4)
-    assert h.dtype == o.dtype == c.dtype == np.float32
-    assert h[0, 0] == 1.0 and h[1, 3] == 2.0 and h[2, 2] == 3.0  # row = y index, column = x index
-    assert int(np.isfinite(h).sum()) == 3
-    assert np.isnan(h[0, 1]) and np.isnan(h[2, 0])
-    assert (o[1, 3], o[2, 2]) == (0.5, 1.0) and o.sum() == 1.5
-    assert (c[0, 0], c[1, 3]) == (np.float32(0.1), np.float32(0.2))
-    assert c[0, 1] == 0.0 and o[0, 1] == 0.0  # unknown cells carry zero obstacle and confidence
-
-
-def test_grid_from_cells_ignores_non_finite_and_edge_cases():
-    x = np.array([10.25, NAN, 10.75, 12.0], np.float32)  # 12.0 is one cell past the last column
-    y = np.array([20.25, 20.25, 20.25, 20.25], np.float32)
-    z = np.array([1.0, 2.0, NAN, 3.0], np.float32)
-    ones = np.ones(4, np.float32)
-    h, _, _ = mc.grid_from_cells(x, y, z, ones, ones, origin_xy=(10.0, 20.0), resolution=0.5, width=4, height=3)
-    assert int(np.isfinite(h).sum()) == 1 and h[0, 0] == 1.0
-
-
-def test_grid_from_cells_empty_input_is_all_unknown():
-    e = np.zeros(0, np.float32)
-    h, o, c = mc.grid_from_cells(e, e, e, e, e, origin_xy=(0.0, 0.0), resolution=0.1, width=3, height=2)
-    assert h.shape == (2, 3) and np.isnan(h).all() and not o.any() and not c.any()
-
-
-def test_grid_from_cells_negative_origin_floor():
-    x = np.array([-0.05], np.float32)  # cell index floor((-0.05 + 0.2) / 0.1) = 1
-    y = np.array([0.0], np.float32)
-    ones = np.ones(1, np.float32)
-    h, _, _ = mc.grid_from_cells(x, y, ones, ones, ones, origin_xy=(-0.2, -0.1), resolution=0.1, width=4, height=2)
-    assert h[1, 1] == 1.0 and int(np.isfinite(h).sum()) == 1
-
-
-# -------------------------------------------------------------------------------------- elevation
-
-
-def test_elevation_roundtrip_has_spec_length_and_fields():
-    b = mc.encode_elevation(
-        ELEV_HEIGHT, ELEV_OBSTACLE, ELEV_CONFIDENCE, origin_xy=(-1.0, 2.0), resolution=0.5, max_side=64, **KW
-    )
-    assert len(b) == 48 + 6 * 12
-    d = mc.decode_elevation(b)
-    assert (d["epoch"], d["seq"], d["stamp_s"]) == (7, 3, 1234.5)
-    assert (d["width"], d["height"], d["resolution_m"]) == (4, 3, 0.5)
-    assert (d["origin_x"], d["origin_y"], d["known_cells"]) == (-1.0, 2.0, 11)
-    np.testing.assert_array_equal(d["heights"], ELEV_HEIGHT)  # NaN == NaN under assert_array_equal
-    assert d["heights"].shape == d["obstacle"].shape == d["confidence"].shape == (3, 4)
-    np.testing.assert_array_equal(d["obstacle"], np.array([[0, 0, 0, 0], [0, 0, 3, 0], [0, 0, 0, 0]], np.uint8))
-    np.testing.assert_array_equal(
-        d["confidence"], np.array([[255, 204, 153, 102], [51, 0, 255, 204], [153, 102, 51, 255]], np.uint8)
-    )
-
-
-def test_elevation_header_and_body_offsets():
-    b = mc.encode_elevation(
-        ELEV_HEIGHT, ELEV_OBSTACLE, ELEV_CONFIDENCE, origin_xy=(-1.0, 2.0), resolution=0.5, max_side=64, **KW
-    )
-    assert struct.unpack_from("<IIfffI", b, 24) == (4, 3, 0.5, -1.0, 2.0, 11)
-    assert struct.unpack_from("<f", b, 48 + 4)[0] == 0.25  # heights, row-major
-    assert struct.unpack_from("<I", b, 48 + 4 * 5)[0] == 0x7FC00000  # canonical NaN at (row 1, col 1)
-    assert b[48 + 48 + 6] == 3  # obstacle block: row 1, col 2
-    assert b[48 + 48 + 12] == 255  # confidence block: first cell
-
-
-def test_elevation_crops_to_the_known_bounding_box_and_shifts_the_origin():
-    h = np.full((6, 8), NAN, np.float32)
-    h[2:4, 3:6] = np.arange(6, dtype=np.float32).reshape(2, 3)
-    o = np.zeros((6, 8), np.float32)
-    c = np.full((6, 8), 0.5, np.float32)
-    d = mc.decode_elevation(
-        mc.encode_elevation(h, o, c, origin_xy=(10.0, 20.0), resolution=0.5, max_side=64, **KW)
-    )
-    assert (d["width"], d["height"]) == (3, 2)
-    assert (d["origin_x"], d["origin_y"]) == (10.0 + 3 * 0.5, 20.0 + 2 * 0.5)
-    assert d["resolution_m"] == 0.5 and d["known_cells"] == 6
-    np.testing.assert_array_equal(d["heights"], np.arange(6, dtype=np.float32).reshape(2, 3))
-
-
-def test_elevation_crop_happens_before_block_reduction():
-    h = np.full((10, 200), NAN, np.float32)
-    h[4:7, 90:95] = 1.0
-    z = np.zeros_like(h)
-    d = mc.decode_elevation(mc.encode_elevation(h, z, z + 1, origin_xy=(0.0, 0.0), resolution=0.1, max_side=8, **KW))
-    assert (d["width"], d["height"]) == (5, 3)  # fits max_side after the crop: no reduction
-    assert d["resolution_m"] == f32(0.1)
-    assert d["origin_x"] == f32(9.0) and d["origin_y"] == f32(0.4)
-
-
-def test_elevation_block_reduces_by_the_smallest_integer_factor_that_fits():
-    hh, ww = 5, 7
-    h = np.arange(hh * ww, dtype=np.float32).reshape(hh, ww)
-    h[0:3, 3:6] = NAN  # one whole block with no known cell
-    obstacle = (np.arange(hh * ww, dtype=np.float32).reshape(hh, ww) % 9) * 0.05
-    conf = 1.0 - np.arange(hh * ww, dtype=np.float32).reshape(hh, ww) / 40.0
-    d = mc.decode_elevation(
-        mc.encode_elevation(h, obstacle, conf, origin_xy=(1.0, 2.0), resolution=0.1, max_side=3, **KW)
-    )
-    f = 3  # ceil(7 / 3): the longer side needs 3, and 2 would leave 4 columns
-    assert (d["width"], d["height"]) == (3, 2)
-    assert d["resolution_m"] == f32(0.1 * f) and (d["origin_x"], d["origin_y"]) == (1.0, 2.0)
-    known = np.isfinite(h)
-    for by in range(2):
-        for bx in range(3):
-            sl = (slice(by * f, by * f + f), slice(bx * f, bx * f + f))
-            k = known[sl]
-            if not k.any():
-                assert np.isnan(d["heights"][by, bx])
-                assert d["obstacle"][by, bx] == 0 and d["confidence"][by, bx] == 0
-                continue
-            assert d["heights"][by, bx] == h[sl][k].max()
-            want_obstacle = np.ceil(round(float(obstacle[sl][k].max()) / 0.05, 6))
-            assert d["obstacle"][by, bx] == want_obstacle
-            assert d["confidence"][by, bx] == round(float(conf[sl][k].min()) * 255)
-    assert d["known_cells"] == int(np.isfinite(d["heights"]).sum()) == 5
-
-
-def test_elevation_block_reduction_uses_max_height_max_obstacle_min_confidence():
-    h = np.array([[1.0, 5.0], [3.0, 2.0]], np.float32)
-    o = np.array([[0.0, 0.05], [0.2, 0.0]], np.float32)
-    c = np.array([[0.9, 0.2], [1.0, 0.6]], np.float32)
-    d = mc.decode_elevation(mc.encode_elevation(h, o, c, origin_xy=(0.0, 0.0), resolution=0.25, max_side=1, **KW))
-    assert (d["width"], d["height"]) == (1, 1) and d["resolution_m"] == 0.5
-    assert d["heights"][0, 0] == 5.0
-    assert d["obstacle"][0, 0] == 4  # 0.2 m
-    assert d["confidence"][0, 0] == 51  # min over the block: 0.2
-    assert d["known_cells"] == 1
-
-
-def test_elevation_unknown_cells_do_not_vote_in_a_block():
-    h = np.array([[1.0, NAN], [NAN, NAN]], np.float32)
-    o = np.array([[0.0, 9.0], [9.0, 9.0]], np.float32)
-    c = np.array([[0.8, 0.0], [0.0, 0.0]], np.float32)
-    d = mc.decode_elevation(mc.encode_elevation(h, o, c, origin_xy=(0.0, 0.0), resolution=1.0, max_side=1, **KW))
-    assert (d["width"], d["height"]) == (1, 1)
-    assert (d["heights"][0, 0], d["obstacle"][0, 0], d["confidence"][0, 0]) == (1.0, 0, round(0.8 * 255))
-
-
-def test_elevation_obstacle_quantisation_rounds_up_and_saturates():
-    vals = np.array([0.0, 0.0001, 0.05, 0.06, 0.15, 0.3, 12.75, 12.76, 100.0, np.inf, NAN, -1.0], np.float32)
-    h = np.zeros((1, vals.size), np.float32)
-    d = mc.decode_elevation(
-        mc.encode_elevation(h, vals.reshape(1, -1), np.ones_like(h), origin_xy=(0, 0), resolution=0.1, max_side=64, **KW)
-    )
-    assert d["obstacle"][0].tolist() == [0, 1, 1, 2, 3, 6, 255, 255, 255, 255, 0, 0]
-
-
-def test_elevation_confidence_quantisation_clamps_to_unit_range():
-    c = np.array([[-0.5, 0.0, 0.5019608, 1.0, 7.0, NAN]], np.float32)
-    h = np.zeros_like(c)
-    d = mc.decode_elevation(mc.encode_elevation(h, h, c, origin_xy=(0, 0), resolution=0.1, max_side=64, **KW))
-    assert d["confidence"][0].tolist() == [0, 0, 128, 255, 255, 0]
-
-
-def test_elevation_writes_zero_obstacle_and_confidence_for_unknown_cells():
-    h = np.array([[1.0, NAN, 2.0]], np.float32)
-    o = np.array([[0.0, 3.0, 0.0]], np.float32)
-    c = np.array([[1.0, 0.9, 1.0]], np.float32)
-    d = mc.decode_elevation(mc.encode_elevation(h, o, c, origin_xy=(0, 0), resolution=0.1, max_side=64, **KW))
-    assert d["width"] == 3 and np.isnan(d["heights"][0, 1])
-    assert d["obstacle"][0, 1] == 0 and d["confidence"][0, 1] == 0 and d["known_cells"] == 2
-
-
-def test_elevation_treats_infinite_height_as_unknown():
-    h = np.array([[np.inf, 1.0, -np.inf]], np.float32)
-    z = np.zeros_like(h)
-    d = mc.decode_elevation(mc.encode_elevation(h, z, z, origin_xy=(0, 0), resolution=0.1, max_side=64, **KW))
-    assert (d["width"], d["height"], d["known_cells"]) == (1, 1, 1)
-
-
-@pytest.mark.parametrize("shape", [(0, 0), (3, 4)])
-def test_elevation_all_unknown_or_empty_encodes_zero_size(shape):
-    h = np.full(shape, NAN, np.float32)
-    z = np.zeros(shape, np.float32)
-    b = mc.encode_elevation(h, z, z, origin_xy=(1.5, -2.5), resolution=0.25, max_side=64, **KW)
-    assert len(b) == 48
-    d = mc.decode_elevation(b)
-    assert (d["width"], d["height"], d["known_cells"]) == (0, 0, 0)
-    assert d["heights"].size == 0 and d["obstacle"].size == 0 and d["confidence"].size == 0
-    assert (d["resolution_m"], d["origin_x"], d["origin_y"]) == (0.25, 1.5, -2.5)
-
-
-def test_elevation_rejects_bad_arguments():
-    h = np.zeros((2, 2), np.float32)
-    kw = {"origin_xy": (0.0, 0.0), "resolution": 0.1, "max_side": 4, **KW}
-    with pytest.raises(ValueError):
-        mc.encode_elevation(h, np.zeros((2, 3), np.float32), h, **kw)
-    with pytest.raises(ValueError):
-        mc.encode_elevation(h.ravel(), h.ravel(), h.ravel(), **kw)
-    with pytest.raises(ValueError):
-        mc.encode_elevation(h, h, h, **{**kw, "max_side": 0})
-    for bad in (0.0, -0.1, NAN):
-        with pytest.raises(ValueError):
-            mc.encode_elevation(h, h, h, **{**kw, "resolution": bad})
-
-
-def test_elevation_ends_to_end_from_sparse_cells():
-    x = np.array([0.25, 0.75], np.float32)
-    y = np.array([0.25, 0.75], np.float32)
-    z = np.array([1.0, 2.0], np.float32)
-    one = np.ones(2, np.float32)
-    h, o, c = mc.grid_from_cells(x, y, z, one, 0 * one, origin_xy=(0.0, 0.0), resolution=0.5, width=8, height=8)
-    d = mc.decode_elevation(mc.encode_elevation(h, o, c, origin_xy=(0.0, 0.0), resolution=0.5, max_side=64, **KW))
-    assert (d["width"], d["height"], d["known_cells"]) == (2, 2, 2)
-    np.testing.assert_array_equal(np.diag(d["heights"]), np.array([1.0, 2.0], np.float32))
-    assert np.isnan(d["heights"][0, 1]) and np.isnan(d["heights"][1, 0])
-
-
 # ------------------------------------------------------------------------------------ trajectory
 
 
@@ -751,12 +519,11 @@ def test_depth_rejects_bad_arguments():
 
 LAYERS = {
     "cloud.bin": mc.decode_cloud,
-    "elevation.bin": mc.decode_elevation,
     "trajectory.bin": mc.decode_trajectory,
     "grid.bin": mc.decode_grid,
     "depth.bin": mc.decode_depth,
 }
-MAGICS = {"cloud.bin": b"UGVC", "elevation.bin": b"UGVE", "trajectory.bin": b"UGVT", "grid.bin": b"UGVG", "depth.bin": b"UGVD"}
+MAGICS = {"cloud.bin": b"UGVC", "trajectory.bin": b"UGVT", "grid.bin": b"UGVG", "depth.bin": b"UGVD"}
 
 
 @pytest.mark.parametrize("name", GOLDEN_NAMES)
@@ -820,17 +587,6 @@ def test_golden_fixtures_decode_to_the_documented_values():
         [255, 0, 0], [0, 255, 0], [0, 0, 255], [255, 255, 0],
         [0, 255, 255], [255, 0, 255], [16, 32, 48], [250, 128, 7],
     ]  # fmt: skip
-
-    d = mc.decode_elevation(read("elevation.bin"))
-    assert len(read("elevation.bin")) == 120
-    assert (d["width"], d["height"], d["resolution_m"], d["origin_x"], d["origin_y"], d["known_cells"]) == (
-        4, 3, 0.5, -1.0, 2.0, 11,
-    )
-    assert np.nan_to_num(d["heights"], nan=-99.0).tolist() == [
-        [0.0, 0.25, 0.5, 0.75], [1.0, -99.0, 1.5, 1.75], [2.0, 2.25, 2.5, 2.75],
-    ]  # fmt: skip
-    assert d["obstacle"].tolist() == [[0, 0, 0, 0], [0, 0, 3, 0], [0, 0, 0, 0]]
-    assert d["confidence"].tolist() == [[255, 204, 153, 102], [51, 0, 255, 204], [153, 102, 51, 255]]
 
     d = mc.decode_trajectory(read("trajectory.bin"))
     assert len(read("trajectory.bin")) == 116

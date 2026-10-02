@@ -28,11 +28,10 @@ height, the trajectory, Nav2's cost grid halo, the robot pose, a depth panel and
   `ugv_nav/ugv_api/test/fixtures/map/` are shared with the gateway's tests) and the pose and map events of the telemetry
   stream. The view never opens rosbridge for map data. While the view is open it calls `GET /api/v1/map` as a heartbeat,
   which keeps the gateway's heavy subscriptions alive; hidden tab or closed view, the gateway drops them after 10 s.
-- **Layers:** buttons for cloud, live, path, elev, cost and img; the set is kept in `localStorage`
+- **Layers:** buttons for cloud, live, path, cost and img; the set is kept in `localStorage`
   (`ugv.console.map.layers`). A layer that is off is not fetched. Layers are refetched when their sequence number
   changes, and all of them when the gateway's `epoch` changes (a restart).
-- **Elevation is not built yet** (deferred by the owner). The elev layer and its colour modes (height, conf, obst)
-  exist, but nothing publishes elevation, so the layer stays empty and the endpoint answers 503.
+- **Elevation is not built yet** (deferred by the owner); the layer was removed until its producer lands (mindmap D16).
 - **Empty and broken states:** a 503 or truncated body decodes to nothing and the view says `NO MAP YET`. Banners:
   `STALE`, with the reason (map not updating, telemetry lost), and `MAP INPUTS STOPPED` when the gateway reports its map
   input thread gone. An error boundary keeps a failed map view from taking the console (e-stop, safety board) down.

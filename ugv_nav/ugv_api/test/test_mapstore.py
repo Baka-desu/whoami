@@ -9,7 +9,7 @@ import pytest
 
 from ugv_api.mapstore import MapStore
 
-LAYERS = ("cloud", "elevation", "trajectory", "grid", "live", "depth", "camera")
+LAYERS = ("cloud", "trajectory", "grid", "live", "depth", "camera")
 
 
 def encode_text(source, epoch, seq, stamp_s) -> bytes:
@@ -30,7 +30,7 @@ class Counting:
 # ------------------------------------------------------------------------------------------- basics
 
 
-def test_layers_are_the_seven_of_the_contract_in_order():
+def test_layers_are_those_of_the_contract_in_order():
     assert MapStore.LAYERS == LAYERS
 
 
@@ -229,7 +229,7 @@ def test_a_writer_and_many_readers_never_see_a_torn_snapshot():
 
     def writer():
         for i in range(1, 3001):  # single writer, so the i-th put has seq i
-            store.put("elevation", i, float(i))
+            store.put("live", i, float(i))
         stop.set()
 
     def encode(source, epoch, seq, stamp_s):
@@ -241,7 +241,7 @@ def test_a_writer_and_many_readers_never_see_a_torn_snapshot():
         last = 0
         while True:
             finished = stop.is_set()  # read before the blob, so the last pass starts after the final put
-            blob = store.blob("elevation", encode)
+            blob = store.blob("live", encode)
             if blob is not None:
                 seq, source, stamp = blob.decode().split("|")
                 if not (seq == source and float(stamp) == float(seq)):
@@ -260,7 +260,7 @@ def test_a_writer_and_many_readers_never_see_a_torn_snapshot():
         t.join(30)
     assert not any(t.is_alive() for t in threads)
     assert not bad, bad[:3]
-    assert store.seq("elevation") == 3000
+    assert store.seq("live") == 3000
     assert finals == [3000] * 4  # the last pass of every reader saw the newest put
 
 

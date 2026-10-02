@@ -109,76 +109,6 @@ def test_cloud_source_refuses_a_payload_shorter_than_its_points():
                            data=bytes(48))["n_points"] == 4
 
 
-def test_cloud_columns_refuses_an_organised_cloud_whose_rows_are_padded():
-    kw = padded_rows_kw(names=("x",), data=bytes(72))
-    with pytest.raises(ValueError, match="row_step"):
-        ms.cloud_columns(**kw, row_step=40)
-    assert ms.cloud_columns(**kw, row_step=36)["x"].shape == (6,)
-
-
-# ------------------------------------------------------------------------------------------ cloud columns
-
-
-ELEV_NAMES = ("x", "y", "z", "confidence", "obstacle_h")
-
-
-def elevation_fields(offsets=(0, 4, 8, 12, 16)):
-    return [(name, off, F32, 1) for name, off in zip(ELEV_NAMES, offsets)]
-
-
-def test_cloud_columns_extracts_float32_columns_as_independent_contiguous_arrays():
-    cols = [np.array([0.25, 0.75, 1.25], dtype=np.float32) + i for i in range(5)]
-    raw = pack_rows(cols, point_step=20, offsets=[0, 4, 8, 12, 16])
-    buffer = array.array("B", raw)
-    out = ms.cloud_columns(fields=elevation_fields(), point_step=20, n_points=3, is_bigendian=False, data=buffer,
-                           names=ELEV_NAMES)
-    assert tuple(out) == ELEV_NAMES
-    for name, expected in zip(ELEV_NAMES, cols):
-        got = out[name]
-        assert got.dtype == np.float32 and got.shape == (3,) and got.flags.c_contiguous
-        assert np.array_equal(got, expected)
-        assert not np.shares_memory(got, np.frombuffer(buffer, dtype=np.uint8))  # the message buffer can go
-
-
-def test_cloud_columns_follows_field_offsets_with_padding_and_a_different_order():
-    # confidence first, then 4 padding bytes, then x y z, obstacle_h last
-    cols = {"confidence": np.array([0.5, 1.0], np.float32), "x": np.array([1, 2], np.float32),
-            "y": np.array([3, 4], np.float32), "z": np.array([5, 6], np.float32),
-            "obstacle_h": np.array([0.15, 0.0], np.float32)}
-    raw = pack_rows([cols["confidence"], cols["x"], cols["y"], cols["z"], cols["obstacle_h"]], point_step=28,
-                    offsets=[0, 8, 12, 16, 24])
-    fields = [("confidence", 0, F32, 1), ("x", 8, F32, 1), ("y", 12, F32, 1), ("z", 16, F32, 1),
-              ("obstacle_h", 24, F32, 1)]
-    out = ms.cloud_columns(fields=fields, point_step=28, n_points=2, is_bigendian=False, data=raw, names=ELEV_NAMES)
-    for name in ELEV_NAMES:
-        assert np.array_equal(out[name], cols[name]), name
-
-
-def test_cloud_columns_with_no_points_gives_empty_float32_arrays():
-    out = ms.cloud_columns(fields=elevation_fields(), point_step=20, n_points=0, is_bigendian=False, data=b"",
-                           names=ELEV_NAMES)
-    assert all(out[n].dtype == np.float32 and out[n].shape == (0,) for n in ELEV_NAMES)
-
-
-@pytest.mark.parametrize(
-    "mutate",
-    [
-        lambda kw: kw.update(fields=[f for f in kw["fields"] if f[0] != "confidence"]),  # a field is missing
-        lambda kw: kw.update(fields=[("x", 0, 8, 1)] + kw["fields"][1:]),  # x is FLOAT64
-        lambda kw: kw.update(is_bigendian=True),
-        lambda kw: kw.update(data=kw["data"][:-1]),  # one byte short of point_step * n_points
-        lambda kw: kw.update(point_step=18),  # obstacle_h at 16 no longer fits
-    ],
-    ids=["missing-field", "wrong-datatype", "big-endian", "short-buffer", "field-outside-record"],
-)
-def test_cloud_columns_refuses_what_it_cannot_read_exactly(mutate):
-    raw = pack_rows([np.arange(3, dtype=np.float32)] * 5, point_step=20, offsets=[0, 4, 8, 12, 16])
-    kw = dict(fields=elevation_fields(), point_step=20, n_points=3, is_bigendian=False, data=raw, names=ELEV_NAMES)
-    mutate(kw)
-    with pytest.raises(ValueError):
-        ms.cloud_columns(**kw)
-
-
 # ------------------------------------------------------------------------------------------- trajectory
 
 
@@ -251,123 +181,6 @@ def test_grid_source_refuses_a_size_that_disagrees_with_the_data():
     with pytest.raises(ValueError):
         ms.grid_source(data=array.array("b", [0] * 5), width=3, height=2, resolution=1.0, origin_x=0, origin_y=0,
                        origin_q=(0, 0, 0, 1))
-
-
-# ------------------------------------------------------------------------------------------ elevation
-
-
-def elevation_columns(offset=0.0, n=3):
-    base = np.arange(n, dtype=np.float32) + np.float32(offset)
-    return {"x": base, "y": base + 10, "z": base + 20, "confidence": np.full(n, 0.5, np.float32),
-            "obstacle_h": np.zeros(n, np.float32)}
-
-
-GRID = dict(resolution=0.5, width=8, height=6, origin_x=-2.0, origin_y=1.5)
-
-
-def test_pairer_waits_for_both_halves_and_emits_the_exact_source_shape_on_equal_stamps():
-    pair = ms.ElevationPairer()
-    cols = elevation_columns()
-    assert pair.add_cloud(100, cols) is None  # one half is not a pair
-    src = pair.add_grid(100, **GRID)
-    assert src is not None
-    assert set(src) == {"x", "y", "z", "confidence", "obstacle_h", "origin_xy", "resolution", "width", "height"}
-    for name in ELEV_NAMES:
-        assert src[name] is cols[name]  # the columns are handed over, not rebuilt
-    assert src["origin_xy"] == (-2.0, 1.5) and src["resolution"] == 0.5
-    assert src["width"] == 8 and src["height"] == 6
-    assert type(src["width"]) is int and type(src["resolution"]) is float
-
-
-def test_pairer_emits_when_the_grid_arrives_first_too():
-    pair = ms.ElevationPairer()
-    assert pair.add_grid(7, **GRID) is None
-    assert pair.add_cloud(7, elevation_columns()) is not None
-
-
-def test_pairer_never_pairs_unequal_stamps_and_keeps_the_latest_of_each():
-    pair = ms.ElevationPairer()
-    a, b = elevation_columns(0), elevation_columns(100)
-    assert pair.add_cloud(1, a) is None
-    assert pair.add_grid(2, **GRID) is None  # 1 != 2
-    assert pair.add_cloud(3, b) is None  # the stamp-1 cloud is replaced by stamp 3, grid still 2
-    src = pair.add_grid(3, **GRID)  # now 3 == 3, and it is the newer cloud
-    assert src is not None and src["x"] is b["x"]
-    assert pair.add_cloud(4, a) is None  # a stamp-4 cloud against the stamp-3 grid is not a pair
-
-
-def test_pairer_never_pairs_two_unstamped_halves():
-    pair = ms.ElevationPairer()
-    assert pair.add_cloud(0, elevation_columns()) is None
-    assert pair.add_grid(0, **GRID) is None  # 0 == 0 is "no stamp" twice, not the same moment
-    assert pair.unstamped == 2
-    assert pair.add_cloud(0, elevation_columns()) is None
-    assert pair.unstamped == 3
-    # an unstamped half is not kept either: it must not pair with a stamped one
-    assert pair.add_grid(5, **GRID) is None
-    assert pair.add_cloud(5, elevation_columns()) is not None
-
-
-def test_pairer_counts_a_half_that_was_replaced_before_it_found_its_partner():
-    pair = ms.ElevationPairer()
-    assert pair.unpaired == 0
-    pair.add_cloud(1, elevation_columns())
-    pair.add_cloud(3, elevation_columns())  # the stamp-1 cloud never met a grid
-    assert pair.unpaired == 1
-    pair.add_grid(2, **GRID)
-    pair.add_grid(3, **GRID)  # pairs with the stamp-3 cloud; the stamp-2 grid never met a cloud
-    assert pair.unpaired == 2
-    pair.add_cloud(4, elevation_columns())  # replaces the stamp-3 cloud, which did pair: not counted
-    assert pair.unpaired == 2
-    pair.add_cloud(5, elevation_columns())  # replaces the stamp-4 cloud, which did not
-    assert pair.unpaired == 3
-
-
-def test_pairer_does_not_count_a_repeated_half_or_a_reset():
-    pair = ms.ElevationPairer()
-    pair.add_cloud(8, elevation_columns())
-    pair.add_cloud(8, elevation_columns())  # the same sample again: its grid may still come
-    assert pair.unpaired == 0
-    assert pair.add_grid(8, **GRID) is not None
-    pair.reset()
-    pair.add_cloud(9, elevation_columns())
-    pair.reset()  # discarding what is held is not a publisher fault
-    pair.add_cloud(10, elevation_columns())
-    assert pair.unpaired == 0
-
-
-def test_pairer_matches_nanosecond_stamps_exactly():
-    pair = ms.ElevationPairer()
-    assert pair.add_cloud(1_700_000_000_000_000_001, elevation_columns()) is None
-    assert pair.add_grid(1_700_000_000_000_000_002, **GRID) is None
-    assert pair.add_grid(1_700_000_000_000_000_001, **GRID) is not None
-
-
-def test_pairer_reset_forgets_both_halves():
-    pair = ms.ElevationPairer()
-    pair.add_cloud(5, elevation_columns())
-    pair.reset()
-    assert pair.add_grid(5, **GRID) is None
-
-
-def test_pairer_source_feeds_the_codec_unchanged():
-    pair = ms.ElevationPairer()
-    cols = {"x": np.array([-1.75, -1.25, -0.25], np.float32), "y": np.array([1.75, 2.25, 3.25], np.float32),
-            "z": np.array([0.5, 1.0, 1.5], np.float32), "confidence": np.array([1.0, 0.5, 0.25], np.float32),
-            "obstacle_h": np.array([0.0, 0.15, 0.0], np.float32)}
-    pair.add_cloud(9, cols)
-    src = pair.add_grid(9, **GRID)
-    height, obstacle, conf = codec.grid_from_cells(
-        src["x"], src["y"], src["z"], src["confidence"], src["obstacle_h"], origin_xy=src["origin_xy"],
-        resolution=src["resolution"], width=src["width"], height=src["height"])
-    assert height.shape == (6, 8)
-    blob = codec.encode_elevation(height, obstacle, conf, epoch=EPOCH, seq=SEQ, stamp_s=STAMP,
-                                  origin_xy=src["origin_xy"], resolution=src["resolution"], max_side=512)
-    out = codec.decode_elevation(blob)
-    assert out["known_cells"] == 3
-    # cell centre -1.75 is column floor((-1.75 + 2) / 0.5) = 0, row floor((1.75 - 1.5) / 0.5) = 0; the grid is
-    # cropped to the known box, which starts at column 0 / row 0 here, so the origin is unchanged
-    assert out["heights"][0, 0] == pytest.approx(0.5) and out["origin_x"] == pytest.approx(-2.0)
 
 
 # -------------------------------------------------------------------------------------------- depth
@@ -574,14 +387,12 @@ def test_stamp_seconds_uses_the_message_stamp_and_falls_back_for_an_unstamped_on
 
 def test_map_config_defaults_are_the_values_the_gateway_ships_with():
     c = ms.MapConfig()
-    assert (c.cloud_point_budget, c.cloud_spacing_m, c.elevation_max_side) == (500_000, 0.05, 512)
+    assert (c.cloud_point_budget, c.cloud_spacing_m) == (500_000, 0.05)
     assert (c.depth_stride, c.depth_max_range_m) == (2, 8.0)
     assert (c.live_stride, c.live_range_min_m, c.live_range_max_m) == (4, 0.3, 8.0)
     assert c.idle_timeout_s == 10.0
     assert (c.cloud_topic, c.trajectory_topic, c.grid_topic) == ("/rtabmap/cloud_map", "/rtabmap/mapPath",
                                                                   "/global_costmap/costmap")
-    assert (c.elevation_cloud_topic, c.elevation_obstacles_topic) == ("/ugv/elevation/cloud",
-                                                                      "/ugv/elevation/obstacles")
     assert (c.depth_topic, c.camera_topic) == ("/perception/depth/image", "/image_raw/compressed")
     assert (c.map_stats_topic, c.perception_stats_topic) == ("/ugv/map/stats", "/ugv/perception/stats")
 
@@ -589,8 +400,7 @@ def test_map_config_defaults_are_the_values_the_gateway_ships_with():
 def test_map_config_app_kwargs_are_exactly_the_tunables_create_app_takes():
     accepted = set(inspect.signature(create_app).parameters)
     kwargs = ms.MapConfig(cloud_point_budget=10, depth_stride=3).app_kwargs()
-    assert set(kwargs) == {"cloud_point_budget", "cloud_spacing_m", "elevation_max_side", "depth_stride",
-                           "depth_max_range_m"}
+    assert set(kwargs) == {"cloud_point_budget", "cloud_spacing_m", "depth_stride", "depth_max_range_m"}
     assert set(kwargs) <= accepted
     assert kwargs["cloud_point_budget"] == 10 and kwargs["depth_stride"] == 3
 
@@ -599,7 +409,7 @@ def test_map_config_app_kwargs_are_exactly_the_tunables_create_app_takes():
     "bad",
     [
         dict(cloud_point_budget=-1), dict(cloud_spacing_m=0.0), dict(cloud_spacing_m=math.nan),
-        dict(elevation_max_side=0), dict(depth_stride=0), dict(depth_max_range_m=0.0), dict(depth_max_range_m=math.inf),
+        dict(depth_stride=0), dict(depth_max_range_m=0.0), dict(depth_max_range_m=math.inf),
         dict(live_stride=0), dict(live_range_min_m=-0.1), dict(live_range_max_m=0.0),
         dict(live_range_min_m=5.0, live_range_max_m=5.0), dict(idle_timeout_s=0.0), dict(idle_timeout_s=math.nan),
         dict(stats_stale_s=0.0), dict(cloud_topic=""), dict(camera_topic="relative/topic"),

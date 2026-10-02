@@ -32,7 +32,7 @@ from ugv_api.watches import Timeouts  # noqa: E402
 
 PROBLEM = "application/problem+json"
 OCTET = "application/octet-stream"
-LAYERS = ("cloud", "elevation", "trajectory", "grid", "live", "depth", "camera")
+LAYERS = ("cloud", "trajectory", "grid", "live", "depth", "camera")
 BINARY_LAYERS = tuple(name for name in LAYERS if name != "camera")
 NOW_NS = 1_000 * 1_000_000_000
 JPEG = b"\xff\xd8\xff\xe0\x00\x10JFIF-pretend-picture\xff\xd9"
@@ -100,15 +100,6 @@ def cloud_source(n: int = 6, *, rgb: bool = True) -> dict:
     return {"fields": fields, "point_step": 16, "n_points": n, "is_bigendian": False, "data": arr.tobytes()}
 
 
-def elevation_source() -> dict:
-    return {
-        "x": np.array([0.75, 1.75], np.float32), "y": np.array([1.25, 0.25], np.float32),
-        "z": np.array([1.0, 2.0], np.float32), "confidence": np.array([0.2, 1.0], np.float32),
-        "obstacle_h": np.array([0.12, 0.0], np.float32),
-        "origin_xy": (0.0, 0.0), "resolution": 0.5, "width": 4, "height": 3,
-    }
-
-
 def grid_source() -> dict:
     cells = np.arange(12, dtype=np.int8).reshape(3, 4) * 8 - 1
     return {"cells": cells, "resolution": 0.25, "origin_xy": (-0.5, 1.0), "origin_yaw": 0.5}
@@ -129,8 +120,8 @@ def live_source(n: int = 6) -> dict:
 
 
 SOURCES = {
-    "cloud": cloud_source, "elevation": elevation_source, "trajectory": trajectory_source, "grid": grid_source,
-    "live": live_source, "depth": depth_source, "camera": lambda: JPEG,
+    "cloud": cloud_source, "trajectory": trajectory_source, "grid": grid_source, "live": live_source,
+    "depth": depth_source, "camera": lambda: JPEG,
 }
 assert tuple(SOURCES) == LAYERS
 
@@ -154,7 +145,7 @@ def test_every_layer_route_is_503_when_the_app_has_no_map_store(layer):
     assert r.status_code == 503 and r.headers["content-type"].startswith(PROBLEM)
 
 
-def test_status_before_data_has_all_seven_layers_at_zero(rig):
+def test_status_before_data_has_every_layer_at_zero(rig):
     r = rig.get("/map")
     assert r.status_code == 200
     assert r.json() == {"epoch": 1234, "seq": {name: 0 for name in LAYERS}, "stats": {}}
@@ -223,23 +214,6 @@ def test_trajectory_decodes(rig):
     d = codec.decode_trajectory(get_binary(rig, "trajectory").content)
     assert d["count"] == 3 and d["length_m"] == pytest.approx(17.0)
     np.testing.assert_array_equal(d["poses"], trajectory_source())
-
-
-def test_elevation_is_built_from_the_cell_samples(rig):
-    rig.maps.put("elevation", elevation_source(), 5.0)
-    d = codec.decode_elevation(get_binary(rig, "elevation").content)
-    # cells (col 1, row 2) and (col 3, row 0): cropped to columns 1..3 and rows 0..2
-    assert (d["width"], d["height"], d["known_cells"]) == (3, 3, 2)
-    assert (d["origin_x"], d["origin_y"], d["resolution_m"]) == pytest.approx((0.5, 0.0, 0.5))
-    assert d["heights"][2, 0] == pytest.approx(1.0) and d["heights"][0, 2] == pytest.approx(2.0)
-    assert d["obstacle"][2, 0] == 3 and d["confidence"][2, 0] == 51 and d["confidence"][0, 2] == 255
-
-
-def test_elevation_is_reduced_to_the_configured_max_side():
-    rig = Rig(MapStore(), elevation_max_side=2)
-    rig.maps.put("elevation", elevation_source(), 5.0)
-    d = codec.decode_elevation(get_binary(rig, "elevation").content)
-    assert (d["width"], d["height"]) == (2, 2) and d["resolution_m"] == pytest.approx(1.0)
 
 
 def test_grid_decodes(rig):
@@ -325,7 +299,7 @@ def test_the_status_is_cheap_and_does_not_encode(rig, monkeypatch):
     def forbidden(*_a, **_kw):
         raise AssertionError("GET /map must not encode a layer")
 
-    for name in ("encode_cloud", "encode_elevation", "encode_trajectory", "encode_grid", "encode_depth"):
+    for name in ("encode_cloud", "encode_trajectory", "encode_grid", "encode_depth"):
         monkeypatch.setattr(codec, name, forbidden)
     for layer in BINARY_LAYERS:
         rig.maps.put(layer, SOURCES[layer](), 1.0)
@@ -428,7 +402,7 @@ def test_models_forbid_extra_fields_like_every_other_resource():
         Pose.model_validate({**NO_POSE, "extra": 1})
 
 
-def test_the_seq_model_has_the_seven_layers_in_the_store_order():
+def test_the_seq_model_has_the_layers_in_the_store_order():
     assert tuple(MapStatus.model_fields["seq"].annotation.model_fields) == MapStore.LAYERS == LAYERS
 
 
@@ -446,7 +420,7 @@ def test_map_handlers_are_sync_so_encoding_runs_in_the_threadpool(rig):
 
 @pytest.mark.parametrize("tunable,value", [
     ("cloud_point_budget", -1), ("cloud_spacing_m", 0.0), ("cloud_spacing_m", float("nan")),
-    ("elevation_max_side", 0), ("depth_stride", 0), ("depth_max_range_m", 0.0), ("depth_max_range_m", -1.0),
+    ("depth_stride", 0), ("depth_max_range_m", 0.0), ("depth_max_range_m", -1.0),
 ])
 def test_bad_tunables_fail_at_construction(tunable, value):
     with pytest.raises(ValueError, match=tunable):
