@@ -48,14 +48,25 @@ one frame, and while nothing new arrives the driver is silent (the safety arbite
 repeated old frame). V4L2 devices are read directly as before. The number of frames dropped this way is logged
 every 10 s while it changes.
 
+- Set `fps` above the stream's own rate (for example `fps:=30` for a 15 fps stream). The driver publishes on its
+  `fps` timer, and if that is slower than the stream, frames are superseded in steady state and `dropped` stops
+  being a clean indicator of a stall followed by a burst.
+- A video file given as `device` is not paced: it is drained at decode speed and only the newest frames are
+  published. Use a bag for replay.
+- A tunnel that stalls without erroring leaves a blocked read that counts no failure. The driver therefore
+  watches the time since the last frame: after more than 2 s it logs a WARN `no new frame for N s` every 10 s
+  while it lasts (saying whether the read is blocked or failing, and why), and an INFO when frames resume. After
+  30 consecutive failed reads it also logs `camera is not delivering frames`, once per outage.
+
 ```
 ros2 launch ugv_bringup camera.launch.py calibration_file:=<repo>/ugv_nav/config/cameras/phone_640x480.yaml \
     device:=http://<tunnel host>:<port>/<stream> transport_latency_s:=<measured seconds>
 ```
 
-- `transport_latency_s` (finite, >= 0, default 0, refused at start-up otherwise): a network stream has no capture
-  timestamps, so the stamp is the frame's arrival time minus this measured delay. `bringup.launch.py` takes the
-  same argument. How to measure it: `config/cameras/README.md`.
+- `transport_latency_s` (seconds, finite, 0 to 5, default 0, refused at start-up otherwise, so `350` typed for
+  milliseconds does not pass): a network stream has no capture timestamps, so the stamp is the frame's arrival
+  time minus this measured delay. `bringup.launch.py` takes the same argument. How to measure it:
+  `config/cameras/README.md`.
 - `phone_640x480.yaml` ships as a flagged placeholder (`placeholder: true`, the laptop webcam's intrinsics). The
   driver logs a WARN at start-up and every 10 s while it is loaded. Do not use it for a mapping run that counts:
   replace it with a real calibration of the phone, locked focus and exposure, and remove the flag

@@ -76,21 +76,29 @@ def parse_device(value: str) -> int | str:
     return int(v) if v.isdigit() else v
 
 
+MAX_TRANSPORT_LATENCY_S = 5.0  # a tunnel slower than this is not a camera; a bigger number is a unit mistake
+
+
 def check_transport_latency(value: object) -> float:
-    """`transport_latency_s` in seconds: finite and >= 0, else refuse to start (a NaN or negative latency would
-    put every stamp in the future or nowhere)."""
+    """`transport_latency_s` in seconds: finite, from 0 to MAX_TRANSPORT_LATENCY_S, else refuse to start. A NaN or
+    negative latency would put every stamp in the future or nowhere, and `350` typed for milliseconds would
+    silently stamp every frame at 0 (the clamp in `frame_stamp_ns`)."""
     try:
         latency = float(value)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         latency = math.nan
-    if not math.isfinite(latency) or latency < 0.0:
-        raise CaptureError(f"transport_latency_s must be a finite number of seconds >= 0, got {value!r}")
+    if not math.isfinite(latency) or not 0.0 <= latency <= MAX_TRANSPORT_LATENCY_S:
+        raise CaptureError(
+            f"transport_latency_s is in seconds and must be a finite number from 0 to {MAX_TRANSPORT_LATENCY_S:g} "
+            f"(did you give milliseconds?), got {value!r}"
+        )
     return latency
 
 
 def frame_stamp_ns(arrival_s: float, latency_s: float) -> int:
     """Header stamp of a frame: when it arrived here minus the (measured) transport latency, in nanoseconds.
-    Never negative (a sim clock near zero with a large latency would otherwise give an invalid stamp)."""
+    Clamped at 0 as a last resort (a sim clock near zero with a large latency would otherwise give an invalid
+    stamp); the driver logs once if that ever happens."""
     return max(0, round((arrival_s - latency_s) * 1e9))
 
 

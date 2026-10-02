@@ -273,15 +273,21 @@ def test_stop_is_safe_twice_and_does_not_hang_on_a_read_that_never_returns(sourc
     assert not reader.is_alive
 
 
-@pytest.mark.parametrize("value", [0.0, 0.25, 3, 0.001])
-def test_transport_latency_accepts_finite_non_negative_seconds(value):
+@pytest.mark.parametrize("value", [0.0, 0.25, 3, 0.001, 5.0])
+def test_transport_latency_accepts_finite_seconds_from_zero_to_five(value):
     assert check_transport_latency(value) == float(value)
 
 
-@pytest.mark.parametrize("value", [-0.001, -1.0, math.nan, math.inf, -math.inf, "fast", None])
+@pytest.mark.parametrize("value", [-0.001, -1.0, math.nan, math.inf, -math.inf, "fast", None, 5.001, 350, 1e9])
 def test_transport_latency_rejects_anything_else(value):
     with pytest.raises(CaptureError, match="transport_latency_s"):
         check_transport_latency(value)
+
+
+def test_a_transport_latency_typed_in_milliseconds_is_refused_with_the_unit_named():
+    # 350 meant milliseconds: accepted, it would clamp every stamp to 0 and nobody would notice
+    with pytest.raises(CaptureError, match=r"in seconds.*0 to 5.*350"):
+        check_transport_latency(350)
 
 
 def test_frame_stamp_is_arrival_minus_latency_in_nanoseconds():

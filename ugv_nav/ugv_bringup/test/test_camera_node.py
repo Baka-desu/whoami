@@ -386,8 +386,8 @@ def test_the_transport_latency_also_shifts_the_stamp_of_a_v4l2_frame(tmp_path, o
         assert clock_s(node) - stamp_s(imgs[0]) >= 0.5 - 1e-3  # stamped at least the latency before it was published
 
 
-@pytest.mark.parametrize("bad", ["-0.1", "-1.0"])
-def test_a_negative_transport_latency_is_refused_before_the_camera_is_opened(tmp_path, open_video, bad):
+@pytest.mark.parametrize("bad", ["-0.1", "-1.0", "350.0", "5.5"], ids=["negative", "negative-1", "ms-typo", "just-over"])
+def test_an_out_of_range_transport_latency_is_refused_before_the_camera_is_opened(tmp_path, open_video, bad):
     calls = open_video(False)
     cal = write_cal(tmp_path)
     with pytest.raises(RuntimeError, match="transport_latency_s"):
@@ -425,3 +425,84 @@ def test_dropped_frames_are_reported_only_when_the_count_changed(tmp_path, strea
         spin(ex, 0.5)  # more report periods, nothing new dropped
         assert log.count("info", "dropped") == 1
         assert any("9" in m for lv, m in log.records if lv == "info" and "dropped" in m.lower())
+
+
+# --- a stream that stalls without erroring must not be log-silent ----------------------------------------------
+
+
+def _stall_warnings(log: LogRecorder) -> list[str]:
+    return [m for lv, m in log.records if lv == "warning" and "no new frame" in m.lower()]
+
+
+def test_a_blocked_read_is_reported_as_a_stall_every_report_period(tmp_path, stream, log, monkeypatch):
+    monkeypatch.setattr("ugv_bringup.nodes.camera_driver._REPORT_PERIOD_S", 0.1)  # production: 10 s
+    monkeypatch.setattr("ugv_bringup.nodes.camera_driver._STALL_WARN_S", 0.3)  # production: 2 s
+    cal = write_cal(tmp_path)
+    with running(["-p", f"calibration_file:={cal}", "-p", f"device:={_URL}"], stream) as (node, probe, ex):
+        # the fake never delivers and never fails: read() just blocks, so the failed-read counter cannot move
+        assert spin_until(ex, lambda: len(_stall_warnings(log)) >= 2)  # and the warning repeats while it lasts
+        assert node._reader.failed_reads == 0
+        assert all("blocked" in m for m in _stall_warnings(log))
+    assert log.count("error", "not delivering") == 0
+
+
+def test_failing_reads_are_reported_as_a_stall_with_the_reason(tmp_path, stream, log, monkeypatch):
+    monkeypatch.setattr("ugv_bringup.nodes.camera_driver._REPORT_PERIOD_S", 0.1)
+    monkeypatch.setattr("ugv_bringup.nodes.camera_driver._STALL_WARN_S", 0.3)
+    stream.unblock()  # read() now returns (False, None) at once, over and over
+    cal = write_cal(tmp_path)
+    with running(["-p", f"calibration_file:={cal}", "-p", f"device:={_URL}"], stream) as (node, probe, ex):
+        assert spin_until(ex, lambda: len(_stall_warnings(log)) >= 1)
+        assert all("failing" in m and "read returned no frame" in m for m in _stall_warnings(log))
+
+
+def test_a_stall_ends_with_an_info_when_frames_resume_and_a_flowing_stream_is_never_reported(
+    tmp_path, stream, log, monkeypatch
+):
+    monkeypatch.setattr("ugv_bringup.nodes.camera_driver._REPORT_PERIOD_S", 0.1)
+    monkeypatch.setattr("ugv_bringup.nodes.camera_driver._STALL_WARN_S", 0.5)
+    cal = write_cal(tmp_path)
+    with running(["-p", f"calibration_file:={cal}", "-p", f"device:={_URL}"], stream) as (node, probe, ex):
+        assert spin_until(ex, lambda: len(_stall_warnings(log)) >= 1)
+        assert log.count("info", "resumed") == 0  # still stalled
+        stream.push(3)
+        assert spin_until(ex, lambda: log.count("info", "resumed") >= 1)
+        stalls = len(_stall_warnings(log))
+        for _ in range(25):  # frames keep coming, far inside the threshold: no further warning, no second INFO
+            stream.push(4)
+            ex.spin_once(timeout_sec=0.02)
+        assert len(_stall_warnings(log)) == stalls
+        assert log.count("info", "resumed") == 1
+
+
+def test_failed_reads_log_not_delivering_once_per_outage_and_again_after_frames_return(
+    tmp_path, stream, log, monkeypatch
+):
+    monkeypatch.setattr("ugv_bringup.nodes.camera_driver._MAX_FAILED_READS_BEFORE_ERROR", 3)  # production: 30
+    stream.unblock()  # every read() returns (False, None)
+    cal = write_cal(tmp_path)
+    with running(["-p", f"calibration_file:={cal}", "-p", f"device:={_URL}"], stream) as (node, probe, ex):
+        imgs: list = []
+        probe.create_subscription(Image, "/camera/image_raw", imgs.append, _LIVE)
+        assert spin_until(ex, lambda: node.count_subscribers("/camera/image_raw") == 1)
+        assert spin_until(ex, lambda: log.count("error", "not delivering frames") == 1)
+        assert any("read returned no frame" in m for lv, m in log.records if lv == "error")
+        spin(ex, 0.5)  # the same outage goes on: still one line, not one per tick
+        assert log.count("error", "not delivering frames") == 1
+        stream.push(1)  # frames return ...
+        assert spin_until(ex, lambda: len(imgs) >= 1)
+        # ... and when the stream dies again that is a new outage with its own line
+        assert spin_until(ex, lambda: log.count("error", "not delivering frames") == 2)
+
+
+def test_a_stamp_that_would_be_negative_is_clamped_to_zero_and_logged_once(tmp_path, stream, log):
+    cal = write_cal(tmp_path)
+    args = ["-p", f"calibration_file:={cal}", "-p", f"device:={_URL}", "-p", "transport_latency_s:=0.5"]
+    with running(args, stream) as (node, probe, ex):
+        first = node._stamp(0.1)  # a sim clock near zero with a large latency
+        assert (first.sec, first.nanosec) == (0, 0)
+        node._stamp(0.2)
+        assert log.count("warning", "clamped") == 1  # once, not once per frame
+        ok = node._stamp(100.0)
+        assert (ok.sec, ok.nanosec) == (99, 500_000_000)  # the normal case is untouched
+        assert log.count("warning", "clamped") == 1

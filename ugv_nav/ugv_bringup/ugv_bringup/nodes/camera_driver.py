@@ -14,7 +14,14 @@ Network streams (any `device` that is not an index or a /dev/... path: `http://.
 read on their own thread (`LatestFrameReader`) and only the newest frame is published: a stalled stream that
 then delivers a burst of old frames yields one frame, never a replay, and while nothing new arrives the driver
 publishes nothing, so the safety arbiter sees the camera as silent. V4L2 devices are read directly, one read
-per tick, as before.
+per tick, as before. Two consequences: a video file given as `device` is not paced (it is drained at decode
+speed and only the newest frames are published; use a bag for replay), and for a network camera `fps` should be
+set above the stream's own rate, otherwise frames are superseded in steady state and `dropped` stops being a
+clean stall/burst indicator.
+
+A stream that stalls without erroring leaves a blocked read, which counts no failure, so the driver watches the
+time since the last frame it took: after more than 2 s it logs a WARN "no new frame for N s" every report
+period (10 s) while that lasts, and an INFO when frames resume.
 
 Fails closed: no valid calibration, or a camera whose resolution differs from it, means no frames at all
 (a driver that publishes a fake K would corrupt DA3 depth and RTAB-Map geometry).
@@ -30,7 +37,7 @@ the driver logs a WARN at start-up and every 10 s; it also logs the frames dropp
 
 Params: calibration_file (required unless calibration_mode) device frame_id fps image_topic info_topic
         compressed_topic ui_info_topic compressed_rate_hz jpeg_quality calibration_mode width height
-        transport_latency_s (finite, >= 0)
+        transport_latency_s (seconds, finite, 0 to 5)
         (empty compressed_topic disables the UI stream; width/height only apply in calibration mode)
 """
 
@@ -53,7 +60,8 @@ from ugv_bringup.camera_core import (
 )
 
 _MAX_FAILED_READS_BEFORE_ERROR = 30
-_REPORT_PERIOD_S = 10.0  # placeholder-calibration warning and dropped-frame report
+_REPORT_PERIOD_S = 10.0  # placeholder-calibration warning, dropped-frame and stall reports
+_STALL_WARN_S = 2.0  # no frame taken for longer than this (network streams) is reported as a stall
 
 
 def _live_qos() -> QoSProfile:
@@ -150,6 +158,9 @@ class CameraDriver(Node):
         self._failed = 0
         self._dead_logged = False
         self._reported_dropped = 0
+        self._last_frame_s = self._now_s()  # when a frame was last taken (start-up until the first one)
+        self._stalled = False
+        self._clamp_logged = False
         # Network streams stall and then deliver a burst: read them on a thread that keeps only the newest frame.
         self._reader = None if v4l2 else LatestFrameReader(self._cap.read, self._now_s)
         self.create_timer(1.0 / fps, self._tick)
@@ -173,6 +184,12 @@ class CameraDriver(Node):
         return self.get_clock().now().nanoseconds / 1e9
 
     def _stamp(self, arrival_s: float):
+        if arrival_s < self._latency_s and not self._clamp_logged:
+            self._clamp_logged = True  # frame_stamp_ns clamps at 0; say so once instead of stamping silently
+            self.get_logger().warning(
+                f"frame stamp would be negative (arrival {arrival_s:.3f} s, transport_latency_s "
+                f"{self._latency_s:g} s): clamped to 0; check the unit (seconds) and the clock (sim time?)"
+            )
         return Time(nanoseconds=frame_stamp_ns(arrival_s, self._latency_s)).to_msg()
 
     def _report(self) -> None:
@@ -189,6 +206,20 @@ class CameraDriver(Node):
                     f"before they were published) in the last {_REPORT_PERIOD_S:g} s, {total} in total"
                 )
                 self._reported_dropped = total
+            self._report_stall()
+
+    def _report_stall(self) -> None:
+        """A tunnel that stalls without erroring leaves a blocked read(): it counts no failure, so without this the
+        driver would be silent on the topics (right) and in the log (not helpful)."""
+        silent_s = self._now_s() - self._last_frame_s
+        if silent_s <= _STALL_WARN_S:
+            return
+        self._stalled = True
+        if self._reader.failed_reads:
+            why = f"reads are failing: {self._reader.last_error}"
+        else:
+            why = "the read is blocked, nothing is arriving from the stream"
+        self.get_logger().warning(f"no new frame for {silent_s:.1f} s ({why}); publishing nothing")
 
     def _info(self, stamp) -> CameraInfo:
         f = self._info_fields
@@ -212,6 +243,10 @@ class CameraDriver(Node):
                 return
             self._dead_logged = False
             bgr, arrival_s = item
+            if self._stalled:
+                self._stalled = False
+                self.get_logger().info(f"camera frames resumed after {arrival_s - self._last_frame_s:.1f} s without one")
+            self._last_frame_s = arrival_s
         else:
             ok, bgr = self._cap.read()
             arrival_s = self._now_s()  # after the blocking read: when the frame actually arrived

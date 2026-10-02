@@ -34,7 +34,8 @@ Replacing the phone placeholder (hardware steps, done by the owner):
 ## Network cameras: transport latency
 A stream reached through a tunnel carries no capture timestamps, and the driver stamps each frame with the time
 it arrived on the laptop, which is later than the moment the phone captured it. The driver parameter
-`transport_latency_s` (seconds, finite, >= 0, default 0) is subtracted from that arrival time. Measure it once
+`transport_latency_s` (seconds, finite, 0 to 5, default 0; the driver refuses anything else, so milliseconds
+typed by mistake are caught) is subtracted from that arrival time. Measure it once
 per phone, stream setup and network route:
 
 1. Show a clock with millisecond resolution on the laptop screen (any page or terminal that prints the time to
