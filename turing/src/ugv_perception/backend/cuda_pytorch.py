@@ -32,6 +32,7 @@ class CudaPytorchTensorBackend:
         self._hw: tuple[int, int] | None = None
         self._fallback_logits: np.ndarray | None = None
         self.seg_post_disabled = False
+        self.rgb_pre_disabled = False
         # Every tensor this backend creates, and the model it loads, goes to this device.
         self.device = "cuda"
 
@@ -76,10 +77,93 @@ class CudaPytorchTensorBackend:
         self, blob: NDArray[np.float32], out_hw: tuple[int, int]
     ) -> tuple[np.ndarray, np.ndarray]:
         """Interpolate + softmax on CUDA. Labels/scores copied out once."""
-        if self._model is None or self._kind != "rugd":
-            raise AdapterError("CUDA seg decode requires a loaded RUGD net")
+        tensor = self._blob_to_cuda(blob)
+        return self._run_seg_tensor(tensor, out_hw)
+
+    def run_seg_from_rgb(
+        self,
+        rgb: NDArray[np.uint8],
+        out_hw: tuple[int, int],
+        input_hw: tuple[int, int],
+        mean: tuple[float, float, float],
+        std: tuple[float, float, float],
+    ) -> tuple[np.ndarray, np.ndarray]:
+        tensor = self._rgb_pre_cuda(rgb, (input_hw,), mean, std, clip_255=False)
+        return self._run_seg_tensor(tensor, out_hw)
+
+    def run_all(self, blob: NDArray[np.float32]) -> list[np.ndarray]:
+        tensor = self._blob_to_cuda(blob)
+        return self._run_all_tensor(tensor)
+
+    def run_all_from_rgb(
+        self,
+        rgb: NDArray[np.uint8],
+        sizes: tuple[tuple[int, int], ...],
+        mean: tuple[float, float, float],
+        std: tuple[float, float, float],
+    ) -> list[np.ndarray]:
+        tensor = self._rgb_pre_cuda(rgb, sizes, mean, std, clip_255=True)
+        return self._run_all_tensor(tensor)
+
+    def _blob_to_cuda(self, blob: NDArray[np.float32]) -> object:
+        if self._model is None or self._kind is None:
+            raise AdapterError("CudaPytorchTensorBackend.load() was not called")
         if not isinstance(blob, np.ndarray) or blob.dtype != np.float32 or blob.ndim != 4:
             raise TypeError("blob must be float32 NCHW")
+        try:
+            import torch
+        except ImportError as exc:
+            raise AdapterError("torch is not installed") from exc
+        return torch.from_numpy(blob).to(self.device)
+
+    def _rgb_pre_cuda(
+        self,
+        rgb: np.ndarray,
+        sizes: tuple[tuple[int, int], ...],
+        mean: tuple[float, float, float],
+        std: tuple[float, float, float],
+        clip_255: bool,
+    ) -> object:
+        if self.rgb_pre_disabled:
+            raise AdapterError("CUDA rgb pre is disabled")
+        if self._model is None or self._kind is None:
+            raise AdapterError("CudaPytorchTensorBackend.load() was not called")
+        if not isinstance(rgb, np.ndarray) or rgb.dtype != np.uint8 or rgb.ndim != 3 or rgb.shape[2] != 3:
+            raise TypeError("rgb must be uint8 HWC")
+        if not sizes:
+            raise ValueError("rgb pre needs at least one target size")
+        try:
+            import torch
+            import torch.nn.functional as F
+        except ImportError as exc:
+            raise AdapterError("torch is not installed") from exc
+        try:
+            tensor = torch.from_numpy(np.ascontiguousarray(rgb)).to(self.device)
+            tensor = tensor.permute(2, 0, 1).unsqueeze(0).to(dtype=torch.float32)
+            with torch.inference_mode():
+                for oh, ow in sizes:
+                    th, tw = int(oh), int(ow)
+                    if (int(tensor.shape[-2]), int(tensor.shape[-1])) != (th, tw):
+                        tensor = F.interpolate(
+                            tensor, size=(th, tw), mode="bilinear", align_corners=False
+                        )
+                        if clip_255:
+                            tensor = tensor.clamp(0.0, 255.0)
+                mean_t = torch.tensor(mean, dtype=torch.float32, device=self.device).view(1, 3, 1, 1)
+                std_t = torch.tensor(std, dtype=torch.float32, device=self.device).view(1, 3, 1, 1)
+                return (tensor / 255.0 - mean_t) / std_t
+        except AdapterError:
+            self.rgb_pre_disabled = True
+            raise
+        except Exception as exc:
+            self.rgb_pre_disabled = True
+            raise AdapterError("CUDA rgb pre failed") from exc
+
+    def _run_seg_tensor(
+        self, tensor: object, out_hw: tuple[int, int]
+    ) -> tuple[np.ndarray, np.ndarray]:
+        if self._model is None or self._kind != "rugd":
+            raise AdapterError("CUDA seg decode requires a loaded RUGD net")
         oh, ow = int(out_hw[0]), int(out_hw[1])
         try:
             import torch
@@ -88,7 +172,6 @@ class CudaPytorchTensorBackend:
             raise AdapterError("torch is not installed") from exc
         logits = None
         try:
-            tensor = torch.from_numpy(blob).to(self.device)
             with torch.inference_mode():
                 logits = self._model(pixel_values=tensor).logits
                 if not torch.isfinite(logits).all():
@@ -114,17 +197,14 @@ class CudaPytorchTensorBackend:
                 self._fallback_logits = logits.detach().cpu().numpy()
             raise AdapterError("CUDA seg decode failed") from exc
 
-    def run_all(self, blob: NDArray[np.float32]) -> list[np.ndarray]:
+    def _run_all_tensor(self, tensor: object) -> list[np.ndarray]:
         if self._model is None or self._kind is None:
             raise AdapterError("CudaPytorchTensorBackend.load() was not called")
-        if not isinstance(blob, np.ndarray) or blob.dtype != np.float32 or blob.ndim != 4:
-            raise TypeError("blob must be float32 NCHW")
         try:
             import torch
         except ImportError as exc:
             raise AdapterError("torch is not installed") from exc
         try:
-            tensor = torch.from_numpy(blob).to(self.device)
             with torch.inference_mode():
                 if self._kind == "rugd":
                     logits = self._model(pixel_values=tensor).logits
@@ -174,7 +254,6 @@ class CudaPytorchTensorBackend:
             raise
         except Exception as exc:
             raise AdapterError("CUDA run failed") from exc
-
 
 
 def _load_rugd(path: Path, device: str) -> object:

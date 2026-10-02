@@ -115,6 +115,127 @@ def test_depth_image_msg_is_32fc1_meters() -> None:
     assert packed[1, 1] == 4.0
 
 
+def test_maps_falls_back_when_rgb_pre_fails() -> None:
+    from ugv_perception.adapter.output import AdapterError
+    from ugv_perception.backend.depth_live import DepthChannel
+
+    class _Backend:
+        def __init__(self) -> None:
+            self.from_rgb = 0
+            self.runs = 0
+            self.rgb_pre_disabled = False
+
+        def ensure_hw(self, height: int, width: int) -> None:
+            self.hw = (height, width)
+
+        def run_all_from_rgb(self, rgb, sizes, mean, std):
+            self.from_rgb += 1
+            self.rgb_pre_disabled = True
+            raise AdapterError("rgb pre failed")
+
+        def run_all(self, blob):
+            self.runs += 1
+            mh, mw = int(blob.shape[2]), int(blob.shape[3])
+            return [
+                np.ones((mh, mw), dtype=np.float32),
+                np.zeros((mh, mw), dtype=np.float32),
+            ]
+
+    backend = _Backend()
+    ch = DepthChannel(backend)
+    rgb = np.zeros((28, 42, 3), dtype=np.uint8)
+    depth, xyz = ch.maps(rgb, _k(28, 42))
+    assert backend.from_rgb == 1
+    assert backend.runs == 1
+    assert depth.shape == (28, 42)
+    assert xyz.shape[1] == 3
+    ch.maps(rgb, _k(28, 42))
+    assert backend.from_rgb == 1
+    assert backend.runs == 2
+
+
+def test_maps_does_not_retry_infer_after_gpu_run_fails() -> None:
+    from ugv_perception.adapter.output import AdapterError
+    from ugv_perception.backend.depth_live import DepthChannel
+
+    class _Backend:
+        rgb_pre_disabled = False
+
+        def ensure_hw(self, height: int, width: int) -> None:
+            return None
+
+        def run_all_from_rgb(self, rgb, sizes, mean, std):
+            raise AdapterError("OpenVINO GPU run failed")
+
+        def run_all(self, blob):
+            raise AssertionError("must not retry infer after GPU run failed")
+
+    ch = DepthChannel(_Backend())
+    try:
+        ch.maps(np.zeros((28, 42, 3), dtype=np.uint8), _k(28, 42))
+    except AdapterError as exc:
+        assert "run failed" in str(exc)
+        return
+    raise AssertionError("GPU infer failure must raise")
+
+
+def test_maps_prefers_cuda_metres_then_falls_back_to_gpu_preprocess_for_good() -> None:
+    """CUDA: run_depth_metres first. Once it fails, the channel keeps the base GPU preprocess path (never loses it);
+    a backend without run_depth_metres (OpenVINO on Arc) goes straight to run_all_from_rgb."""
+    from ugv_perception.adapter.output import AdapterError
+    from ugv_perception.backend.depth_live import DepthChannel
+
+    class _Backend:
+        rgb_pre_disabled = False
+
+        def __init__(self, metres_fails: bool) -> None:
+            self.calls: list[str] = []
+            self.metres_fails = metres_fails
+
+        def ensure_hw(self, height: int, width: int) -> None:
+            return None
+
+        def run_depth_metres(self, rgb, focal, model_hw_, out_hw):
+            self.calls.append("metres")
+            if self.metres_fails:
+                raise AdapterError("CUDA run failed")
+            return np.full(out_hw, 2.0, dtype=np.float32)
+
+        def run_all_from_rgb(self, rgb, sizes, mean, std):
+            self.calls.append("from_rgb")
+            mh, mw = sizes[-1]
+            return [np.ones((mh, mw), dtype=np.float32), np.zeros((mh, mw), dtype=np.float32)]
+
+    rgb, k = np.zeros((28, 42, 3), dtype=np.uint8), _k(28, 42)
+    ok = _Backend(metres_fails=False)
+    DepthChannel(ok).maps(rgb, k)
+    assert ok.calls == ["metres"]
+    broken = _Backend(metres_fails=True)
+    ch = DepthChannel(broken)
+    depth, _ = ch.maps(rgb, k)
+    ch.maps(rgb, k)
+    assert broken.calls == ["metres", "from_rgb", "from_rgb"]
+    assert depth.shape == (28, 42)
+
+    class _Arc(_Backend):
+        run_depth_metres = None
+
+    arc = _Arc(metres_fails=False)
+    DepthChannel(arc).maps(rgb, k)
+    assert arc.calls == ["from_rgb"]
+
+
+def test_depth_live_keeps_hole_safe_on_cpu() -> None:
+    text = (
+        __import__("pathlib").Path(__file__).resolve().parents[1]
+        / "backend"
+        / "depth_live.py"
+    ).read_text()
+    assert "hole_safe_resize" in text
+    assert "openvino" not in text
+    assert "torch" not in text
+
+
 def test_export_wrapper_stops_before_sky_fill() -> None:
     text = (
         __import__("pathlib").Path(__file__).resolve().parents[3]

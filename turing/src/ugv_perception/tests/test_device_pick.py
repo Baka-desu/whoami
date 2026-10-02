@@ -52,6 +52,21 @@ def test_device_py_has_no_module_level_vendor_imports() -> None:
             assert "transformers" not in line
 
 
+def test_adapters_stay_vendor_neutral() -> None:
+    root = Path(__file__).resolve().parents[1]
+    for rel in (
+        "adapter/rugd.py",
+        "depth/geometry.py",
+        "backend/depth_live.py",
+    ):
+        text = (root / rel).read_text(encoding="utf-8")
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("import ") or stripped.startswith("from "):
+                assert "openvino" not in stripped
+                assert "torch" not in stripped
+
+
 def test_pick_prefers_intel_gpu_ir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     xml, folder = _weights(tmp_path, xml=True, safetensors=True)
     monkeypatch.setattr(device, "intel_openvino_gpu_available", lambda: True)

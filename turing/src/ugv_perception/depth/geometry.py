@@ -133,6 +133,7 @@ def backproject(depth_hw: np.ndarray, k_camera: np.ndarray) -> np.ndarray:
 # ImageNet normalisation of DA3's input. The one definition: geometry_gpu imports these.
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
+MEAN, STD = IMAGENET_MEAN, IMAGENET_STD  # the names base code (run_*_from_rgb callers) uses
 _MEAN = np.array(IMAGENET_MEAN, dtype=np.float64)
 _STD = np.array(IMAGENET_STD, dtype=np.float64)
 
