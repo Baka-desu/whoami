@@ -24,7 +24,7 @@ def main(args: list[str] | None = None) -> None:
     # uvicorn owns SIGINT/SIGTERM; when it stops serving, ROS is shut down below.
     rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
     store, goals, maps = StateStore(), GoalRegistry(), MapStore()
-    node = GatewayNode(store, goals)
+    node = GatewayNode(store, goals, maps)
     executor = MultiThreadedExecutor()
     executor.add_node(node)
 
@@ -36,7 +36,8 @@ def main(args: list[str] | None = None) -> None:
 
     spinner = threading.Thread(target=spin, name="ugv_api_ros", daemon=True)
     spinner.start()
-    app = create_app(node, store, goals, telemetry_hz=node.telemetry_hz, cors_origins=node.cors_origins, maps=maps)
+    app = create_app(node, store, goals, telemetry_hz=node.telemetry_hz, cors_origins=node.cors_origins, maps=maps,
+                     **node.map_cfg.app_kwargs())
     try:
         uvicorn.run(app, host=node.host, port=node.port, log_level="info")
     finally:
