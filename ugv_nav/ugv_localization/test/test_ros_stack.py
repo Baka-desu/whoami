@@ -7,7 +7,8 @@ exact-stamp sync, TF ownership) — not RTAB-Map accuracy. Inputs mimic the team
   Dev 1  /perception/depth_cloud PointCloud2 (x/y/z float32 m, unorganized, sky dropped, back-projected
          with the raw K; source image stamp + optical frame) — exactly turing node/cloud.py's format.
          depth_input:=image (default): Dev 1 af7ebbf /perception/depth/image, 32FC1 m, NaN holes, RGB stamp.
-x3 (Task 23) counts real 640x480 frames and the QoS of the rgbd_image subscriptions.
+x3 (Task 23) counts the frames that reach odometry (320x240 in the default case, 640x480 in the laptop case) and the QoS
+   of the rgbd_image subscriptions.
 x4 (Task 8) moves the robot (wheel odometry + the scene sliding past the camera) so RTAB-Map adds graph nodes,
    and checks the 3D map outputs: /rtabmap/cloud_map, /rtabmap/mapPath, /rtabmap/mapData.
 Skipped unless ROS 2 + rtabmap_ros + an installed ugv_localization are available (colcon test).
@@ -71,7 +72,6 @@ def _scene(w: int, h: int):
     return k, texture, depth, _backproject(depth, k)
 
 
-_K, _TEXTURE, _DEPTH, _POINTS = _scene(_W, _H)
 _SCENE_DEPTH_M = 3.0  # the scene is a fronto-parallel plane this far from the camera (see _scene)
 
 
@@ -372,8 +372,8 @@ def test_x3_every_synced_frame_reaches_odometry_and_slam(stack: Stack) -> None:
     for consumer in ("rgbd_odometry", "rtabmap"):
         if wired["sub"].get(consumer) != "RELIABLE":
             problems.append(f"{consumer} subscribes /rtabmap/rgbd_image {wired['sub'].get(consumer)}, not RELIABLE")
-    if rgbd < 0.9 * sent:  # not vacuous: the sync really delivered the frames we sent
-        problems.append("rgbd_sync delivered fewer than 90% of the frames sent")
+    if rgbd < 0.5 * sent:  # vacuity floor only: camera -> rgbd_sync is best effort in `default` (lossy by design), not under test
+        problems.append("rgbd_sync delivered fewer than half of the frames sent: too few to count odometry against")
     if info < 0.9 * rgbd:
         problems.append("odometry produced fewer than 90% as many odom_info as rgbd_image frames")
     assert not problems, "; ".join(problems) + " | " + counts

@@ -265,3 +265,49 @@ Counts are messages in the window; "reliable subscriber" is a counting subscribe
   The `laptop` profile avoids it with reliable inputs, because Dev 5's `camera_driver` is reliable. Whether `default`
   should do the same is a decision for the owner (it would stop `default` connecting to a best-effort camera).
 - Not re-measured on the live robot; the live rate should now follow the synced rate (3.2-3.3 Hz at the measured depth rate).
+
+## Review fixes for 0c5f1d9 (Task 23)
+
+**When:** 2026-10-02, branch `mapping-3d`. Same real stack and harness as Task 23 (`ugv-run` container, synthetic sensors from
+`test/test_ros_stack.py`), measured with throwaway variations of the harness.
+
+### The x3 guard on the camera to `rgbd_sync` hop was too tight
+
+`test_x3` asserted that `rgbd_sync` delivered at least 90 % of the frames sent. That hop is not what Task 23 changed and it is
+best effort (lossy by design) in the `default` profile. In a full-suite run the `default-320x240-best-effort-camera` case got
+`rgbd_image=96` of `sent=117` (82 %) while `odom_info` was 100 % of `rgbd_image`. Three more runs of that case gave 87, 98 and
+90 of 116-117 (74-84 %, each would have failed the old guard; `odom_info` 100 % of `rgbd_image` every time), while the
+measurement runs below saw 105-120 of 120 at 4 Hz: the loss before `rgbd_sync` varies a lot with host load. The guard is now a
+vacuity floor (at least 50 % of the frames sent, so there is something to count). The requirement stays as it was: `odom_info` is at least 90 % of
+`rgbd_image`.
+
+### `topic_queue_size: 2` also sets the depth of the rtabmap node's `/odom` subscription: measured, no effect
+
+`rtabmap_rgbd.yaml` has `topic_queue_size: 2` for the 2.1 MB `rgbd_image`. The rtabmap node applies it to every subscription, so
+`/odom` is a reader queue of depth 2 as well (`get_subscriptions_info_by_topic('/odom')`: rtabmap depth 2 RELIABLE; pose_validity
+and distance_tracker depth 20). `test_x3` publishes wheel odometry with each frame (about 4 Hz), so it could not show a problem with a faster
+odometry stream. Check: the same x3 window (30 s of frames at 4 Hz plus 2 s drain, 120 frames sent), wheel odometry on its own timer
+at 30 Hz instead of 4 Hz. `/rtabmap/info` is one SLAM step (`Rtabmap/DetectionRate` caps it at 2 Hz).
+
+| Profile | Wheel odometry | Windows | `/rtabmap/info` per 32 s | Rate |
+|---|---|:---:|---|---|
+| `laptop`, 640x480, reliable camera | 4 Hz (with the frames) | 2 | 60, 60 | 1.87 Hz |
+| `laptop`, 640x480, reliable camera | 30 Hz | 3 | 60, 58, 56 | 1.87, 1.81, 1.75 Hz |
+| `default`, 320x240, best-effort camera | 4 Hz (with the frames) | 2 | 58, 55 | 1.81, 1.72 Hz |
+| `default`, 320x240, best-effort camera | 30 Hz | 2 | 59, 56 | 1.84, 1.75 Hz |
+
+The spread inside one row (55-60) is as large as the difference between rows, so there is no degradation. Pose pairing, checked
+separately: moving scene (0.3 m/s sideways), `default` timing, wheel odometry at 30 Hz, depth-2 queue. For each graph node the error
+of its `pose.y` against the true y at the node's image stamp had a standard deviation of 0.000 m (maximum deviation from a constant
+offset 0.000 m) in two runs, so each image still gets the pose from its own stamp (consistent with rtabmap reading it from TF at
+the image stamp). The constant offset itself (0.000 m and -1.419 m) is a `map -> odom` shift, probably from the odom source switch at
+start-up (not investigated). Decision: keep 2 and say so in the YAML comment.
+
+### Found, not fixed
+
+- The harness starts `ros2 launch` with `stdout=PIPE` and does not read it until `close()`. A pipe holds 64 KB; rtabmap logs one
+  line per SLAM step and `rgbd_odometry` warns per frame, so a long run blocks the nodes in `write()`. Seen in every run longer
+  than about 190 s (5 of 5, moving scene): `/rtabmap/info` stops at step 344-346, `rgbd_odometry` stops after about 30 s, and the
+  `rtabmap` and `rgbd_odometry` main threads sit in `pipe_write`. With the launch output sent to a file the same 330 s runs
+  completed (608 and 609 steps, no gap over 0.65 s). The existing tests stay under the limit (`test_x1` runs up to about 150 s);
+  I did not check whether it explains the historical flakiness of `test_x1[image]`. Fix: write the launch output to a file.

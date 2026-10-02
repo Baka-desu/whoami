@@ -29,6 +29,9 @@
     # rgbd_image is ~2.1 MB per message at 640x480; best effort drops most of them in transport (see
     # rgbd_odometry.yaml, docs/mapping/baseline.md "Task 23"). Reliable input, short reader queue so a busy
     # SLAM step skips old frames rather than replaying a backlog. rgbd_sync must publish RELIABLE (its `qos`).
+    # topic_queue_size is the reader queue of every rtabmap subscription, so /odom (and /odom_info when subscribed) get depth 2
+    # too. Kept: with wheel odometry at 30 Hz (frames 4 Hz) /rtabmap/info stayed at 1.75-1.87 Hz (1.72-1.87 Hz at 4 Hz) and each
+    # node's pose matched the true pose at its image stamp (docs/mapping/baseline.md "Review fixes for 0c5f1d9").
     qos: 1                      # 0 = system default (best effort for a subscriber), 1 = reliable, 2 = best effort
     topic_queue_size: 2
 
