@@ -22,7 +22,7 @@ UI for v1 (the v1 operator interface is the CLI); this console is an approved ex
 
 The **map** button in the top bar shows what RTAB-Map has built: the accumulated cloud, the live depth scan coloured by
 height, the trajectory, Nav2's cost grid halo, the robot pose, a depth panel and a camera panel, plus a statistics widget
-(keyframes, loop closures, path length, database size, last update, depth rate). Display only.
+(keyframes, closure links: rtabmap's closure-type graph links, which rise while driving even with no revisit, so not a count of returns to a known place; path length, database size, last update, depth rate). Display only.
 
 - **Source:** the gateway's `GET /api/v1/map` family, as binary format v1 (`src/map/codec.ts` decodes; golden files in
   `ugv_nav/ugv_api/test/fixtures/map/` are shared with the gateway's tests) and the pose and map events of the telemetry

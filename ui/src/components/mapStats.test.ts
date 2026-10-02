@@ -11,7 +11,7 @@ describe('map widget values', () => {
     })
     expect(rows).toEqual([
       { k: 'keyframes', v: '12' },
-      { k: 'loop closures', v: '3' },
+      { k: 'closure links', v: '3' },
       { k: 'path length', v: '41.3 m' },
       { k: 'cloud source pts', v: '1,234,567' },
       { k: 'elevation cells', v: '8,800' },
@@ -67,7 +67,7 @@ describe('map widget values', () => {
   it('prints a value that rounds to negative zero as zero', () => {
     const rows = mapRows({ keyframes: -0.4, loop_closures: -0, path_length_m: -0.04, db_bytes: -1000, depth_hz: -0.02, cloud_source_points: -0.2 })
     expect(row(rows, 'keyframes')).toBe('0')
-    expect(row(rows, 'loop closures')).toBe('0')
+    expect(row(rows, 'closure links')).toBe('0')
     expect(row(rows, 'path length')).toBe('0.0 m')
     expect(row(rows, 'database')).toBe('0.0 MB')
     expect(row(rows, 'depth rate')).toBe('0.0 Hz')
@@ -110,7 +110,7 @@ describe('map input health rows', () => {
   it('keeps the base rows first and the optional rows after them', () => {
     const rows = mapRows({ keyframes: 1, mode: 'mapping', map_rejects: 3, map_restarts: 1 })
     expect(rows.map((r) => r.k)).toEqual([
-      'keyframes', 'loop closures', 'path length', 'cloud source pts', 'elevation cells', 'database', 'depth rate', 'last update',
+      'keyframes', 'closure links', 'path length', 'cloud source pts', 'elevation cells', 'database', 'depth rate', 'last update',
       'mode', 'rejects', 'restarts',
     ])
   })

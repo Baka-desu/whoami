@@ -32,7 +32,7 @@ export interface MapRow {
 export function mapRows(s: Stats | undefined): MapRow[] {
   const rows: MapRow[] = [
     { k: 'keyframes', v: count(stat(s, 'keyframes')) },
-    { k: 'loop closures', v: count(stat(s, 'loop_closures')) },
+    { k: 'closure links', v: count(stat(s, 'loop_closures')) },
     { k: 'path length', v: fixed(stat(s, 'path_length_m'), 'm') },
     { k: 'cloud source pts', v: count(stat(s, 'cloud_source_points')) }, // the gateway's source count, not what is drawn
     { k: 'elevation cells', v: count(stat(s, 'elevation_known_cells')) },
