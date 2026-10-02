@@ -25,6 +25,7 @@ _ARGS: dict[str, tuple[str, type]] = {
     "calibration_mode": ("false", bool),
     "width": ("640", int),
     "height": ("480", int),
+    "transport_latency_s": ("0.0", float),  # measured delay of a network stream; stamp = arrival - this
 }
 
 

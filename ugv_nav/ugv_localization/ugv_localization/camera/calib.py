@@ -3,6 +3,10 @@
 Refuses uncalibrated / fake intrinsics (all-zero K, principal point outside the image).
 A lying K produces confident wrong geometry twice over: DA3 converts depth to meters with the
 focal length (Dev 1 depth/geometry.py), and RTAB-Map back-projects that depth with K. Fail closed.
+
+One narrow exception: a file may carry the optional top-level key `placeholder: true`, which says the numbers are
+NOT a calibration of this camera (a stand-in used only to bring a new camera up). It still loads, but
+`CameraCalibration.placeholder` is True so a driver can say so loudly instead of passing it off as real.
 """
 
 from __future__ import annotations
@@ -48,6 +52,7 @@ class CameraCalibration:
     d: tuple[float, ...]
     r: tuple[float, ...]  # 9
     p: tuple[float, ...]  # 12
+    placeholder: bool = False  # True: stand-in numbers, not a calibration of this camera (see module docstring)
 
 
 def _floats(values: object, *, name: str) -> tuple[float, ...]:
@@ -164,6 +169,9 @@ def load_calibration(path: str | Path) -> CameraCalibration:
     validate_intrinsics(data["image_width"], data["image_height"], k)
     _validate_distortion(model, d)
     _validate_rp(r, p)
+    placeholder = data.get("placeholder", False)
+    if not isinstance(placeholder, bool):
+        raise CalibrationError(f"{path}: placeholder must be a boolean (true or false) if present, got {placeholder!r}")
     return CameraCalibration(
         camera_name=str(data["camera_name"]),
         width=data["image_width"],
@@ -173,11 +181,12 @@ def load_calibration(path: str | Path) -> CameraCalibration:
         d=d,
         r=r,
         p=p,
+        placeholder=placeholder,
     )
 
 
 def calibration_to_yaml_dict(cal: CameraCalibration) -> dict:
-    return {
+    out = {
         "image_width": cal.width,
         "image_height": cal.height,
         "camera_name": cal.camera_name,
@@ -187,3 +196,6 @@ def calibration_to_yaml_dict(cal: CameraCalibration) -> dict:
         "rectification_matrix": {"rows": 3, "cols": 3, "data": list(cal.r)},
         "projection_matrix": {"rows": 3, "cols": 4, "data": list(cal.p)},
     }
+    if cal.placeholder:  # a real calibration never carries the key
+        out["placeholder"] = True
+    return out

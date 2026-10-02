@@ -1,12 +1,17 @@
 """The camera driver over real ROS 2 topics. Skipped without ROS 2 / OpenCV (runs under colcon test).
 
-The "camera" is a generated video file (OpenCV opens it exactly like a device), and the calibration is a
-test fixture - never a product calibration.
+The "camera" is a generated video file (OpenCV opens it exactly like a device) or, for the network-stream
+cases, a fake capture that stalls and then delivers a burst; the calibration is a test fixture - never a
+product calibration.
+
+ROS domain: set UGV_TEST_ROS_DOMAIN_ID to run next to other ROS work (default: 90 + pid % 9).
 """
 
 from __future__ import annotations
 
+import contextlib
 import os
+import threading
 import time
 from pathlib import Path
 
@@ -43,16 +48,190 @@ def write_cal(tmp_path, **kw) -> Path:
 
 
 def start(args: list[str]):
-    os.environ["ROS_DOMAIN_ID"] = str(90 + os.getpid() % 9)
+    os.environ["ROS_DOMAIN_ID"] = os.environ.get("UGV_TEST_ROS_DOMAIN_ID", str(90 + os.getpid() % 9))
     rclpy.init(args=["--ros-args", *args])
     from ugv_bringup.nodes.camera_driver import CameraDriver
 
     return CameraDriver()
 
 
-def test_publishes_system_and_ui_topics_from_one_capture(tmp_path, video):
+_LIVE = QoSProfile(history=HistoryPolicy.KEEP_LAST, depth=5, reliability=ReliabilityPolicy.RELIABLE)
+_URL = "http://phone.test/cam.mjpg"  # a non-V4L2 source: the driver reads it through LatestFrameReader
+
+
+class _PacedCapture:
+    """The real capture of the test video; read() takes one frame period, like a camera delivering at `fps`."""
+
+    def __init__(self, cap, fps: float | None) -> None:
+        self._cap, self._period, self._next = cap, (1.0 / fps if fps else None), time.monotonic()
+
+    def read(self):
+        if self._period is not None:
+            self._next += self._period
+            time.sleep(max(0.0, self._next - time.monotonic()))
+        return self._cap.read()
+
+    def __getattr__(self, name):  # isOpened / set / get / release
+        return getattr(self._cap, name)
+
+
+@pytest.fixture
+def open_video(monkeypatch, video):
+    """Make every cv2.VideoCapture(...) open the test video; call it with `paced`, it returns the call log."""
+    calls: list[tuple] = []
+    real = cv2.VideoCapture
+
+    def install(paced: bool) -> list[tuple]:
+        def factory(src, *api):
+            calls.append((src, api))
+            return _PacedCapture(real(str(video)), 30.0 if paced else None)
+
+        monkeypatch.setattr(cv2, "VideoCapture", factory)
+        return calls
+
+    return install
+
+
+class FakeStream:
+    """A network camera stand-in: the test queues frames, read() blocks until one is there (a stalled stream).
+    Frames queued while the node is not spinning therefore arrive as a burst, like a tunnel catching up."""
+
+    def __init__(self) -> None:
+        self._cond = threading.Condition()
+        self._frames: list = []
+        self._unblocked = False
+        self.calls = 0
+        self.released = False
+
+    def isOpened(self) -> bool:  # noqa: N802 (cv2 API)
+        return True
+
+    def set(self, prop, value) -> bool:
+        return True
+
+    def get(self, prop) -> float:
+        return {cv2.CAP_PROP_FRAME_WIDTH: 640.0, cv2.CAP_PROP_FRAME_HEIGHT: 480.0}.get(prop, 0.0)
+
+    def push(self, shade: int) -> None:
+        with self._cond:
+            self._frames.append(np.full((480, 640, 3), shade, np.uint8))
+            self._cond.notify_all()
+
+    def read(self):
+        with self._cond:
+            self.calls += 1
+            self._cond.notify_all()
+            self._cond.wait_for(lambda: self._frames or self._unblocked)
+            return (True, self._frames.pop(0)) if self._frames else (False, None)
+
+    def wait_calls(self, n: int, timeout_s: float = 5.0) -> bool:
+        """True once read() has been entered n times: the first n-1 frames are in the reader's hands."""
+        with self._cond:
+            return self._cond.wait_for(lambda: self.calls >= n, timeout_s)
+
+    def unblock(self) -> None:
+        with self._cond:
+            self._unblocked = True
+            self._cond.notify_all()
+
+    def release(self) -> None:
+        self.released = True
+        self.unblock()
+
+
+@pytest.fixture
+def stream(monkeypatch) -> FakeStream:
+    fake = FakeStream()
+    monkeypatch.setattr(cv2, "VideoCapture", lambda *a, **k: fake)
+    return fake
+
+
+class LogRecorder:
+    """Stands in for the node's logger: remembers (level, message)."""
+
+    def __init__(self) -> None:
+        self.records: list[tuple[str, str]] = []
+
+    def _log(self, level: str, msg, **_kw) -> None:
+        self.records.append((level, str(msg)))
+
+    def debug(self, msg, **kw) -> None:
+        self._log("debug", msg, **kw)
+
+    def info(self, msg, **kw) -> None:
+        self._log("info", msg, **kw)
+
+    def warning(self, msg, **kw) -> None:
+        self._log("warning", msg, **kw)
+
+    def error(self, msg, **kw) -> None:
+        self._log("error", msg, **kw)
+
+    def count(self, level: str, needle: str) -> int:
+        return sum(1 for lv, m in self.records if lv == level and needle in m.lower())
+
+
+@pytest.fixture
+def log(monkeypatch) -> LogRecorder:
+    rec = LogRecorder()
+    monkeypatch.setattr("ugv_bringup.nodes.camera_driver.CameraDriver.get_logger", lambda self: rec)
+    return rec
+
+
+@contextlib.contextmanager
+def running(args: list[str], stream: FakeStream | None = None):
+    """The driver, a probe node and an executor over both; everything is torn down afterwards."""
+    node = start(args)
+    probe = rclpy.create_node("camera_probe")
+    ex = SingleThreadedExecutor()
+    ex.add_node(node)
+    ex.add_node(probe)
+    try:
+        yield node, probe, ex
+    finally:
+        if stream is not None:
+            stream.unblock()  # a real read() stuck in the network cannot be unblocked; the fake can
+        ex.shutdown()
+        node.close()
+        node.destroy_node()
+        probe.destroy_node()
+        rclpy.shutdown()
+
+
+def spin(ex, seconds: float) -> None:
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        ex.spin_once(timeout_sec=0.02)
+
+
+def spin_until(ex, predicate, timeout_s: float = 5.0) -> bool:
+    end = time.monotonic() + timeout_s
+    while time.monotonic() < end:
+        if predicate():
+            return True
+        ex.spin_once(timeout_sec=0.02)
+    return predicate()
+
+
+def stamp_s(msg) -> float:
+    return msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+
+
+def clock_s(node) -> float:
+    return node.get_clock().now().nanoseconds / 1e9
+
+
+@pytest.mark.parametrize(
+    "device,paced,backend,reads_through_reader",
+    [("/dev/video0", False, (cv2.CAP_V4L2,), False), (_URL, True, (), True)],
+    ids=["v4l2-direct-read", "network-newest-frame-reader"],
+)
+def test_publishes_system_and_ui_topics_from_one_capture(
+    tmp_path, open_video, device, paced, backend, reads_through_reader
+):
+    calls = open_video(paced)
     cal = write_cal(tmp_path)
-    node = start(["-p", f"calibration_file:={cal}", "-p", f"device:={video}", "-p", "fps:=30.0", "-p", "compressed_rate_hz:=10.0"])
+    node = start(["-p", f"calibration_file:={cal}", "-p", f"device:={device}", "-p", "fps:=30.0", "-p", "compressed_rate_hz:=10.0"])
     probe = rclpy.create_node("camera_probe")
     got: dict[str, list] = {"img": [], "info": [], "ui_img": [], "ui_info": []}
     live = QoSProfile(history=HistoryPolicy.KEEP_LAST, depth=5, reliability=ReliabilityPolicy.RELIABLE)
@@ -66,6 +245,8 @@ def test_publishes_system_and_ui_topics_from_one_capture(tmp_path, video):
     ex.add_node(node)
     ex.add_node(probe)
     try:
+        assert calls == [(device, backend)]  # V4L2 devices still open with the V4L2 backend, a URL without one
+        assert (node._reader is not None) == reads_through_reader  # only network sources get the newest-frame reader
         end = time.monotonic() + 3.0
         while time.monotonic() < end:
             ex.spin_once(timeout_sec=0.02)
@@ -150,3 +331,97 @@ def test_refuses_a_camera_whose_resolution_differs_from_the_calibration(tmp_path
             start(["-p", f"calibration_file:={cal}", "-p", f"device:={video}"])
         finally:
             rclpy.shutdown()
+
+
+# --- network streams: newest frame only, arrival stamp, transport latency, placeholder calibration ---------------
+
+
+def test_a_burst_after_a_stall_publishes_only_the_newest_frame_and_then_goes_silent(tmp_path, stream):
+    cal = write_cal(tmp_path)
+    with running(["-p", f"calibration_file:={cal}", "-p", f"device:={_URL}", "-p", "fps:=30.0"], stream) as (node, probe, ex):
+        imgs: list = []
+        probe.create_subscription(Image, "/camera/image_raw", imgs.append, _LIVE)
+        assert spin_until(ex, lambda: node.count_subscribers("/camera/image_raw") == 1)  # matched; nothing sent yet
+        for shade in range(10):
+            stream.push(shade * 20)  # the node is not spinning: ten frames pile up, as when a tunnel catches up
+        assert stream.wait_calls(11)  # the reader took all ten and is waiting for an eleventh
+        assert spin_until(ex, lambda: len(imgs) >= 1)
+        spin(ex, 0.5)  # many timer ticks with no new frame
+        assert [m.data[0] for m in imgs] == [9 * 20]  # the newest frame, once; the old frame is never repeated
+        assert node._reader.dropped == 9
+    assert not node._reader.is_alive  # close() stopped the thread
+    assert stream.released  # ...and then released the capture
+
+
+def test_the_stamp_of_a_network_frame_is_its_arrival_time_minus_the_transport_latency(tmp_path, stream):
+    cal = write_cal(tmp_path)
+    args = ["-p", f"calibration_file:={cal}", "-p", f"device:={_URL}", "-p", "transport_latency_s:=0.5"]
+    with running(args, stream) as (node, probe, ex):
+        imgs: list = []
+        infos: list = []
+        probe.create_subscription(Image, "/camera/image_raw", imgs.append, _LIVE)
+        probe.create_subscription(CameraInfo, "/camera/camera_info", infos.append,
+                                  QoSProfile(depth=5, reliability=ReliabilityPolicy.RELIABLE,
+                                             durability=DurabilityPolicy.TRANSIENT_LOCAL))
+        assert spin_until(ex, lambda: node.count_subscribers("/camera/image_raw") == 1)
+        before = clock_s(node)
+        stream.push(7)
+        assert stream.wait_calls(2)  # the frame has arrived (the reader holds it); the node has not published it
+        arrived_by = clock_s(node)
+        time.sleep(0.1)  # a gap between arrival and publication (not a synchronisation): the stamp must not be "now"
+        assert spin_until(ex, lambda: imgs and infos)
+        stamp = stamp_s(imgs[0])
+        assert before - 0.5 - 1e-3 <= stamp <= arrived_by - 0.5 + 1e-3
+        assert (infos[0].header.stamp.sec, infos[0].header.stamp.nanosec) == (imgs[0].header.stamp.sec, imgs[0].header.stamp.nanosec)
+
+
+def test_the_transport_latency_also_shifts_the_stamp_of_a_v4l2_frame(tmp_path, open_video):
+    open_video(False)
+    cal = write_cal(tmp_path)
+    args = ["-p", f"calibration_file:={cal}", "-p", "device:=/dev/video0", "-p", "transport_latency_s:=0.5"]
+    with running(args) as (node, probe, ex):
+        imgs: list = []
+        probe.create_subscription(Image, "/camera/image_raw", imgs.append, _LIVE)
+        assert spin_until(ex, lambda: len(imgs) >= 1)
+        assert clock_s(node) - stamp_s(imgs[0]) >= 0.5 - 1e-3  # stamped at least the latency before it was published
+
+
+@pytest.mark.parametrize("bad", ["-0.1", "-1.0"])
+def test_a_negative_transport_latency_is_refused_before_the_camera_is_opened(tmp_path, open_video, bad):
+    calls = open_video(False)
+    cal = write_cal(tmp_path)
+    with pytest.raises(RuntimeError, match="transport_latency_s"):
+        try:
+            start(["-p", f"calibration_file:={cal}", "-p", "device:=/dev/video0", "-p", f"transport_latency_s:={bad}"])
+        finally:
+            rclpy.shutdown()
+    assert calls == []  # fail closed, and without touching the camera
+
+
+def test_a_placeholder_calibration_is_warned_about_at_start_up_and_then_periodically(tmp_path, stream, log, monkeypatch):
+    monkeypatch.setattr("ugv_bringup.nodes.camera_driver._REPORT_PERIOD_S", 0.1)  # production: 10 s
+    cal = write_cal(tmp_path, placeholder=True)
+    with running(["-p", f"calibration_file:={cal}", "-p", f"device:={_URL}"], stream) as (node, probe, ex):
+        assert log.count("warning", "placeholder") == 1  # at start-up, before any timer has fired
+        assert spin_until(ex, lambda: log.count("warning", "placeholder") >= 3)  # and again on every report period
+
+
+def test_a_real_calibration_is_never_warned_about(tmp_path, stream, log, monkeypatch):
+    monkeypatch.setattr("ugv_bringup.nodes.camera_driver._REPORT_PERIOD_S", 0.1)
+    cal = write_cal(tmp_path)
+    with running(["-p", f"calibration_file:={cal}", "-p", f"device:={_URL}"], stream) as (node, probe, ex):
+        spin(ex, 0.6)  # several report periods
+    assert log.count("warning", "placeholder") == 0
+
+
+def test_dropped_frames_are_reported_only_when_the_count_changed(tmp_path, stream, log, monkeypatch):
+    monkeypatch.setattr("ugv_bringup.nodes.camera_driver._REPORT_PERIOD_S", 0.1)
+    cal = write_cal(tmp_path)
+    with running(["-p", f"calibration_file:={cal}", "-p", f"device:={_URL}"], stream) as (node, probe, ex):
+        for shade in range(10):
+            stream.push(shade)
+        assert stream.wait_calls(11)  # nine frames were superseded
+        assert spin_until(ex, lambda: log.count("info", "dropped") >= 1)
+        spin(ex, 0.5)  # more report periods, nothing new dropped
+        assert log.count("info", "dropped") == 1
+        assert any("9" in m for lv, m in log.records if lv == "info" and "dropped" in m.lower())

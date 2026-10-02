@@ -1,12 +1,20 @@
 """Camera driver helpers (no ROS, no OpenCV): calibration -> CameraInfo fields, capture-size
-check, device parsing and the rate pacing of the UI stream.
+check, device parsing, the rate pacing of the UI stream, and the newest-frame reader for network cameras.
 
 The calibration itself is loaded and validated by Dev 2's ugv_localization.camera (the single place
 that refuses zero / fake K), so a driver can never publish a lying CameraInfo.
+
+A network stream (a phone behind a tunnel) stalls and then delivers a burst of old frames. `LatestFrameReader`
+drains the capture on its own thread and keeps only the newest frame, so a burst is published as ONE frame
+and a stall is silence (never a repeated old frame), which is what lets the safety arbiter see a dead camera.
+Such a stream carries no capture timestamps: the stamp is the arrival time minus a measured, configured
+`transport_latency_s` (`frame_stamp_ns`).
 """
 
 from __future__ import annotations
 
+import math
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TypeVar
@@ -66,6 +74,117 @@ def parse_device(value: str) -> int | str:
     if not v:
         raise CaptureError("device parameter is empty")
     return int(v) if v.isdigit() else v
+
+
+def check_transport_latency(value: object) -> float:
+    """`transport_latency_s` in seconds: finite and >= 0, else refuse to start (a NaN or negative latency would
+    put every stamp in the future or nowhere)."""
+    try:
+        latency = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        latency = math.nan
+    if not math.isfinite(latency) or latency < 0.0:
+        raise CaptureError(f"transport_latency_s must be a finite number of seconds >= 0, got {value!r}")
+    return latency
+
+
+def frame_stamp_ns(arrival_s: float, latency_s: float) -> int:
+    """Header stamp of a frame: when it arrived here minus the (measured) transport latency, in nanoseconds.
+    Never negative (a sim clock near zero with a large latency would otherwise give an invalid stamp)."""
+    return max(0, round((arrival_s - latency_s) * 1e9))
+
+
+class LatestFrameReader:
+    """Drains a capture on its own thread and keeps only the newest frame (no ROS, no OpenCV).
+
+    `read()` is the capture's blocking read, `(ok, frame)`; `now_s()` is the clock the arrival time is taken
+    from (the node's ROS clock, so stamps stay in ROS time). On a successful read the frame is stored with its
+    arrival time, replacing a frame nobody took (counted in `dropped`). `take()` hands each frame out once and
+    returns None until a newer one arrives. A failed read (not ok, no frame, or `read()` raising) keeps the
+    stored frame, is counted in `failed_reads` (consecutive; a good read resets it) and backs off `retry_s`
+    so a dead source does not spin a core.
+    """
+
+    def __init__(
+        self, read: Callable[[], tuple[bool, object]], now_s: Callable[[], float], *, retry_s: float = 0.05
+    ) -> None:
+        if not retry_s >= 0.0:
+            raise ValueError("retry_s must be >= 0")
+        self._read = read
+        self._now_s = now_s
+        self._retry_s = retry_s
+        self._lock = threading.Lock()
+        self._stopping = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._latest: tuple[object, float] | None = None
+        self._dropped = 0
+        self._failed = 0
+        self._last_error = ""
+
+    def start(self) -> None:
+        if self._thread is not None:
+            return
+        # daemon: a read() blocked inside a network library must never keep the process alive
+        self._thread = threading.Thread(target=self._run, name="latest-frame-reader", daemon=True)
+        self._thread.start()
+
+    def take(self) -> tuple[object, float] | None:
+        """(frame, arrival_s) once per stored frame, else None."""
+        with self._lock:
+            item, self._latest = self._latest, None
+        return item
+
+    @property
+    def dropped(self) -> int:
+        """Frames superseded by a newer one before anybody took them."""
+        with self._lock:
+            return self._dropped
+
+    @property
+    def failed_reads(self) -> int:
+        """Consecutive failed reads (0 after any good read)."""
+        with self._lock:
+            return self._failed
+
+    @property
+    def last_error(self) -> str:
+        """Why the latest failed read failed ('' if none has)."""
+        with self._lock:
+            return self._last_error
+
+    @property
+    def is_alive(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    def stop(self, timeout_s: float = 2.0) -> None:
+        """Ask the thread to end and wait up to `timeout_s`. A read() stuck inside a network library cannot be
+        interrupted: then the thread outlives this call (check `is_alive`). Safe to call twice."""
+        self._stopping.set()
+        thread = self._thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout_s)
+
+    def _run(self) -> None:
+        while not self._stopping.is_set():
+            try:
+                ok, frame = self._read()
+                if ok and frame is not None:
+                    self._store(frame, self._now_s())
+                    continue
+                error = "read returned no frame"
+            except Exception as exc:  # a raising read must show up as a failure, not as a silently dead thread
+                error = f"{type(exc).__name__}: {exc}"
+            with self._lock:
+                self._failed += 1
+                self._last_error = error
+            self._stopping.wait(self._retry_s)
+
+    def _store(self, frame: object, arrival_s: float) -> None:
+        with self._lock:
+            if self._latest is not None:
+                self._dropped += 1
+            self._latest = (frame, arrival_s)
+            self._failed = 0
 
 
 class RatePacer:

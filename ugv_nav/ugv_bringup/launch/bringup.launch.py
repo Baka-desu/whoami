@@ -3,7 +3,8 @@
     ros2 launch ugv_bringup bringup.launch.py profile:=live_cam \
         calibration_file:=<camera yaml> device:=<V4L2 path or stream URL> \
         camera_x:=.. camera_y:=.. camera_z:=.. camera_pitch_deg:=.. \
-        perception_src:=<repo>/turing/src [mode:=mapping|localize] [robot:=primary]
+        perception_src:=<repo>/turing/src [mode:=mapping|localize] [robot:=primary] \
+        [transport_latency_s:=<seconds, network camera>]
 
 live_cam starts, in the order the data flows:
   camera driver (Dev 5)          /camera/image_raw + /camera/camera_info (+ UI stream)
@@ -65,7 +66,8 @@ def _setup(context, *args, **kwargs):
     env["PYTHONPATH"] = os.pathsep.join(p for p in (str(src), env.get("PYTHONPATH", "")) if p)
     actions = [
         _include("ugv_bringup", "camera.launch.py",
-                 {"calibration_file": arg("calibration_file"), "device": arg("device")}),
+                 {"calibration_file": arg("calibration_file"), "device": arg("device"),
+                  "transport_latency_s": arg("transport_latency_s")}),
         _include("ugv_robot_description", "description.launch.py", {a: arg(a) for a in _MOUNT}),
         ExecuteProcess(
             cmd=["python3", "-m", "ugv_perception.node.adapter_node", "--ros-args", "-p",
@@ -88,6 +90,8 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument("profile", default_value="live_cam"),
         DeclareLaunchArgument("calibration_file", default_value=""),
         DeclareLaunchArgument("device", default_value="/dev/video0"),
+        DeclareLaunchArgument("transport_latency_s", default_value="0.0",
+                              description="measured delay of a network camera stream, seconds (ugv_bringup README)"),
         *[DeclareLaunchArgument(a, default_value="", description="measured camera mount (required)")
           for a in _MOUNT],
         DeclareLaunchArgument("perception_src", default_value=os.environ.get("UGV_PERCEPTION_SRC", "")),

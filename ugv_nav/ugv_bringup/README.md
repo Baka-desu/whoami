@@ -1,12 +1,13 @@
 # ugv_bringup: camera driver (Dev 5)
 
-One V4L2 capture, published for the system and for the web UI. No second pipeline, no relay node.
+One capture (a V4L2 device or a network stream), published for the system and for the web UI. No second pipeline, no relay node.
 
 ```
 ros2 launch ugv_bringup camera.launch.py calibration_file:=/path/to/real_calibration.yaml [device:=/dev/video0]
 ```
 
-The stamp on every message is when the frame arrived from the capture driver, not the sensor's exposure time.
+The stamp on every message is when the frame arrived from the capture, not the sensor's exposure time, minus
+the parameter `transport_latency_s` (seconds, default 0; see "Phone camera over a tunnel").
 
 | Topic | Type | QoS | For |
 |---|---|---|---|
@@ -37,6 +38,28 @@ ros2 run camera_calibration cameracalibrator --size 8x6 --square 0.025     --ros
 ```
 
 Calibrate at the resolution you will run at: K is only valid there.
+
+## Phone camera over a tunnel
+
+The phone serves a stream OpenCV can open by URL (MJPEG over HTTP or RTSP) and the driver reads it through the
+tunnel with `device:=http://...`. Any `device` that is not an index or a `/dev/...` path is read on its own
+thread, and only the newest frame is published: a stalled stream that then delivers a burst of old frames yields
+one frame, and while nothing new arrives the driver is silent (the safety arbiter sees a dead camera, never a
+repeated old frame). V4L2 devices are read directly as before. The number of frames dropped this way is logged
+every 10 s while it changes.
+
+```
+ros2 launch ugv_bringup camera.launch.py calibration_file:=<repo>/ugv_nav/config/cameras/phone_640x480.yaml \
+    device:=http://<tunnel host>:<port>/<stream> transport_latency_s:=<measured seconds>
+```
+
+- `transport_latency_s` (finite, >= 0, default 0, refused at start-up otherwise): a network stream has no capture
+  timestamps, so the stamp is the frame's arrival time minus this measured delay. `bringup.launch.py` takes the
+  same argument. How to measure it: `config/cameras/README.md`.
+- `phone_640x480.yaml` ships as a flagged placeholder (`placeholder: true`, the laptop webcam's intrinsics). The
+  driver logs a WARN at start-up and every 10 s while it is loaded. Do not use it for a mapping run that counts:
+  replace it with a real calibration of the phone, locked focus and exposure, and remove the flag
+  (steps in `config/cameras/README.md`).
 
 ## Full stack: `bringup.launch.py profile:=live_cam`
 

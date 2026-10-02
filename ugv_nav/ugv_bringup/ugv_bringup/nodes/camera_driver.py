@@ -1,12 +1,20 @@
-"""Camera driver: one V4L2 capture, published for both the system and the UI (no second pipeline).
+"""Camera driver: one capture (V4L2 device or network stream), published for both the system and the UI
+(no second pipeline).
 
 Publishes (frame_id = optical frame; one CameraInfo per image, same stamp):
   /camera/image_raw           sensor_msgs/Image            rgb8 - Dev 1 perception, Dev 2 RTAB-Map
   /camera/camera_info         sensor_msgs/CameraInfo       reliable + transient local - Dev 1, Dev 2, safety
   /image_raw/compressed       sensor_msgs/CompressedImage  jpeg, rate-limited - the web UI (rosbridge)
   /camera_info                sensor_msgs/CameraInfo       same message, with each compressed frame - the web UI
-The stamp is the time the frame arrived from the capture driver (taken after the blocking read), not the
-sensor's exposure time, which V4L2 through OpenCV does not give us.
+The stamp is the time the frame arrived from the capture (taken after the blocking read), not the sensor's
+exposure time, which neither V4L2 nor a network stream through OpenCV gives us, minus `transport_latency_s`
+(default 0): the measured delay between the phone capturing a frame and it arriving here through a tunnel.
+
+Network streams (any `device` that is not an index or a /dev/... path: `http://...`, `rtsp://...`, a file) are
+read on their own thread (`LatestFrameReader`) and only the newest frame is published: a stalled stream that
+then delivers a burst of old frames yields one frame, never a replay, and while nothing new arrives the driver
+publishes nothing, so the safety arbiter sees the camera as silent. V4L2 devices are read directly, one read
+per tick, as before.
 
 Fails closed: no valid calibration, or a camera whose resolution differs from it, means no frames at all
 (a driver that publishes a fake K would corrupt DA3 depth and RTAB-Map geometry).
@@ -16,8 +24,13 @@ driver will not run without a calibration. In this mode it publishes ONLY raw im
 CameraInfo and no UI stream, at the requested width x height, so `camera_calibration` can run. Dev 1 and Dev 2
 reject frames without a CameraInfo and the safety arbiter sees the camera as silent, so nothing can use them.
 
+A calibration file flagged `placeholder: true` (stand-in numbers, not a calibration of this camera) loads, but
+the driver logs a WARN at start-up and every 10 s; it also logs the frames dropped by the network reader every
+10 s while that count changes.
+
 Params: calibration_file (required unless calibration_mode) device frame_id fps image_topic info_topic
         compressed_topic ui_info_topic compressed_rate_hz jpeg_quality calibration_mode width height
+        transport_latency_s (finite, >= 0)
         (empty compressed_topic disables the UI stream; width/height only apply in calibration mode)
 """
 
@@ -30,14 +43,17 @@ import rclpy
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
+from rclpy.time import Time
 from sensor_msgs.msg import CameraInfo, CompressedImage, Image
 from ugv_localization.camera import load_calibration
 
 from ugv_bringup.camera_core import (
-    CaptureError, RatePacer, camera_info_fields, check_capture_size, load_calibration_or_refuse, parse_device,
+    CaptureError, LatestFrameReader, RatePacer, camera_info_fields, check_capture_size, check_transport_latency,
+    frame_stamp_ns, load_calibration_or_refuse, parse_device,
 )
 
 _MAX_FAILED_READS_BEFORE_ERROR = 30
+_REPORT_PERIOD_S = 10.0  # placeholder-calibration warning and dropped-frame report
 
 
 def _live_qos() -> QoSProfile:
@@ -71,11 +87,17 @@ class CameraDriver(Node):
         calibrating = bool(self.declare_parameter("calibration_mode", False).value)
         req_w = int(self.declare_parameter("width", 640).value)
         req_h = int(self.declare_parameter("height", 480).value)
+        latency = self.declare_parameter("transport_latency_s", 0.0).value
 
         if not fps > 0.0 or not 1 <= self._jpeg_quality <= 100:
             raise RuntimeError("fps must be > 0 and jpeg_quality in 1..100")
+        try:
+            self._latency_s = check_transport_latency(latency)
+        except CaptureError as exc:
+            raise RuntimeError(str(exc)) from exc
 
         self._info_fields = None
+        self._placeholder_file = ""
         if calibrating:
             if req_w <= 0 or req_h <= 0:
                 raise RuntimeError("width and height must be > 0")
@@ -93,6 +115,8 @@ class CameraDriver(Node):
                 raise RuntimeError(str(exc)) from exc
             self._info_fields = camera_info_fields(cal)
             width, height = cal.width, cal.height
+            if cal.placeholder:
+                self._placeholder_file = cal_path
 
         try:
             src = parse_device(device)
@@ -124,7 +148,12 @@ class CameraDriver(Node):
             self._pub_ui_info = self.create_publisher(CameraInfo, ui_info_topic, _info_qos())
             self._pacer = RatePacer(ui_rate, slack_s=0.5 / fps)
         self._failed = 0
+        self._dead_logged = False
+        self._reported_dropped = 0
+        # Network streams stall and then deliver a burst: read them on a thread that keeps only the newest frame.
+        self._reader = None if v4l2 else LatestFrameReader(self._cap.read, self._now_s)
         self.create_timer(1.0 / fps, self._tick)
+        self.create_timer(_REPORT_PERIOD_S, self._report)
         if calibrating:
             self.get_logger().warning(
                 f"CALIBRATION MODE: camera {device!r} {width}x{height} -> {image_topic} raw images only, "
@@ -134,7 +163,32 @@ class CameraDriver(Node):
             self.get_logger().info(
                 f"camera {device!r} {width}x{height} @ {fps:g} fps -> {image_topic}, {info_topic}"
                 + (f", {ui_image_topic}, {ui_info_topic}" if ui_image_topic else "")
+                + (f"; stamp = arrival - {self._latency_s:g} s" if self._latency_s else "")
             )
+        self._report()  # the placeholder warning at start-up, not only after the first period
+        if self._reader is not None:
+            self._reader.start()
+
+    def _now_s(self) -> float:
+        return self.get_clock().now().nanoseconds / 1e9
+
+    def _stamp(self, arrival_s: float):
+        return Time(nanoseconds=frame_stamp_ns(arrival_s, self._latency_s)).to_msg()
+
+    def _report(self) -> None:
+        if self._placeholder_file:
+            self.get_logger().warning(
+                f"calibration {self._placeholder_file!r} is a PLACEHOLDER (placeholder: true), not a calibration of "
+                "this camera: depth scale and map geometry are wrong until it is replaced (config/cameras/README.md)"
+            )
+        if self._reader is not None:
+            total = self._reader.dropped
+            if total != self._reported_dropped:
+                self.get_logger().info(
+                    f"network camera: {total - self._reported_dropped} frames dropped (superseded by a newer frame "
+                    f"before they were published) in the last {_REPORT_PERIOD_S:g} s, {total} in total"
+                )
+                self._reported_dropped = total
 
     def _info(self, stamp) -> CameraInfo:
         f = self._info_fields
@@ -147,15 +201,28 @@ class CameraDriver(Node):
         return m
 
     def _tick(self) -> None:
-        ok, bgr = self._cap.read()
-        stamp = self.get_clock().now().to_msg()  # after the blocking read: when the frame actually arrived
-        if not ok or bgr is None:
-            # Publish nothing: silence is what lets the safety arbiter see a dead camera.
-            self._failed += 1
-            if self._failed == _MAX_FAILED_READS_BEFORE_ERROR:
-                self.get_logger().error("camera is not delivering frames")
-            return
-        self._failed = 0
+        if self._reader is not None:
+            item = self._reader.take()
+            if item is None:
+                # No new frame since the last tick (stalled or dead stream): publish nothing, never the old frame
+                # again. Silence is what lets the safety arbiter see a dead camera.
+                if self._reader.failed_reads >= _MAX_FAILED_READS_BEFORE_ERROR and not self._dead_logged:
+                    self._dead_logged = True
+                    self.get_logger().error(f"camera is not delivering frames ({self._reader.last_error})")
+                return
+            self._dead_logged = False
+            bgr, arrival_s = item
+        else:
+            ok, bgr = self._cap.read()
+            arrival_s = self._now_s()  # after the blocking read: when the frame actually arrived
+            if not ok or bgr is None:
+                # Publish nothing: silence is what lets the safety arbiter see a dead camera.
+                self._failed += 1
+                if self._failed == _MAX_FAILED_READS_BEFORE_ERROR:
+                    self.get_logger().error("camera is not delivering frames")
+                return
+            self._failed = 0
+        stamp = self._stamp(arrival_s)
         if (bgr.shape[1], bgr.shape[0]) != self._size:
             self.get_logger().error("frame size changed after start; dropping frames", throttle_duration_sec=5.0)
             return
@@ -185,6 +252,13 @@ class CameraDriver(Node):
                 self._pub_ui_info.publish(self._info(stamp))
 
     def close(self) -> None:
+        if self._reader is not None:
+            self._reader.stop()
+            if self._reader.is_alive:
+                # Blocked inside the network read: releasing the capture under it is unsafe, and the process is
+                # about to exit, which ends the (daemon) thread.
+                self.get_logger().warning("camera read is still blocked in the network; leaving the capture open")
+                return
         self._cap.release()
 
 

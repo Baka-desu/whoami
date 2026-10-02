@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import math
+import threading
+
 import pytest
 import yaml
 
 from ugv_bringup.camera_core import (
-    CaptureError, RatePacer, camera_info_fields, check_capture_size, load_calibration_or_refuse, parse_device,
+    CaptureError, LatestFrameReader, RatePacer, camera_info_fields, check_capture_size, check_transport_latency,
+    frame_stamp_ns, load_calibration_or_refuse, parse_device,
 )
 from ugv_localization.camera import CalibrationError, calibration_to_yaml_dict, load_calibration
 from ugv_localization.camera.calib import CameraCalibration
@@ -100,3 +104,190 @@ def test_a_zero_k_file_is_refused_cleanly(tmp_path):
     path.write_text(yaml.safe_dump(bad), encoding="utf-8")
     with pytest.raises(CaptureError, match="refusing to start"):
         load_calibration_or_refuse(load_calibration, str(path))
+
+
+# --- newest-frame reader --------------------------------------------------------------------------------------
+# The reader runs a thread, so every test waits on the reader itself: QueueSource counts read() entries, and the
+# Nth entry proves the first N-1 results were consumed (the thread only calls read() again after storing/counting
+# the previous one). No test relies on a sleep for ordering.
+
+
+class QueueSource:
+    """A capture whose results the test pushes; read() blocks until one is queued, like a stalled network stream."""
+
+    def __init__(self) -> None:
+        self._cond = threading.Condition()
+        self._items: list[tuple[object, ...]] = []
+        self._closed = False
+        self._clock = 0.0
+        self.calls = 0
+
+    def push(self, ok: bool, frame: object, t: float = 0.0) -> None:
+        with self._cond:
+            self._items.append((ok, frame, t))
+            self._cond.notify_all()
+
+    def push_error(self, exc: Exception) -> None:
+        with self._cond:
+            self._items.append(exc)
+            self._cond.notify_all()
+
+    def close(self) -> None:
+        with self._cond:
+            self._closed = True
+            self._cond.notify_all()
+
+    def read(self) -> tuple[bool, object]:
+        with self._cond:
+            self.calls += 1
+            self._cond.notify_all()
+            self._cond.wait_for(lambda: self._items or self._closed)
+            if not self._items:
+                return False, None
+            item = self._items.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        ok, frame, t = item
+        self._clock = t  # the "arrival time" the reader will see when it stamps this frame
+        return ok, frame
+
+    def now(self) -> float:
+        return self._clock
+
+    def wait_calls(self, n: int, timeout_s: float = 5.0) -> bool:
+        with self._cond:
+            return self._cond.wait_for(lambda: self.calls >= n, timeout_s)
+
+
+@pytest.fixture
+def source():
+    src = QueueSource()
+    yield src
+    src.close()
+
+
+@pytest.fixture
+def make_reader(source):
+    readers: list[LatestFrameReader] = []
+
+    def make(**kw) -> LatestFrameReader:
+        reader = LatestFrameReader(source.read, source.now, **kw)
+        readers.append(reader)
+        return reader
+
+    yield make
+    source.close()  # unblock a read() still waiting, then stop the threads
+    for reader in readers:
+        reader.stop()
+
+
+def wait_until(predicate, timeout_s: float = 5.0) -> bool:
+    done = threading.Event()
+    deadline = threading.Timer(timeout_s, done.set)
+    deadline.start()
+    try:
+        while not predicate():
+            if done.wait(0.002):
+                return predicate()
+        return True
+    finally:
+        deadline.cancel()
+
+
+def test_a_burst_leaves_only_the_newest_frame_and_counts_the_rest_as_dropped(source, make_reader):
+    reader = make_reader()
+    for i in range(10):
+        source.push(True, f"frame{i}", t=float(i))
+    reader.start()
+    assert source.wait_calls(11)  # the reader is blocked in read() again: all ten were consumed
+    assert reader.take() == ("frame9", 9.0)  # (frame, arrival time as the reader saw it)
+    assert reader.dropped == 9
+    assert reader.take() is None
+
+
+def test_take_returns_each_frame_once_and_none_when_nothing_new_arrived(source, make_reader):
+    reader = make_reader()
+    assert reader.take() is None  # not started
+    reader.start()
+    assert source.wait_calls(1)
+    assert reader.take() is None  # started, nothing arrived
+    source.push(True, "a", t=1.0)
+    assert source.wait_calls(2)
+    assert reader.take() == ("a", 1.0)
+    assert reader.take() is None  # the same frame is never handed out twice
+    source.push(True, "b", t=2.0)
+    assert source.wait_calls(3)
+    assert reader.take() == ("b", 2.0)
+    assert reader.dropped == 0  # a frame that was taken before the next one arrived was not dropped
+
+
+def test_a_failed_read_keeps_the_stored_frame_and_is_counted_until_a_read_succeeds(source, make_reader):
+    reader = make_reader(retry_s=0.0)
+    source.push(True, "a", t=1.0)
+    source.push(False, None)
+    source.push(False, None)
+    reader.start()
+    assert source.wait_calls(4)  # a, fail, fail consumed
+    assert reader.failed_reads == 2
+    assert reader.take() == ("a", 1.0)  # failures neither replaced nor erased the frame
+    source.push(True, "b", t=2.0)
+    assert source.wait_calls(5)
+    assert reader.failed_reads == 0  # consecutive failures: a good read resets the count
+    assert reader.take() == ("b", 2.0)
+    assert reader.dropped == 0
+
+
+def test_a_read_that_raises_is_a_failed_read_not_a_dead_thread(source, make_reader):
+    reader = make_reader(retry_s=0.0)
+    source.push_error(RuntimeError("boom"))
+    source.push_error(RuntimeError("boom again"))
+    reader.start()
+    assert source.wait_calls(3)
+    assert reader.failed_reads == 2
+    assert "boom again" in reader.last_error
+    source.push(True, "a", t=1.0)  # the thread survived and still delivers
+    assert source.wait_calls(4)
+    assert reader.take() == ("a", 1.0)
+    assert reader.failed_reads == 0
+
+
+def test_failed_reads_back_off_instead_of_spinning_and_stop_interrupts_the_wait(source, make_reader):
+    reader = make_reader(retry_s=3600.0)
+    source.push(False, None)
+    reader.start()
+    assert wait_until(lambda: reader.failed_reads == 1)
+    reader.stop()  # returns long before the hour is up: the backoff is interruptible
+    assert not reader.is_alive
+    assert source.calls == 1  # it waited after the failure; it did not call read() again in a loop
+
+
+def test_stop_is_safe_twice_and_does_not_hang_on_a_read_that_never_returns(source, make_reader):
+    reader = make_reader()
+    reader.start()
+    assert source.wait_calls(1)  # the thread is inside read()
+    reader.stop(timeout_s=0.05)
+    assert reader.is_alive  # stop() gave up waiting and says so, instead of hanging or lying
+    source.close()
+    reader.stop()
+    reader.stop()
+    assert not reader.is_alive
+
+
+@pytest.mark.parametrize("value", [0.0, 0.25, 3, 0.001])
+def test_transport_latency_accepts_finite_non_negative_seconds(value):
+    assert check_transport_latency(value) == float(value)
+
+
+@pytest.mark.parametrize("value", [-0.001, -1.0, math.nan, math.inf, -math.inf, "fast", None])
+def test_transport_latency_rejects_anything_else(value):
+    with pytest.raises(CaptureError, match="transport_latency_s"):
+        check_transport_latency(value)
+
+
+def test_frame_stamp_is_arrival_minus_latency_in_nanoseconds():
+    assert frame_stamp_ns(100.0, 0.25) == 99_750_000_000
+    assert frame_stamp_ns(100.0, 0.0) == 100_000_000_000
+
+
+def test_frame_stamp_is_never_negative():
+    assert frame_stamp_ns(0.1, 0.5) == 0  # sim clock near zero with a large configured latency
