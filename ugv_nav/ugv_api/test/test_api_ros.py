@@ -52,7 +52,7 @@ STATS_STALE_S = 1.5
 
 CLOUD, PATH = "/rtabmap/cloud_map", "/rtabmap/mapPath"
 GRID, DEPTH_CLOUD = "/global_costmap/costmap", "/perception/depth_cloud"
-MAP_STATS, PERCEPTION_STATS = "/ugv/map/stats", "/ugv/perception/stats"
+MAP_STATS = "/ugv/map/stats"
 HEAVY_TOPICS = (CLOUD, PATH, GRID, DEPTH_CLOUD)
 GATEWAY_STAT_KEYS = {"cloud_source_points", "map_inputs_alive", "map_rejects", "map_restarts", "map_last_reject"}
 # A map thread that stopped ticking is reported not alive after MAP_ALIVE_S; the gateway checks every 0.5 s.
@@ -128,7 +128,6 @@ class MapPubs:
         self.path = node.create_publisher(Path, PATH, volatile)
         self.depth_cloud = node.create_publisher(PointCloud2, DEPTH_CLOUD, volatile)
         self.map_stats = node.create_publisher(String, MAP_STATS, latched)
-        self.perception_stats = node.create_publisher(String, PERCEPTION_STATS, QoSProfile(depth=10))
 
     def now(self):
         return self.node.get_clock().now().to_msg()
@@ -550,8 +549,7 @@ def test_a_newer_cloud_replaces_the_older_one_and_never_changes_what_was_served(
 
 def test_heavy_subscriptions_exist_only_while_a_client_is_watching(graph):
     c, node = graph["client"], graph["pub_node"]
-    always_on = (MAP_STATS, PERCEPTION_STATS)
-    assert _wait(lambda: _subscribed(node, always_on), timeout=3.0), "the two stats subscriptions are always on"
+    assert _wait(lambda: _subscribed(node, [MAP_STATS]), timeout=3.0), "the map stats subscription is always on"
 
     with watching(c):
         assert _wait(lambda: _subscribed(node, HEAVY_TOPICS), timeout=8.0), [
@@ -559,7 +557,7 @@ def test_heavy_subscriptions_exist_only_while_a_client_is_watching(graph):
     # no heartbeat for longer than IDLE_S: the demand timer destroys them (it ticks once a second)
     assert _wait(lambda: all(node.count_subscribers(t) == 0 for t in HEAVY_TOPICS), timeout=IDLE_S + 6.0), [
         (t, node.count_subscribers(t)) for t in HEAVY_TOPICS]
-    assert _subscribed(node, always_on), "the stats subscriptions stay"
+    assert _subscribed(node, [MAP_STATS]), "the map stats subscription stays"
 
     with watching(c):  # and they come back for the next viewer
         assert _wait(lambda: _subscribed(node, HEAVY_TOPICS), timeout=8.0)
@@ -663,7 +661,7 @@ def test_live_is_skipped_without_a_transform(graph):
     assert "live_no_transform" in stats["map_last_reject"]
 
 
-def test_stats_from_both_sources_merge_malformed_json_is_ignored_and_silence_expires(graph):
+def test_map_stats_pass_through_malformed_json_is_ignored_and_silence_expires(graph):
     c, pubs, gw = graph["client"], graph["pubs"], graph["gw"]
 
     def seen(*keys):
@@ -672,18 +670,16 @@ def test_stats_from_both_sources_merge_malformed_json_is_ignored_and_silence_exp
 
     def publish_good():
         pubs.map_stats.publish(String(data=json.dumps({"keyframes": 12, "mode": "mapping",
-                                                       "calibration_placeholder": False})))
-        pubs.perception_stats.publish(String(data=json.dumps({"depth_hz": 3.2, "stage_ms": {"seg": 40}})))
+                                                       "calibration_placeholder": False, "nested": {"a": 1}})))
 
     deadline = time.monotonic() + 8.0
     stats = None
     while stats is None and time.monotonic() < deadline:
         publish_good()
-        stats = _wait(lambda: seen("keyframes", "depth_hz"), timeout=0.3)
+        stats = _wait(lambda: seen("keyframes"), timeout=0.3)
     assert stats, _map_status(c)
     assert stats["keyframes"] == 12 and stats["mode"] == "mapping" and stats["calibration_placeholder"] is False
-    assert stats["depth_hz"] == 3.2
-    assert "stage_ms" not in stats  # nested values are not part of the flat contract
+    assert "nested" not in stats  # nested values are not part of the flat contract
 
     publish_good()
     before = gw.map_rejects.get("map_stats", 0)
@@ -691,9 +687,8 @@ def test_stats_from_both_sources_merge_malformed_json_is_ignored_and_silence_exp
     assert _wait(lambda: gw.map_rejects.get("map_stats", 0) == before + 1)
     assert seen("keyframes"), "malformed JSON must not clear what the source reported"
 
-    # silence: nothing more is published; both sources are dropped after STATS_STALE_S
-    assert _wait(lambda: "keyframes" not in _map_status(c)["stats"] and "depth_hz" not in _map_status(c)["stats"],
-                 timeout=STATS_STALE_S + 6.0)
+    # silence: nothing more is published; the source is dropped after STATS_STALE_S
+    assert _wait(lambda: "keyframes" not in _map_status(c)["stats"], timeout=STATS_STALE_S + 6.0)
     # only the gateway's own statistics (retained layers, and the health of the map inputs) outlive the silence
     assert set(_map_status(c)["stats"]) <= GATEWAY_STAT_KEYS
 

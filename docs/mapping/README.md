@@ -14,7 +14,6 @@ decoder and viewer layer were removed until a producer lands with them (mindmap 
 phone camera -> tunnel -> ugv_bringup camera driver -- /camera/image_raw + /camera/camera_info --> Dev 1 perception
                                    |                                                              (DA3 depth, SegFormer mask)
                                    +-- /image_raw/compressed (camera view, read by the UI)          /perception/depth/image (32FC1 m)
-                                                                                                   /ugv/perception/stats (JSON, 1 Hz)
                                                                                                           |
         rgbd_sync (RGB + depth, exact stamps) -> rgbd_odometry -> odom_selector -> /odom                  |
                                          |                                                                |
@@ -45,7 +44,6 @@ demand" below) only while a client keeps calling `GET /api/v1/map`.
 | `/rtabmap/mapGraph` | `rtabmap_msgs/MapGraph` | `rtabmap` | `map_stats` | cheap, transient local |
 | `/rtabmap/mapData` | `rtabmap_msgs/MapData` | `rtabmap` | `map_assembler`, always (while it runs) | every SLAM step: the new node's data and the graph. Also the input a future elevation mapper would use (not built); contract in `ugv_nav/docs/localization/interfaces.md` |
 | `/ugv/map/stats` | `std_msgs/String` (JSON) | `map_stats` (`ugv_localization`) | gateway, always on | `keyframes`, `loop_closures` (distinct closure-type graph links; rtabmap's closure constraints, not "returns to a known place": it rises roughly with the node count while driving, even with no revisit, and does not grow while parked), `path_length_m`, `db_bytes`, `last_update_age_s` (null before the first graph and in `localize` mode), `mode`, `calibration_placeholder` |
-| `/ugv/perception/stats` | `std_msgs/String` (JSON) | Dev 1 perception | gateway, always on | `mask_hz`, `depth_hz`, `stage_ms`, `depth_errors` |
 | `/perception/depth/image` | `sensor_msgs/Image` 32FC1 | Dev 1 perception | RTAB-Map, UI camera view | published for every processed frame, not only when a mask is published (D14) |
 | `/perception/depth_cloud` | `sensor_msgs/PointCloud2` | Dev 1 perception | gateway (on demand), Nav2 VoxelLayer | the live cloud layer; the gateway does not back-project depth itself |
 | `/global_costmap/costmap` | `nav_msgs/OccupancyGrid` | Nav2 | gateway (on demand) | the cost grid layer, display only |

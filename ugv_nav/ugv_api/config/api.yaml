@@ -27,7 +27,6 @@ ugv_api:
       grid_topic: /global_costmap/costmap
       live_cloud_topic: /perception/depth_cloud
       map_stats_topic: /ugv/map/stats
-      perception_stats_topic: /ugv/perception/stats
     # DISPLAY limits for the §12 table shown to the operator. The enforcing limits are Dev 5's
     # safety arbiter (safety_timeouts.yaml, dev.md Dev 5 task 2): this gateway never stops the robot.
     timeouts:

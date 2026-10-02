@@ -12,7 +12,7 @@ Subscribes : /camera/camera_info          sensor_msgs/CameraInfo  stamp only (§
              /cmd_vel                     geometry_msgs/Twist     final command, read only
              TF map->base_link (polled; the pose is what GET /map/pose and the SSE `pose` event report)
              map viewer inputs, on a node of their own (ugv_api_map) in a second rclpy context (class _MapInputs):
-               always on : /ugv/map/stats, /ugv/perception/stats        std_msgs/String (JSON)
+               always on : /ugv/map/stats                               std_msgs/String (JSON)
                on demand : /rtabmap/cloud_map, /rtabmap/mapPath, /global_costmap/costmap,
                            /perception/depth_cloud (live)
 Publishes  : /ugv/e_stop                  std_msgs/Bool           latched; re-published while asserted
@@ -369,8 +369,8 @@ class _MapInputs:
     and `MapStore.put` it. Encoding happens later, on the HTTP thread, only for a layer somebody requests.
 
     Demand: the heavy subscriptions exist only while `maps.wanted(now, idle_timeout_s)`, which GET /api/v1/map
-    keeps true. The timer creates them when it becomes true and destroys them when it stops. The two stats
-    subscriptions and the TF lookups are always on.
+    keeps true. The timer creates them when it becomes true and destroys them when it stops. The map stats
+    subscription and the TF lookups are always on.
 
     Durability: a TRANSIENT_LOCAL subscription only matches a latched publisher, a VOLATILE one matches both
     but misses the latched sample. So each subscription takes the durability its publishers offer (latched only
@@ -424,9 +424,8 @@ class _MapInputs:
             }
             # reliable + volatile matches a latched publisher (/ugv/map/stats) and a plain one alike
             stats_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE)
-            for source, topic in (("map", c.map_stats_topic), ("perception", c.perception_stats_topic)):
-                self._node.create_subscription(String, topic, guard(f"{source}_stats", self._stats_callback(source)),
-                                               stats_qos, callback_group=self._group)
+            self._node.create_subscription(String, c.map_stats_topic, guard("map_stats", self._stats_callback("map")),
+                                           stats_qos, callback_group=self._group)
             self._node.create_timer(1.0, guard("demand_timer", self._tick), callback_group=self._group)
             with self._state_lock:
                 self._publish_gateway_locked()  # the health keys exist from the first moment

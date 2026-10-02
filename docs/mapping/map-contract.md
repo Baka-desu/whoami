@@ -36,7 +36,7 @@ existing resource. Both sides implement exactly this.
 {
   "epoch": 123456789,
   "seq": { "cloud": 0, "trajectory": 0, "grid": 0, "live": 0 },
-  "stats": { "keyframes": 12, "depth_hz": 3.2, "calibration_placeholder": false }
+  "stats": { "keyframes": 12, "calibration_placeholder": false }
 }
 ```
 - `epoch`: uint32, random per gateway process. `seq[layer]`: uint32, 0 = nothing received yet.
@@ -44,7 +44,7 @@ existing resource. Both sides implement exactly this.
 - `stats`: a flat object. Keys are the snake_case names published by the ROS stats nodes, passed through
   unchanged (they are data keys, not model fields, so they are NOT camelCased). Values are number, string,
   boolean or null. It may be empty `{}`. Known keys: keyframes, loop_closures, path_length_m, db_bytes,
-  last_update_age_s, mode, calibration_placeholder, mask_hz, depth_hz, depth_errors, cloud_source_points,
+  last_update_age_s, mode, calibration_placeholder, cloud_source_points,
   map_inputs_alive, map_rejects, map_restarts, map_last_reject. Unknown keys must be
   tolerated by the UI.
 - The last four are the gateway's own health keys for its map inputs (not published by any ROS stats node):

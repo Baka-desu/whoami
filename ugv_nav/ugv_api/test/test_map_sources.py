@@ -272,7 +272,7 @@ def test_map_config_defaults_are_the_values_the_gateway_ships_with():
     assert (c.cloud_topic, c.trajectory_topic, c.grid_topic) == ("/rtabmap/cloud_map", "/rtabmap/mapPath",
                                                                   "/global_costmap/costmap")
     assert c.live_cloud_topic == "/perception/depth_cloud"
-    assert (c.map_stats_topic, c.perception_stats_topic) == ("/ugv/map/stats", "/ugv/perception/stats")
+    assert c.map_stats_topic == "/ugv/map/stats"
 
 
 def test_map_config_app_kwargs_are_exactly_the_tunables_create_app_takes():

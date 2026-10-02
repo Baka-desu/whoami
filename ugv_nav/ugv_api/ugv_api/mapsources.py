@@ -80,7 +80,6 @@ class MapConfig:
     grid_topic: str = "/global_costmap/costmap"
     live_cloud_topic: str = "/perception/depth_cloud"
     map_stats_topic: str = "/ugv/map/stats"
-    perception_stats_topic: str = "/ugv/perception/stats"
 
     def __post_init__(self) -> None:
         if not isinstance(self.cloud_point_budget, int) or self.cloud_point_budget < 0:

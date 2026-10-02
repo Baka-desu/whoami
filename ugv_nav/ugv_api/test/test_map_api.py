@@ -280,10 +280,10 @@ def test_the_status_is_cheap_and_does_not_encode(rig, monkeypatch):
 
 
 def test_stats_pass_through_with_their_snake_case_keys_and_scalar_types(rig):
-    rig.maps.put_stats("mapping", {"keyframes": 12, "depth_hz": 3.2, "calibration_placeholder": False, "mode": "mapping",
+    rig.maps.put_stats("mapping", {"keyframes": 12, "path_length_m": 3.2, "calibration_placeholder": False, "mode": "mapping",
                                    "last_update_age_s": None, "nested": {"a": 1}})
     stats = rig.get("/map").json()["stats"]
-    assert stats == {"keyframes": 12, "depth_hz": 3.2, "calibration_placeholder": False, "mode": "mapping",
+    assert stats == {"keyframes": 12, "path_length_m": 3.2, "calibration_placeholder": False, "mode": "mapping",
                      "last_update_age_s": None}
     assert type(stats["keyframes"]) is int and stats["calibration_placeholder"] is False
 
