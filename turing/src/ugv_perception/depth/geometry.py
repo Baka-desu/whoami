@@ -125,8 +125,10 @@ def backproject(depth_hw: np.ndarray, k_camera: np.ndarray) -> np.ndarray:
     return np.stack([x, y, z], axis=1).astype(np.float32)
 
 
-_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float64)
-_STD = np.array([0.229, 0.224, 0.225], dtype=np.float64)
+MEAN = (0.485, 0.456, 0.406)
+STD = (0.229, 0.224, 0.225)
+_MEAN = np.array(MEAN, dtype=np.float64)
+_STD = np.array(STD, dtype=np.float64)
 
 
 def _resize_u8(rgb: np.ndarray, dst_hw: tuple[int, int]) -> np.ndarray:

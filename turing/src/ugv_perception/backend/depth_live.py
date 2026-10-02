@@ -9,6 +9,8 @@ import numpy as np
 from ugv_perception.adapter.output import AdapterError
 from ugv_perception.backend.device import pick_tensor_backend
 from ugv_perception.depth.geometry import (
+    MEAN,
+    STD,
     backproject,
     focal_model,
     hole_safe_resize,
@@ -16,6 +18,7 @@ from ugv_perception.depth.geometry import (
     meters_from_raw,
     model_hw,
     preprocess_nchw,
+    two_step_hw,
 )
 
 
@@ -33,10 +36,22 @@ class DepthChannel:
         if model_hw(height, width) != (mh, mw):
             raise AdapterError("model size disagrees with K_model")
         self._backend.ensure_hw(mh, mw)
-        blob, sized = preprocess_nchw(rgb)
-        if sized != (mh, mw):
+        first, second = two_step_hw(height, width)
+        if second != (mh, mw):
             raise AdapterError("preprocess size disagrees with K_model")
-        outputs = self._backend.run_all(blob)
+        run_from_rgb = getattr(self._backend, "run_all_from_rgb", None)
+        outputs = None
+        if callable(run_from_rgb) and not getattr(self._backend, "rgb_pre_disabled", False):
+            try:
+                outputs = run_from_rgb(rgb, (first, second), MEAN, STD)
+            except AdapterError:
+                if not getattr(self._backend, "rgb_pre_disabled", False):
+                    raise
+        if outputs is None:
+            blob, sized = preprocess_nchw(rgb)
+            if sized != (mh, mw):
+                raise AdapterError("preprocess size disagrees with K_model")
+            outputs = self._backend.run_all(blob)
         if len(outputs) < 2:
             raise AdapterError("DA3 must return depth_raw and sky")
         raw = np.squeeze(outputs[0])

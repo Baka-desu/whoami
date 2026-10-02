@@ -400,6 +400,48 @@ def test_seg_post_cpu_without_ir_weights() -> None:
     np.testing.assert_array_equal(ov_labels, numpy_labels)
 
 
+def test_rgb_pre_cpu_without_ir_weights() -> None:
+    """Pre graph only. No gitignored SegFormer or DA3 IR."""
+    ov = pytest.importorskip("openvino")
+    from ugv_perception.adapter.rugd import _resize_maps, preprocess_rgb
+    from ugv_perception.backend.openvino_gpu import (
+        OpenVinoGpuTensorBackend,
+        _compile_rgb_pre,
+    )
+    from ugv_perception.depth.geometry import MEAN, STD
+
+    core = ov.Core()
+    if not any(str(d).startswith("CPU") for d in core.available_devices):
+        pytest.skip("OpenVINO CPU device missing")
+    rng = np.random.default_rng(0)
+    rgb = rng.integers(0, 256, size=(4, 6, 3), dtype=np.uint8)
+    mean = (0.485, 0.456, 0.406)
+    std = (0.229, 0.224, 0.225)
+    pre = _compile_rgb_pre(core, "CPU", 4, 6, ((8, 8),), mean, std, clip_255=False)
+    blob = np.asarray(pre([rgb[None, ...]])[pre.output(0)], dtype=np.float32)
+    ref = preprocess_rgb(rgb, input_hw=(8, 8), mean=mean, std=std)
+    np.testing.assert_allclose(blob, ref, rtol=1e-4, atol=1e-4)
+
+    rgb2 = rng.integers(0, 256, size=(8, 10, 3), dtype=np.uint8)
+    steps = ((6, 8), (8, 12))
+    pre2 = _compile_rgb_pre(core, "CPU", 8, 10, steps, MEAN, STD, clip_255=True)
+    blob2 = np.asarray(pre2([rgb2[None, ...]])[pre2.output(0)], dtype=np.float32)
+    chw = np.transpose(rgb2, (2, 0, 1)).astype(np.float32)
+    for h, w in steps:
+        chw = np.clip(_resize_maps(chw, h, w), 0.0, 255.0)
+    mean_a = np.asarray(MEAN, dtype=np.float32).reshape(1, 3, 1, 1)
+    std_a = np.asarray(STD, dtype=np.float32).reshape(1, 3, 1, 1)
+    ref2 = (chw[None] / 255.0 - mean_a) / std_a
+    np.testing.assert_allclose(blob2, ref2, rtol=1e-4, atol=1e-4)
+
+    backend = OpenVinoGpuTensorBackend()
+    backend._core = core
+    backend.device = "CPU"
+    backend.rgb_pre_disabled = True
+    with pytest.raises(AdapterError, match="disabled"):
+        backend._rgb_pre(rgb, ((8, 8),), mean, std, clip_255=False)
+
+
 def test_openvino_cpu_forced_rugd_and_da3_without_product_picker() -> None:
     """Force CPU compile+infer on live IRs. Does not call the product picker."""
     import openvino as ov
