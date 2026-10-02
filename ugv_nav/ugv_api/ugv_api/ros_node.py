@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import dataclasses
 import threading
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -57,6 +58,17 @@ from ugv_api.state import StateStore
 from ugv_api.watches import Timeouts
 
 
+# The map thread is reported not alive when its 1 Hz timer has not ticked for this long (checked every
+# MAP_HEALTH_PERIOD_S on the gateway node).
+MAP_ALIVE_S = 3.0
+MAP_HEALTH_PERIOD_S = 0.5
+_LAST_REJECT_CHARS = 160
+
+
+def _short(text: str) -> str:
+    return text if len(text) <= _LAST_REJECT_CHARS else text[: _LAST_REJECT_CHARS - 3] + "..."
+
+
 def _stamp_ns(stamp) -> int:
     return int(stamp.sec) * 1_000_000_000 + int(stamp.nanosec)
 
@@ -85,6 +97,9 @@ class GatewayNode(Node):
         if not self.telemetry_hz > 0 or not estop_hz > 0:
             raise RuntimeError("telemetry_hz and e_stop_republish_hz must be > 0")
         cam_topic = str(p("camera_info_topic", "/camera/camera_info").value)
+        self._maps = maps
+        self._map_inputs: _MapInputs | None = None
+        self._map_error: str | None = None  # why the map inputs are off, when they are
         self.map_cfg = self._declare_map_config()
 
         self._store = store
@@ -120,16 +135,14 @@ class GatewayNode(Node):
         self._tf_listener = TransformListener(self._tf_buffer, self)
         self.create_timer(0.1, self._poll_tf)
 
-        self._map_inputs = (
-            _MapInputs(self, maps, self.map_cfg, self._tf_buffer, self._map) if maps is not None else None
-        )
-
         self._nav = ActionClient(self, NavigateToPose, str(p("navigate_action", "/navigate_to_pose").value))
         self._mode_clients = {
             "mapping": self.create_client(Empty, f"{self._rtabmap_ns}/set_mode_mapping"),
             "localize": self.create_client(Empty, f"{self._rtabmap_ns}/set_mode_localization"),
         }
         self.get_logger().info(f"operator gateway on http://{self.host}:{self.port}/api/v1")
+        if maps is not None:
+            self._start_map_inputs()  # last: nothing after it can raise and leave its context and thread behind
 
     def destroy_node(self) -> None:
         map_inputs = getattr(self, "_map_inputs", None)
@@ -173,16 +186,46 @@ class GatewayNode(Node):
 
     # ---- 3D map inputs ------------------------------------------------------------------------
     def _declare_map_config(self) -> MapConfig:
-        """Declare every `map.*` parameter (MapConfig holds the defaults and the types) and validate the lot."""
-        values = {}
-        for f in dataclasses.fields(MapConfig):
-            values[f.name] = type(f.default)(self.declare_parameter(f"map.{f.name}", f.default).value)
-        return MapConfig(**values)
+        """Declare every `map.*` parameter (MapConfig holds the defaults and the types) and validate the lot.
+
+        A map-only mistake must not take the gateway down with it: it carries the e-stop publisher and the §12
+        table. The error is logged, the HTTP side gets the default numbers and the map inputs stay off
+        (`map_inputs_alive: false`, the reason in `map_last_reject`)."""
+        try:
+            values = {}
+            for f in dataclasses.fields(MapConfig):
+                values[f.name] = type(f.default)(self.declare_parameter(f"map.{f.name}", f.default).value)
+            return MapConfig(**values)
+        except Exception as exc:  # noqa: BLE001 - see the docstring
+            self._map_error = f"map inputs are off, invalid map configuration: {type(exc).__name__}: {exc}"
+            self.get_logger().error(self._map_error)
+            return MapConfig()
+
+    def _start_map_inputs(self) -> None:
+        # the timer first: if it cannot be created nothing is running yet that would have to be undone
+        self.create_timer(MAP_HEALTH_PERIOD_S, self._publish_map_health)
+        if self._map_error is None:
+            try:
+                self._map_inputs = _MapInputs(self, self._maps, self.map_cfg, self._tf_buffer, self._map)
+            except Exception as exc:  # noqa: BLE001 - _MapInputs has already taken down what it started
+                self._map_error = f"map inputs are off, they failed to start: {type(exc).__name__}: {exc}"
+                self.get_logger().error(self._map_error)
+        self._publish_map_health()
+
+    def _publish_map_health(self) -> None:
+        """The gateway's side of the map inputs' health, on the gateway's executor (see _MapInputs.publish_health);
+        with the inputs off it says so and why."""
+        if self._map_inputs is not None:
+            self._map_inputs.publish_health()
+            return
+        self._maps.put_stats("map_inputs", {"map_inputs_alive": False})
+        self._maps.put_stats("gateway", {"map_rejects": 0, "map_restarts": 0,
+                                         "map_last_reject": _short(self._map_error or "no map inputs")})
 
     @property
     def map_rejects(self) -> dict[str, int]:
         """How many messages (or frames) each map input has refused or skipped, by input name."""
-        return dict(self._map_inputs.rejects) if self._map_inputs is not None else {}
+        return self._map_inputs.reject_counts() if self._map_inputs is not None else {}
 
     # ---- e-stop (§3.1 level 1) ----------------------------------------------------------------
     @property
@@ -290,11 +333,15 @@ class _MapInputs:
     participant) spun by a single-threaded executor on a thread of its own; every subscription and the 1 Hz
     demand timer share one mutually exclusive callback group on it. Callback groups and executor threads alone
     were measured not to be enough: with only a separate group on the gateway node, a 1 M point (32 MB) cloud
-    at 2 Hz made the tf watch stale for 1 to 3 s in three of six 30 s runs (worst age 3.07 s), although no
+    at 2 Hz made the tf watch stale for about 1 to 3 s in 6 of 10 runs of 30 s (worst age 3.07 s), although no
     callback ran long. The delay sits below rclpy, in the participant that receives the big sample: reliable
     topics of the same participant (TF) wait behind it, a probe process on its own participant saw none of it.
-    With the map inputs on their own participant the same six runs had a worst tf age of 0.20 s. The node
-    shares nothing with the gateway node but the TF buffer (thread-safe), the store, and the clock reading.
+    With the map inputs on their own participant 13 of 13 runs had a worst tf age of 0.17 to 0.39 s. The node
+    shares nothing with the gateway node but the TF buffer (thread-safe), the stores and the clock reading.
+
+    The second context is initialised with `args=[]` and its node created with `use_global_arguments=False`:
+    without that it falls back to `sys.argv`, which under `ros2 launch` holds `-r __node:=ugv_api` (the map node
+    would be a second /ugv_api) and the gateway's parameters (`use_sim_time`). Its timer runs on the system clock.
 
     The executor must stay single-threaded: callbacks (including the timer that destroys subscriptions) then
     run on the thread that builds the wait set. With a MultiThreadedExecutor a `destroy_subscription` from a
@@ -302,6 +349,12 @@ class _MapInputs:
     the wait set; the second entry raises InvalidHandle out of `spin` (reproduced within seconds with a
     toggling demand) and ends the thread. One group and one thread also mean these callbacks never run
     concurrently, so `_subs` and the elevation pairer need no lock.
+
+    Health. A map thread that hangs or dies cannot report that itself, so the gateway does it
+    (`publish_health`, called by a timer of the gateway node): `map_inputs_alive` is false when the thread is
+    gone or its demand timer has not ticked for MAP_ALIVE_S, and stale statistics are expired there too. What
+    the map thread can report it does through the `gateway` statistics source: `map_rejects` (messages and
+    frames refused or skipped), `map_restarts` (spin restarts by the supervisor) and `map_last_reject`.
 
     A callback does the minimum: copy out what the layer's source needs (ugv_api.mapsources, pure functions)
     and `MapStore.put` it. Encoding happens later, on the HTTP thread, only for a layer somebody requests.
@@ -315,6 +368,9 @@ class _MapInputs:
     when all of them are), VOLATILE when there is none yet, and the timer re-creates a subscription whose
     publisher turned out to offer something else. Losing the publisher does not change anything: the
     subscription is kept for when it comes back.
+
+    Frames: cloud, trajectory, grid and elevation are served as map-frame layers, so a message whose
+    `frame_id` is neither the map frame nor empty (a local costmap is in `odom`) is refused and counted.
     """
 
     ELEVATION_FIELDS = ("x", "y", "z", "confidence", "obstacle_h")
@@ -325,44 +381,77 @@ class _MapInputs:
         self._maps = maps
         self._cfg = cfg
         self._tf = tf_buffer
-        self._frame = map_frame
+        self._frame = map_frame.lstrip("/")
         self._closing = threading.Event()
-        self._context = Context()
-        rclpy.init(context=self._context, domain_id=gateway.context.get_domain_id(),
-                   signal_handler_options=SignalHandlerOptions.NO)
-        self._node = rclpy.create_node("ugv_api_map", context=self._context, enable_rosout=False,
-                                       start_parameter_services=False)
-        self._executor = SingleThreadedExecutor(context=self._context)
-        self._executor.add_node(self._node)
-        self._group = MutuallyExclusiveCallbackGroup()
-        self._pairer = ms.ElevationPairer()
-        self._subs: dict[str, tuple[Any, DurabilityPolicy]] = {}
-        self._gateway_stats: dict[str, int] = {}
-        self._stats_seen_ns: dict[str, int] = {}
+        # guards the counters and the stats bookkeeping below; held for dict updates and put_stats only, never
+        # across a ROS call, so the gateway-side health check can always take it
+        self._state_lock = threading.Lock()
         self.rejects: dict[str, int] = {}
+        self.restarts = 0
+        self._last_reject: str | None = None
+        self._gateway_stats: dict[str, int] = {}
+        self._stats_seen: dict[str, float] = {}  # source -> time.monotonic() of its last message
+        self._last_tick = time.monotonic()
+        self._pairer = ms.ElevationPairer()
+        self._pairer_seen = {"unpaired": 0, "unstamped": 0}
+        self._subs: dict[str, tuple[Any, DurabilityPolicy]] = {}
+        self._node: Node | None = None
+        self._executor: SingleThreadedExecutor | None = None
+        self._thread: threading.Thread | None = None
+        self._closed = False
+        self._context = Context()
+        try:
+            rclpy.init(context=self._context, args=[], domain_id=gateway.context.get_domain_id(),
+                       signal_handler_options=SignalHandlerOptions.NO)
+            self._node = rclpy.create_node("ugv_api_map", context=self._context, enable_rosout=False,
+                                           start_parameter_services=False, use_global_arguments=False)
+            self._executor = SingleThreadedExecutor(context=self._context)
+            self._executor.add_node(self._node)
+            self._group = MutuallyExclusiveCallbackGroup()
 
-        c = cfg
-        guard = self._guarded
-        self._specs: dict[str, tuple[str, type, Callable[[Any], None]]] = {
-            "cloud": (c.cloud_topic, PointCloud2, guard("cloud", self._on_cloud)),
-            "trajectory": (c.trajectory_topic, Path, guard("trajectory", self._on_path)),
-            "elevation_cloud": (c.elevation_cloud_topic, PointCloud2, guard("elevation_cloud", self._on_elevation_cloud)),
-            "elevation_obstacles": (c.elevation_obstacles_topic, OccupancyGrid,
-                                    guard("elevation_obstacles", self._on_elevation_grid)),
-            "grid": (c.grid_topic, OccupancyGrid, guard("grid", self._on_grid)),
-            "depth": (c.depth_topic, Image, guard("depth", self._on_depth)),
-            "camera": (c.camera_topic, CompressedImage, guard("camera", self._on_camera)),
-        }
-        # reliable + volatile matches a latched publisher (/ugv/map/stats) and a plain one alike
-        stats_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE)
-        for source, topic in (("map", c.map_stats_topic), ("perception", c.perception_stats_topic)):
-            self._node.create_subscription(String, topic, guard(f"{source}_stats", self._stats_callback(source)),
-                                           stats_qos, callback_group=self._group)
-        self._node.create_timer(1.0, guard("demand_timer", self._tick), callback_group=self._group)
-        self._thread = threading.Thread(target=self._spin, name="ugv_api_map_ros", daemon=True)
-        self._thread.start()
+            c = cfg
+            guard = self._guarded
+            self._specs: dict[str, tuple[str, type, Callable[[Any], None]]] = {
+                "cloud": (c.cloud_topic, PointCloud2, guard("cloud", self._on_cloud)),
+                "trajectory": (c.trajectory_topic, Path, guard("trajectory", self._on_path)),
+                "elevation_cloud": (c.elevation_cloud_topic, PointCloud2,
+                                    guard("elevation_cloud", self._on_elevation_cloud)),
+                "elevation_obstacles": (c.elevation_obstacles_topic, OccupancyGrid,
+                                        guard("elevation_obstacles", self._on_elevation_grid)),
+                "grid": (c.grid_topic, OccupancyGrid, guard("grid", self._on_grid)),
+                "depth": (c.depth_topic, Image, guard("depth", self._on_depth)),
+                "camera": (c.camera_topic, CompressedImage, guard("camera", self._on_camera)),
+            }
+            # reliable + volatile matches a latched publisher (/ugv/map/stats) and a plain one alike
+            stats_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE)
+            for source, topic in (("map", c.map_stats_topic), ("perception", c.perception_stats_topic)):
+                self._node.create_subscription(String, topic, guard(f"{source}_stats", self._stats_callback(source)),
+                                               stats_qos, callback_group=self._group)
+            self._node.create_timer(1.0, guard("demand_timer", self._tick), callback_group=self._group)
+            with self._state_lock:
+                self._publish_gateway_locked()  # the health keys exist from the first moment
+            self._thread = threading.Thread(target=self._spin, name="ugv_api_map_ros", daemon=True)
+            self._last_tick = time.monotonic()
+            self._thread.start()
+        except BaseException:
+            self._teardown()  # a context left running would hold a DDS participant until the process ends
+            raise
 
+    # ---- thread and lifetime ------------------------------------------------------------------
     def _spin(self) -> None:
+        try:
+            self._spin_supervised()
+        except BaseException as exc:  # noqa: BLE001 - nothing may end this thread without a trace
+            self._thread_ended(f"{type(exc).__name__}: {exc}")
+        else:
+            if not self._closing.is_set():
+                self._thread_ended("the map executor stopped")
+
+    def _thread_ended(self, why: str) -> None:
+        self._reject("map_thread_exit", why)
+        self._gw.get_logger().error(f"map input thread ended ({why}): the map layers stop updating")
+
+    def _spin_supervised(self) -> None:
         while not self._closing.is_set():
             try:
                 self._executor.spin()
@@ -370,23 +459,63 @@ class _MapInputs:
             except (KeyboardInterrupt, ExternalShutdownException):
                 return
             except Exception as exc:  # noqa: BLE001 - the map inputs are not worth a dead thread, and not a dead gateway
-                self._reject("map_executor", f"{type(exc).__name__}: {exc}")
+                with self._state_lock:
+                    self.restarts += 1
+                self._reject("map_executor", f"{type(exc).__name__}: {exc} (spin restarted)")
                 self._closing.wait(1.0)
 
     def close(self) -> None:
         """Stop the map executor and take the second participant down (GatewayNode.destroy_node)."""
         self._closing.set()
-        self._executor.shutdown()
-        self._thread.join(timeout=2.0)
-        self._node.destroy_node()
-        self._context.try_shutdown()
+        self._teardown()
+
+    def _teardown(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        steps = [
+            lambda: self._executor.shutdown() if self._executor is not None else None,
+            lambda: self._thread.join(timeout=2.0) if self._thread is not None and self._thread.is_alive() else None,
+            lambda: self._node.destroy_node() if self._node is not None else None,
+            self._context.try_shutdown,
+        ]
+        for step in steps:
+            try:
+                step()
+            except Exception as exc:  # noqa: BLE001 - a later step must still run
+                self._gw.get_logger().warning(f"map inputs teardown: {type(exc).__name__}: {exc}")
+
+    # ---- health: evaluated by the gateway, not by the thread it is about ------------------------
+    def publish_health(self) -> None:
+        """Called by a timer of the gateway node. A hung or dead map thread cannot say so itself, and cannot
+        expire the statistics it holds either, so both are decided here, on the gateway's executor."""
+        now = time.monotonic()
+        alive = self._thread is not None and self._thread.is_alive() and now - self._last_tick <= MAP_ALIVE_S
+        self._maps.put_stats("map_inputs", {"map_inputs_alive": alive})
+        self._expire_stats(now)
+
+    def reject_counts(self) -> dict[str, int]:
+        with self._state_lock:
+            return dict(self.rejects)
 
     # ---- bookkeeping --------------------------------------------------------------------------
-    def _reject(self, name: str, why: str) -> None:
-        """Count a refused message or skipped frame; log the first one of each kind only."""
-        n = self.rejects.get(name, 0) + 1
-        self.rejects[name] = n
-        if n == 1:
+    def _publish_gateway_locked(self) -> None:
+        """Put the gateway's own statistics. The caller holds `_state_lock`."""
+        values: dict[str, Any] = dict(self._gateway_stats)
+        values["map_rejects"] = sum(self.rejects.values())
+        values["map_restarts"] = self.restarts
+        values["map_last_reject"] = self._last_reject
+        self._maps.put_stats("gateway", values)
+
+    def _reject(self, name: str, why: str, n: int = 1) -> None:
+        """Count a refused message or skipped frame and remember it as the last one; log the first one of each
+        kind only. All of it is in the `gateway` statistics, which is how an operator sees it."""
+        with self._state_lock:
+            total = self.rejects.get(name, 0) + n
+            self.rejects[name] = total
+            self._last_reject = _short(f"{name}: {why}")
+            self._publish_gateway_locked()
+        if total == n:
             self._gw.get_logger().warning(f"map input '{name}': {why} (later ones are counted, not logged)")
 
     def _guarded(self, name: str, fn: Callable[..., None]) -> Callable[..., None]:
@@ -405,17 +534,25 @@ class _MapInputs:
         return ms.stamp_seconds(msg.header.stamp.sec, msg.header.stamp.nanosec, fallback_s=self._gw.now_ns() / 1e9)
 
     def _count(self, key: str, value: int) -> None:
-        self._gateway_stats[key] = int(value)
-        self._maps.put_stats("gateway", dict(self._gateway_stats))
+        with self._state_lock:
+            self._gateway_stats[key] = int(value)
+            self._publish_gateway_locked()
+
+    def _in_map_frame(self, name: str, msg: Any) -> bool:
+        """False (and counted) for a message in some other frame; an empty frame_id is taken as the map frame."""
+        frame = msg.header.frame_id.lstrip("/")
+        if frame in ("", self._frame):
+            return True
+        self._reject(f"frame_{name}", f"{name} is in frame '{msg.header.frame_id}', not '{self._frame}', not shown")
+        return False
 
     # ---- demand timer -------------------------------------------------------------------------
     def _tick(self) -> None:
-        now_ns = self._gw.now_ns()
-        if self._maps.wanted(now_ns / 1e9, self._cfg.idle_timeout_s):
+        self._last_tick = time.monotonic()  # what the gateway's liveness check reads
+        if self._maps.wanted(self._gw.now_ns() / 1e9, self._cfg.idle_timeout_s):
             self._ensure_subscriptions()
         else:
             self._drop_subscriptions()
-        self._expire_stats(now_ns)
 
     def _offered_durability(self, topic: str) -> DurabilityPolicy | None:
         """What the topic's publishers offer: None without a publisher, TRANSIENT_LOCAL when all of them latch."""
@@ -449,12 +586,14 @@ class _MapInputs:
         self._subs.clear()
         self._pairer.reset()
 
-    def _expire_stats(self, now_ns: int) -> None:
-        limit_ns = int(self._cfg.stats_stale_s * 1e9)
-        for source, seen_ns in list(self._stats_seen_ns.items()):
-            if now_ns - seen_ns > limit_ns:
-                self._maps.put_stats(source, {})  # a source that went quiet must not keep showing old numbers
-                del self._stats_seen_ns[source]
+    def _expire_stats(self, now: float) -> None:
+        """Drop a stats source that has been silent for `stats_stale_s` (monotonic seconds): it must not keep
+        showing old numbers."""
+        with self._state_lock:
+            for source, seen in list(self._stats_seen.items()):
+                if now - seen > self._cfg.stats_stale_s:
+                    self._maps.put_stats(source, {})
+                    del self._stats_seen[source]
 
     # ---- statistics ---------------------------------------------------------------------------
     def _stats_callback(self, source: str) -> Callable[[String], None]:
@@ -463,8 +602,9 @@ class _MapInputs:
             if values is None:
                 self._reject(f"{source}_stats", "not a JSON object, ignored")
                 return
-            self._maps.put_stats(source, values)
-            self._stats_seen_ns[source] = self._gw.now_ns()
+            with self._state_lock:
+                self._maps.put_stats(source, values)
+                self._stats_seen[source] = time.monotonic()
 
         return on_stats
 
@@ -477,19 +617,28 @@ class _MapInputs:
             "n_points": msg.width * msg.height,
             "is_bigendian": msg.is_bigendian,
             "data": msg.data,
+            "width": msg.width,
+            "height": msg.height,
+            "row_step": msg.row_step,
         }
 
     def _on_cloud(self, msg: PointCloud2) -> None:
+        if not self._in_map_frame("cloud", msg):
+            return
         source = ms.cloud_source(**self._cloud_args(msg))  # a view of msg.data, which rclpy never reuses
         self._maps.put("cloud", source, self._stamp_s(msg))
         self._count("cloud_source_points", source["n_points"])
 
     def _on_path(self, msg: Path) -> None:
+        if not self._in_map_frame("trajectory", msg):
+            return
         rows = [(p.pose.position.x, p.pose.position.y, p.pose.position.z, p.pose.orientation.x,
                  p.pose.orientation.y, p.pose.orientation.z, p.pose.orientation.w) for p in msg.poses]
         self._maps.put("trajectory", ms.trajectory_source(rows), self._stamp_s(msg))
 
     def _on_grid(self, msg: OccupancyGrid) -> None:
+        if not self._in_map_frame("grid", msg):
+            return
         info, o = msg.info, msg.info.origin
         source = ms.grid_source(
             data=msg.data, width=info.width, height=info.height, resolution=info.resolution,
@@ -498,19 +647,36 @@ class _MapInputs:
         self._maps.put("grid", source, self._stamp_s(msg))
 
     def _on_elevation_cloud(self, msg: PointCloud2) -> None:
+        if not self._in_map_frame("elevation_cloud", msg):
+            return
         columns = ms.cloud_columns(**self._cloud_args(msg), names=self.ELEVATION_FIELDS)
-        self._count("elevation_known_cells", len(columns["x"]))
-        source = self._pairer.add_cloud(_stamp_ns(msg.header.stamp), columns)
-        if source is not None:
-            self._maps.put("elevation", source, self._stamp_s(msg))
+        self._elevation_pair(self._pairer.add_cloud(_stamp_ns(msg.header.stamp), columns), msg)
 
     def _on_elevation_grid(self, msg: OccupancyGrid) -> None:
+        if not self._in_map_frame("elevation_obstacles", msg):
+            return
         info = msg.info
         source = self._pairer.add_grid(
             _stamp_ns(msg.header.stamp), resolution=info.resolution, width=info.width, height=info.height,
             origin_x=info.origin.position.x, origin_y=info.origin.position.y)
+        self._elevation_pair(source, msg)
+
+    def _elevation_pair(self, source: dict[str, Any] | None, msg: Any) -> None:
+        """What the pairer made of the half that just arrived: a source to store, and/or halves it had to drop,
+        which are counted as rejects (a publisher that stamps the halves differently must not look like a layer
+        that is merely slow). Known cells are counted only for a pair that was emitted."""
+        for attr, name, why in (
+            ("unstamped", "elevation_unstamped", "an elevation half has no header.stamp and cannot be paired"),
+            ("unpaired", "elevation_unpaired", "an elevation half was replaced before a half with its stamp "
+                                               "arrived: the cloud and the obstacle grid are stamped differently"),
+        ):
+            now = getattr(self._pairer, attr)
+            if now != self._pairer_seen[attr]:
+                delta, self._pairer_seen[attr] = now - self._pairer_seen[attr], now
+                self._reject(name, why, delta)
         if source is not None:
             self._maps.put("elevation", source, self._stamp_s(msg))
+            self._count("elevation_known_cells", len(source["x"]))
 
     def _on_camera(self, msg: CompressedImage) -> None:
         self._maps.put("camera", ms.jpeg_source(msg.data), self._stamp_s(msg))

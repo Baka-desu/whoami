@@ -12,6 +12,7 @@ import json
 import math
 import os
 import socket
+import sys
 import threading
 import time
 
@@ -28,13 +29,16 @@ from rclpy.context import Context  # noqa: E402
 from rclpy.executors import MultiThreadedExecutor  # noqa: E402
 from rclpy.parameter import Parameter  # noqa: E402
 from rclpy.qos import DurabilityPolicy, QoSProfile  # noqa: E402
+from rclpy.time import Time  # noqa: E402
 from sensor_msgs.msg import CameraInfo, CompressedImage, Image, PointCloud2, PointField  # noqa: E402
 from std_msgs.msg import Bool, String  # noqa: E402
 from tf2_ros import TransformBroadcaster  # noqa: E402
 
 from ugv_api import mapcodec as codec  # noqa: E402
+from ugv_api import ros_node  # noqa: E402
 from ugv_api.app import create_app  # noqa: E402
 from ugv_api.goals import GoalRegistry  # noqa: E402
+from ugv_api.mapsources import MapConfig  # noqa: E402
 from ugv_api.mapstore import MapStore  # noqa: E402
 from ugv_api.ros_node import GatewayNode  # noqa: E402
 from ugv_api.state import StateStore  # noqa: E402
@@ -50,6 +54,10 @@ ELEV_CLOUD, ELEV_GRID = "/ugv/elevation/cloud", "/ugv/elevation/obstacles"
 GRID, DEPTH, CAMERA = "/global_costmap/costmap", "/perception/depth/image", "/image_raw/compressed"
 MAP_STATS, PERCEPTION_STATS = "/ugv/map/stats", "/ugv/perception/stats"
 HEAVY_TOPICS = (CLOUD, PATH, ELEV_CLOUD, ELEV_GRID, GRID, DEPTH, CAMERA)
+GATEWAY_STAT_KEYS = {"cloud_source_points", "elevation_known_cells", "map_inputs_alive", "map_rejects",
+                     "map_restarts", "map_last_reject"}
+# A map thread that stopped ticking is reported not alive after MAP_ALIVE_S; the gateway checks every 0.5 s.
+MAP_ALIVE_BOUND = ros_node.MAP_ALIVE_S + 3.0
 
 # What Inputs broadcasts: map -> base_link at POSE, base_link -> camera_optical_frame at CAMERA_MOUNT, and a
 # CameraInfo for an 8 x 6 camera.
@@ -167,6 +175,7 @@ def graph():
     server.should_exit = True
     serve.join(timeout=5)
     ex.shutdown()
+    spin.join(timeout=5)  # nothing may still be running on the nodes when they are destroyed
     gw.destroy_node()
     pub_node.destroy_node()
     rclpy.shutdown()
@@ -180,6 +189,76 @@ def _wait(pred, timeout=5.0):
             return v
         time.sleep(0.05)
     return pred()
+
+
+@contextlib.contextmanager
+def own_participant(name):
+    """A node in a context of its own: a DDS participant the gateway has not met yet. Not spun, so it can be
+    destroyed again (destroying an entity under a spinning executor can raise InvalidHandle out of rclpy)."""
+    context = Context()
+    rclpy.init(context=context)
+    node = rclpy.create_node(name, context=context)
+    try:
+        yield node
+    finally:
+        node.destroy_node()
+        context.try_shutdown()
+
+
+@contextlib.contextmanager
+def bare_gateway(*overrides, args=(), spin=True):
+    """A gateway of its own, in a context of its own, with its own store and no HTTP server: yields (gw, maps).
+    `args` are the gateway's ROS arguments (what `ros2 launch` puts after --ros-args)."""
+    os.environ.setdefault("ROS_DOMAIN_ID", "57")
+    # Like `ros2 launch` / `ros2 run`: main() calls rclpy.init() without arguments, so they come from sys.argv, and
+    # every later rclpy.init() without arguments in the process (the map side's) reads the same ones.
+    saved_argv = sys.argv
+    sys.argv = ["api_gateway", *args]
+    context = Context()
+    maps = MapStore()
+    gw = executor = spinner = None
+    try:
+        rclpy.init(context=context)
+        gw = GatewayNode(StateStore(), GoalRegistry(), maps, context=context, parameter_overrides=list(overrides))
+        sys.argv = saved_argv
+        if spin:
+            executor = MultiThreadedExecutor(context=context)
+            executor.add_node(gw)
+            spinner = threading.Thread(target=executor.spin, daemon=True)
+            spinner.start()
+        yield gw, maps
+    finally:
+        if executor is not None:
+            executor.shutdown()
+            spinner.join(5.0)  # nothing may still be running on the node when it is destroyed
+        if gw is not None:
+            gw.destroy_node()
+        context.try_shutdown()
+        sys.argv = saved_argv
+
+
+def _has_estop_publisher(gw):
+    # not asserted: a latched True from a throwaway gateway would trip the e-stop watch of the module's gateway
+    def listed():  # the graph learns of an entity a moment after it is created
+        return "/ugv/e_stop" in {name for name, _ in gw.get_publisher_names_and_types_by_node(gw.get_name(), "/")}
+
+    return bool(_wait(listed, timeout=5.0))
+
+
+class _MapThreadGone(BaseException):
+    """Not an Exception: nothing on the map side is allowed to swallow it."""
+
+
+def _on_map_thread(gw, fn):
+    """Run `fn` once on the gateway's map thread, in the map callback group: while it runs, that group's demand
+    timer (the thread's liveness tick) cannot."""
+    inputs = gw._map_inputs
+
+    def once():
+        timer.cancel()
+        fn()
+
+    timer = inputs._node.create_timer(0.05, once, callback_group=inputs._group)
 
 
 def _safety(c):
@@ -217,6 +296,7 @@ def test_heartbeat_that_stops_trips_watches(graph):
         # milliseconds before the receipt-based ones (localization, nav2), and a poll can land in between.
         tripped = _wait(lambda: (lambda b: b if expected <= tripped_names(b) else None)(_safety(c)), timeout=3.0)
         assert tripped, f"watches stayed ok after inputs stopped: tripped {tripped_names(_safety(c))}"
+        assert tripped["ok"] is False
     finally:
         inputs.healthy = True
     assert _wait(lambda: _safety(c)["ok"])
@@ -398,9 +478,9 @@ def make_rgb_cloud(xyz, rgb, stamp, frame="map"):
     return msg
 
 
-def make_path(rows, stamp):
+def make_path(rows, stamp, frame="map"):
     msg = Path()
-    msg.header.stamp, msg.header.frame_id = stamp, "map"
+    msg.header.stamp, msg.header.frame_id = stamp, frame
     for x, y, z, qx, qy, qz, qw in ((float(v) for v in row) for row in rows):  # message fields take floats only
         ps = PoseStamped()
         ps.header.frame_id = "map"
@@ -411,9 +491,9 @@ def make_path(rows, stamp):
     return msg
 
 
-def make_elevation_cloud(columns, stamp):
+def make_elevation_cloud(columns, stamp, frame="map"):
     msg = PointCloud2()
-    msg.header.stamp, msg.header.frame_id = stamp, "map"
+    msg.header.stamp, msg.header.frame_id = stamp, frame
     n = len(columns[0])
     msg.height, msg.width, msg.point_step, msg.is_dense, msg.row_step = 1, n, 20, True, 20 * n
     msg.fields = _fields("x", "y", "z", "confidence", "obstacle_h")
@@ -421,9 +501,9 @@ def make_elevation_cloud(columns, stamp):
     return msg
 
 
-def make_grid(cells, resolution, origin, stamp, yaw=0.0):
+def make_grid(cells, resolution, origin, stamp, yaw=0.0, frame="map"):
     msg = OccupancyGrid()
-    msg.header.stamp, msg.header.frame_id = stamp, "map"
+    msg.header.stamp, msg.header.frame_id = stamp, frame
     msg.info.resolution, msg.info.height, msg.info.width = resolution, cells.shape[0], cells.shape[1]
     msg.info.origin.position.x, msg.info.origin.position.y = origin
     msg.info.origin.orientation.z, msg.info.origin.orientation.w = math.sin(yaw / 2), math.cos(yaw / 2)
@@ -530,7 +610,7 @@ def test_pose_resource_and_event_report_the_published_transform(graph):
 
 
 def test_elevation_is_built_only_from_a_cloud_and_a_grid_with_equal_stamps(graph):
-    c, pubs, node = graph["client"], graph["pubs"], graph["pub_node"]
+    c, pubs, node, gw = graph["client"], graph["pubs"], graph["pub_node"], graph["gw"]
     cols = [np.array(v, dtype=np.float32) for v in (
         [-1.75, -1.25, -0.25],  # x: cell columns 0 1 3 of the grid below
         [1.75, 2.25, 3.25],  # y: rows 0 1 3
@@ -543,23 +623,35 @@ def test_elevation_is_built_only_from_a_cloud_and_a_grid_with_equal_stamps(graph
     s2 = pubs.now()  # a later stamp: same publishers, different sample
     assert (s1.sec, s1.nanosec) != (s2.sec, s2.nanosec)
     cells = np.zeros((6, 8), dtype=np.int8)
+    unpaired_before = gw.map_rejects.get("elevation_unpaired", 0)
+
+    def served():  # judged by what is served, not by a seq: a latched replay of an older pair also bumps that
+        r = c.get("/map/elevation")
+        return codec.decode_elevation(r.content) if r.status_code == 200 else None
+
+    def ours():
+        out = served()
+        return out if out and out["known_cells"] == 3 and out["resolution_m"] == pytest.approx(0.5) else None
+
     with watching(c):
         assert _wait(lambda: _subscribed(node, HEAVY_TOPICS), timeout=8.0)
-        before = _map_status(c)["seq"]["elevation"]
         pubs.elev_cloud.publish(make_elevation_cloud(cols, s1))
-        pubs.elev_grid.publish(make_grid(cells, 0.5, (-2.0, 1.5), s2))  # stamps differ: no pair
+        pubs.elev_grid.publish(make_grid(cells, 0.25, (5.0, 5.0), s2))  # stamps differ: no pair (and its own geometry)
         time.sleep(0.8)
-        assert _map_status(c)["seq"]["elevation"] == before, "an unequal pair was used"
+        wrong = served()
+        assert wrong is None or wrong["resolution_m"] != pytest.approx(0.25), "an unequal pair was used"
         pubs.elev_grid.publish(make_grid(cells, 0.5, (-2.0, 1.5), s1))  # now they match
-        assert _wait(lambda: _map_status(c)["seq"]["elevation"] == before + 1)
-        out = codec.decode_elevation(_fetch(c, "/map/elevation").content)
+        out = _wait(ours, timeout=8.0)
         stats = _map_status(c)["stats"]
-    assert out["known_cells"] == 3 and out["resolution_m"] == pytest.approx(0.5)
+    assert out, "the matching pair was never served"
     assert (out["origin_x"], out["origin_y"]) == pytest.approx((-2.0, 1.5))
     assert out["heights"][0, 0] == pytest.approx(0.5) and out["heights"][1, 1] == pytest.approx(1.0)
     assert out["heights"][3, 3] == pytest.approx(1.5)
     assert out["obstacle"][1, 1] == 3  # 0.15 m in 5 cm units
     assert stats["elevation_known_cells"] == 3
+    # the stamp-s2 grid was replaced before it found its cloud: a publisher that stamps the halves differently
+    # shows up as rejects, not as a silent 503
+    assert gw.map_rejects.get("elevation_unpaired", 0) > unpaired_before
 
 
 def test_a_latched_costmap_is_received_when_its_publisher_appears_after_the_subscription(graph):
@@ -573,17 +665,11 @@ def test_a_latched_costmap_is_received_when_its_publisher_appears_after_the_subs
         # the gateway already knows is matched at once, before its first sample, and then the reader's durability
         # would not matter. A new participant is discovered only after the single latched sample was written, so
         # only a transient-local subscription receives it.
-        context = Context()
-        rclpy.init(context=context)
-        other = rclpy.create_node("ugv_api_test_costmap", context=context)
-        try:
+        with own_participant("ugv_api_test_costmap") as other:
             pub = other.create_publisher(OccupancyGrid, GRID,
                                          QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
             pub.publish(make_grid(cells, 0.25, (-0.5, 1.0), other.get_clock().now().to_msg(), yaw=0.5))  # once
             out = codec.decode_grid(_fetch(c, "/map/grid", timeout=12.0).content)
-        finally:
-            other.destroy_node()
-            context.try_shutdown()
     assert out["cells"].tolist() == cells.tolist()
     assert out["resolution_m"] == pytest.approx(0.25) and (out["origin_x"], out["origin_y"]) == pytest.approx((-0.5, 1.0))
     assert out["origin_yaw"] == pytest.approx(0.5, abs=1e-6)
@@ -623,15 +709,21 @@ def test_live_is_skipped_without_a_transform_but_depth_still_updates(graph):
     c, pubs, gw = graph["client"], graph["pubs"], graph["gw"]
     depth = np.full((CAM_H, CAM_W), 2.0, dtype=np.float32)
     with watching(c):
-        before = _map_status(c)["seq"]
+        before = _map_status(c)
+        rejects_before = gw.map_rejects.get("live_no_transform", 0)
         deadline = time.monotonic() + 8.0
-        while time.monotonic() < deadline and _map_status(c)["seq"]["depth"] < before["depth"] + 3:
+        while time.monotonic() < deadline and _map_status(c)["seq"]["depth"] < before["seq"]["depth"] + 3:
             pubs.depth.publish(make_depth("no_such_frame", pubs.now(), depth))
             time.sleep(0.1)
-        after = _map_status(c)["seq"]
-    assert after["depth"] >= before["depth"] + 3
-    assert after["live"] == before["live"], "camera-frame points were published as map-frame points"
-    assert gw.map_rejects.get("live_no_transform", 0) >= 1
+        after = _map_status(c)
+        assert _wait(lambda: gw.map_rejects.get("live_no_transform", 0) > rejects_before)
+        stats = _wait(lambda: (lambda s: s if s["map_rejects"] > before["stats"]["map_rejects"] else None)(
+            _map_status(c)["stats"]))
+    assert after["seq"]["depth"] >= before["seq"]["depth"] + 3
+    assert after["seq"]["live"] == before["seq"]["live"], "camera-frame points were published as map-frame points"
+    # the skipped frames are visible to the operator, not only in a test-only property: counted and named
+    assert stats, _map_status(c)["stats"]
+    assert "live_no_transform" in stats["map_last_reject"]
 
 
 def test_camera_jpeg_is_served_as_received_and_a_non_jpeg_is_refused(graph):
@@ -645,15 +737,14 @@ def test_camera_jpeg_is_served_as_received_and_a_non_jpeg_is_refused(graph):
 
     with watching(c):
         r = _fetch(c, "/map/camera", publish=lambda: pubs.camera.publish(frame(jpeg)))
-        time.sleep(0.3)  # let a JPEG still in flight land before the seq is read
-        before = _map_status(c)["seq"]["camera"]
+        rejects_before = gw.map_rejects.get("camera", 0)
         for _ in range(5):
             pubs.camera.publish(frame(b"\x89PNG\r\n\x1a\n-not-a-jpeg"))
             time.sleep(0.1)
-        assert _wait(lambda: gw.map_rejects.get("camera", 0) >= 1)
-        after = _map_status(c)["seq"]["camera"]
+        assert _wait(lambda: gw.map_rejects.get("camera", 0) > rejects_before)
+        again = c.get("/map/camera")
     assert r.headers["content-type"] == "image/jpeg" and r.content == jpeg
-    assert after == before  # the PNG never replaced the JPEG
+    assert again.status_code == 200 and again.content == jpeg  # the PNG never replaced the JPEG
 
 
 def test_stats_from_both_sources_merge_malformed_json_is_ignored_and_silence_expires(graph):
@@ -687,5 +778,228 @@ def test_stats_from_both_sources_merge_malformed_json_is_ignored_and_silence_exp
     # silence: nothing more is published; both sources are dropped after STATS_STALE_S
     assert _wait(lambda: "keyframes" not in _map_status(c)["stats"] and "depth_hz" not in _map_status(c)["stats"],
                  timeout=STATS_STALE_S + 6.0)
-    # only the gateway's own statistics (they describe retained layers) outlive the silence
-    assert set(_map_status(c)["stats"]) <= {"cloud_source_points", "elevation_known_cells"}
+    # only the gateway's own statistics (retained layers, and the health of the map inputs) outlive the silence
+    assert set(_map_status(c)["stats"]) <= GATEWAY_STAT_KEYS
+
+
+# ----------------------------------------------------------------------------- the map side's own second context
+# `ros2 launch` starts the gateway with `--ros-args -r __node:=ugv_api --params-file ...`. The map inputs run in a
+# context of their own and must not pick any of that up: not the rename (two nodes called /ugv_api) and not the
+# parameters (use_sim_time).
+
+
+@pytest.mark.parametrize("renamed", ["ugv_api", "gateway_renamed"])
+def test_the_map_node_does_not_inherit_the_gateways_ros_arguments(renamed):
+    args = ["--ros-args", "-r", f"__node:={renamed}", "-p", "use_sim_time:=true"]
+    with bare_gateway(args=args, spin=False) as (gw, _maps):
+        assert gw.get_name() == renamed and gw.get_parameter("use_sim_time").value is True
+        node = gw._map_inputs._node
+        assert node.get_name() == "ugv_api_map", "the launch file's remap reached the map node"
+        assert node.get_fully_qualified_name() != gw.get_fully_qualified_name()
+        assert node.get_parameter("use_sim_time").value is False, "the gateway's parameters reached the map node"
+        assert _wait(lambda: ("ugv_api_map", "/") in gw.get_node_names_and_namespaces(), timeout=8.0), (
+            gw.get_node_names_and_namespaces())
+
+
+# ------------------------------------------------------------------------- the map side may not take the gateway down
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        Parameter("map.idle_timeout_s", Parameter.Type.DOUBLE, -1.0),  # fails MapConfig's validation
+        Parameter("map.idle_timeout_s", Parameter.Type.INTEGER, 5),  # a YAML integer where a double is declared
+    ],
+    ids=["invalid-value", "wrong-type"],
+)
+def test_a_map_only_configuration_error_does_not_abort_the_gateway(override):
+    with bare_gateway(override, spin=False) as (gw, maps):
+        assert gw._map_inputs is None  # map inputs are off, the rest of the gateway is running
+        assert gw.map_cfg == MapConfig()  # create_app still gets usable numbers
+        stats = maps.stats()
+        assert stats["map_inputs_alive"] is False
+        assert "idle_timeout_s" in stats["map_last_reject"] and "map inputs are off" in stats["map_last_reject"]
+        assert _has_estop_publisher(gw)  # the rest of the gateway is there
+
+
+def test_a_failure_to_start_the_map_side_does_not_abort_the_gateway_and_leaks_nothing(monkeypatch):
+    made = []
+
+    class Recorded(Context):
+        def __init__(self):
+            super().__init__()
+            made.append(self)
+
+    def no_executor(*_a, **_k):
+        raise RuntimeError("no executor today")
+
+    def map_threads():
+        return {th for th in threading.enumerate() if th.name == "ugv_api_map_ros"}
+
+    threads_before = map_threads()  # the module's own gateway has one
+    monkeypatch.setattr(ros_node, "Context", Recorded)
+    monkeypatch.setattr(ros_node, "SingleThreadedExecutor", no_executor)
+    with bare_gateway(spin=False) as (gw, maps):
+        assert gw._map_inputs is None
+        assert len(made) == 1 and made[0].ok() is False, "the second context was left running"
+        stats = maps.stats()
+        assert stats["map_inputs_alive"] is False and "no executor today" in stats["map_last_reject"]
+        assert _has_estop_publisher(gw)
+    assert map_threads() == threads_before
+
+
+# --------------------------------------------------------------------------------- map input health in the stats
+
+
+def test_map_input_health_is_part_of_the_status_stats(graph):
+    c = graph["client"]
+    stats = _wait(lambda: (lambda s: s if s.get("map_inputs_alive") is True else None)(_map_status(c)["stats"]))
+    assert stats, _map_status(c)["stats"]
+    assert stats["map_restarts"] == 0 and isinstance(stats["map_rejects"], int) and "map_last_reject" in stats
+    assert set(stats) >= {"map_inputs_alive", "map_rejects", "map_restarts", "map_last_reject"}
+
+
+def test_a_hung_map_thread_shows_as_not_alive_while_the_gateway_keeps_answering(graph):
+    c, gw = graph["client"], graph["gw"]
+    assert _wait(lambda: _map_status(c)["stats"].get("map_inputs_alive") is True)
+    assert _wait(lambda: _safety(c)["ok"]), _safety(c)
+    release = threading.Event()
+    _on_map_thread(gw, lambda: release.wait(30.0))  # the map thread is stuck inside a callback
+    slowest = 0.0
+    try:
+        deadline = time.monotonic() + MAP_ALIVE_BOUND
+        alive = True
+        while alive and time.monotonic() < deadline:
+            started = time.monotonic()
+            assert _safety(c)["ok"] is True  # the §12 table does not notice a map side that hangs
+            assert c.get("/health").status_code == 200
+            slowest = max(slowest, time.monotonic() - started)
+            alive = _map_status(c)["stats"].get("map_inputs_alive")
+            time.sleep(0.1)
+        assert alive is False, f"still reported alive {MAP_ALIVE_BOUND:.0f} s after the map thread hung"
+        assert slowest < 1.0, f"the other endpoints slowed down to {slowest:.2f} s"
+    finally:
+        release.set()
+    assert _wait(lambda: _map_status(c)["stats"].get("map_inputs_alive") is True, timeout=6.0), "never recovered"
+
+
+def test_a_dead_map_thread_is_reported_and_the_stats_it_held_still_expire(graph):
+    pubs = graph["pubs"]
+    with bare_gateway(Parameter("map.stats_stale_s", Parameter.Type.DOUBLE, STATS_STALE_S)) as (gw, maps):
+        def have_stats():
+            pubs.map_stats.publish(String(data=json.dumps({"keyframes": 7})))
+            return maps.stats().get("keyframes") == 7
+
+        assert _wait(have_stats, timeout=8.0), maps.stats()
+        assert _wait(lambda: maps.stats().get("map_inputs_alive") is True)
+
+        def die():
+            raise _MapThreadGone("the map thread is gone")
+
+        _on_map_thread(gw, die)
+        assert _wait(lambda: maps.stats().get("map_inputs_alive") is False, timeout=MAP_ALIVE_BOUND), maps.stats()
+        assert "map_thread_exit" in maps.stats()["map_last_reject"]
+        assert not gw._map_inputs._thread.is_alive()
+        # nothing is published any more, and the thread that used to clear the stale entries is gone
+        assert _wait(lambda: "keyframes" not in maps.stats(), timeout=STATS_STALE_S + 4.0), maps.stats()
+        assert maps.stats()["map_inputs_alive"] is False  # and it stays reported
+
+
+def test_the_supervisor_counts_a_restart_and_names_what_failed():
+    with bare_gateway() as (gw, maps):
+        assert _wait(lambda: maps.stats().get("map_inputs_alive") is True)
+
+        def fail():
+            raise RuntimeError("a callback the guard does not wrap")
+
+        _on_map_thread(gw, fail)
+        stats = _wait(lambda: (lambda s: s if s.get("map_restarts", 0) >= 1 else None)(maps.stats()), timeout=6.0)
+        assert stats, maps.stats()
+        assert "map_executor" in stats["map_last_reject"] and "a callback the guard does not wrap" in stats["map_last_reject"]
+        assert stats["map_rejects"] >= 1
+        assert _wait(lambda: maps.stats().get("map_inputs_alive") is True, timeout=6.0), "did not come back after a restart"
+
+
+# ------------------------------------------------------------------------------- what a map layer may be made of
+
+
+def test_layers_in_another_frame_are_refused_and_an_empty_frame_is_accepted(graph):
+    c, pubs, node, gw = graph["client"], graph["pubs"], graph["pub_node"], graph["gw"]
+    cells = np.zeros((6, 8), dtype=np.int8)
+    elevation = [np.array(v, dtype=np.float32) for v in ([-1.75], [1.75], [0.5], [1.0], [0.0])]
+    kinds = ("frame_cloud", "frame_trajectory", "frame_elevation_cloud", "frame_elevation_obstacles", "frame_grid")
+
+    def counts():
+        rejects = gw.map_rejects
+        return {kind: rejects.get(kind, 0) for kind in kinds}
+
+    def served(path, decode):
+        r = c.get(path)
+        return decode(r.content) if r.status_code == 200 else None
+
+    before = counts()
+    with watching(c), own_participant("ugv_api_test_odom_costmap") as other:
+        assert _wait(lambda: _subscribed(node, HEAVY_TOPICS), timeout=8.0)
+        costmap = other.create_publisher(OccupancyGrid, GRID, QoSProfile(depth=1))
+
+        def publish_odom_layers():
+            now = pubs.now()
+            pubs.cloud.publish(make_rgb_cloud(np.array([[901, 902, 903]], dtype=np.float32),
+                                              np.zeros((1, 3), dtype=np.uint8), now, frame="odom"))
+            pubs.path.publish(make_path([(901, 902, 903, 0, 0, 0, 1)], now, frame="odom"))
+            pubs.elev_cloud.publish(make_elevation_cloud(elevation, now, frame="odom"))
+            pubs.elev_grid.publish(make_grid(cells, 0.3125, (0.0, 0.0), now, frame="odom"))
+            costmap.publish(make_grid(cells, 0.2, (0.0, 0.0), now, frame="odom"))  # a local costmap, say
+
+        refused = _wait(lambda: (publish_odom_layers(), all(counts()[k] > before[k] for k in kinds))[1], timeout=12.0)
+        assert refused, f"not every layer was refused: {before} -> {counts()}"
+        # nothing of it was served as a map-frame layer
+        cloud = served("/map/cloud", codec.decode_cloud)
+        assert cloud is None or 901.0 not in cloud["xyz"]
+        trajectory = served("/map/trajectory", codec.decode_trajectory)
+        assert trajectory is None or 901.0 not in trajectory["poses"][:, 0]
+        elevation_out = served("/map/elevation", codec.decode_elevation)
+        assert elevation_out is None or elevation_out["resolution_m"] != pytest.approx(0.3125)
+        grid = served("/map/grid", codec.decode_grid)
+        assert grid is None or grid["resolution_m"] != pytest.approx(0.2)
+
+        # a message with no frame at all is taken as the map frame (some publishers leave it empty)
+        def publish_unframed():
+            costmap.publish(make_grid(cells, 0.125, (0.0, 0.0), other.get_clock().now().to_msg(), frame=""))
+            grid = served("/map/grid", codec.decode_grid)
+            return grid is not None and grid["resolution_m"] == pytest.approx(0.125)
+
+        assert _wait(publish_unframed, timeout=8.0), "a grid with an empty frame_id was refused"
+
+
+def test_an_organised_cloud_with_padded_rows_is_refused(graph):
+    c, pubs, node, gw = graph["client"], graph["pubs"], graph["pub_node"], graph["gw"]
+    msg = PointCloud2()
+    msg.header.stamp, msg.header.frame_id = pubs.now(), "map"
+    msg.height, msg.width, msg.point_step, msg.row_step, msg.is_dense = 2, 3, 12, 40, True  # 4 bytes of padding per row
+    msg.fields = _fields("x", "y", "z")
+    msg.data = bytes(80)
+    before = gw.map_rejects.get("cloud", 0)
+    with watching(c):
+        assert _wait(lambda: _subscribed(node, [CLOUD]), timeout=8.0)
+        pubs.cloud.publish(msg)
+        assert _wait(lambda: gw.map_rejects.get("cloud", 0) > before)
+        r = c.get("/map/cloud")
+    assert r.status_code != 200 or codec.decode_cloud(r.content)["source_count"] != 6
+
+
+def test_elevation_halves_without_a_stamp_never_pair(graph):
+    c, pubs, node, gw = graph["client"], graph["pubs"], graph["pub_node"], graph["gw"]
+    four = [np.arange(4, dtype=np.float32) + i for i in range(5)]
+    cells = np.zeros((6, 8), dtype=np.int8)
+    unset = Time().to_msg()  # sec 0, nanosec 0
+    before = gw.map_rejects.get("elevation_unstamped", 0)
+    with watching(c):
+        assert _wait(lambda: _subscribed(node, HEAVY_TOPICS), timeout=8.0)
+        pubs.elev_cloud.publish(make_elevation_cloud(four, unset))
+        pubs.elev_grid.publish(make_grid(cells, 0.375, (-2.0, 1.5), unset))
+        assert _wait(lambda: gw.map_rejects.get("elevation_unstamped", 0) >= before + 2)
+        r = c.get("/map/elevation")
+        stats = _map_status(c)["stats"]
+    assert r.status_code != 200 or codec.decode_elevation(r.content)["resolution_m"] != pytest.approx(0.375)
+    assert stats.get("elevation_known_cells") != 4, "cells were counted for a half that never paired"
