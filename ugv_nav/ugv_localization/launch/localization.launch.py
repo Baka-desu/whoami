@@ -3,7 +3,7 @@
     ros2 launch ugv_localization localization.launch.py mode:=mapping profile:=sim
     ros2 launch ugv_localization localization.launch.py mode:=localize profile:=sim odom_source:=auto
     ros2 launch ugv_localization localization.launch.py mode:=mapping fresh_db:=true   # visual odometry only
-    ros2 launch ugv_localization localization.launch.py map_assembler:=false   # no 3D map for the viewer
+    ros2 launch ugv_localization localization.launch.py map_assembler:=true    # 3D map for the web viewer
 
 Nodes:
   cloud_to_depth Dev 1 DA3 cloud + CameraInfo → /rtabmap/depth/image      (depth_input:=cloud, fallback only)
@@ -11,9 +11,10 @@ Nodes:
   rgbd_odometry  visual odometry on rgbd_image → /rtabmap/odom_visual   (odom_source auto|visual)
   odom_selector  wheel | visual | auto → /odom + TF odom->base_link     (the only publisher)
   rtabmap        RGB-D SLAM → TF map->odom, /map (occupancy from depth), /rtabmap/info, mapPath, mapData
-  map_assembler  /rtabmap/mapData → /rtabmap/cloud_map (the 3D map, assembled outside the SLAM step);
-                 map_assembler:=false leaves it out: then nothing publishes /rtabmap/cloud_map at all (the web
-                 viewer's cloud layer stays empty) and its memory (it keeps every node's data) is not spent
+  map_assembler  /rtabmap/mapData → /rtabmap/cloud_map (the 3D map, assembled outside the SLAM step).
+                 Opt-in, map_assembler:=true (mindmap D24): it keeps every node's data and never gives it back,
+                 so it is off by default for long missions; without it nothing publishes /rtabmap/cloud_map
+                 (the web viewer's cloud layer stays empty) and SLAM, TF and pose validity are unchanged
   pose_validity  /ugv/pose_valid heartbeat
   distance_tracker /ugv/localization/distance_travelled (odometry estimate) + distance_basis label
   map_stats      /ugv/map/stats JSON (keyframes, loop closures, path length, db size, calibration placeholder)
@@ -274,9 +275,9 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("fresh_db", default_value="false", description="mapping only: delete db at start"),
             DeclareLaunchArgument(
                 "map_assembler",
-                default_value="true",
-                description="true: map_assembler serves /rtabmap/cloud_map to the web viewer | false: no /rtabmap/cloud_map "
-                "at all (saves the assembler's memory on a long mission; SLAM, TF and pose validity are unchanged)",
+                default_value="false",
+                description="true: map_assembler serves /rtabmap/cloud_map to the web viewer (memory grows with the map) | "
+                "false (default): no /rtabmap/cloud_map at all; SLAM, TF and pose validity are unchanged",
             ),
             DeclareLaunchArgument("profile", default_value="live_cam", description="live_cam | sim | bag"),
             DeclareLaunchArgument("use_sim_time", default_value="auto", description="auto = from profile"),

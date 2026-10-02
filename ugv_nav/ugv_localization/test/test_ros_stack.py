@@ -13,7 +13,7 @@ x4 (Task 8) moves the robot (wheel odometry + the scene sliding past the camera)
    and checks the 3D map outputs: /rtabmap/cloud_map (from map_assembler), /rtabmap/mapPath, /rtabmap/mapData.
 m1 (Task 8 review I1) is a measurement, skipped unless UGV_MEASURE_LATE_ATTACH is set: a viewer attaching cloud_map
    mid-mission vs the SLAM step rate and /ugv/pose_valid.
-x6 (final review I2) launches with map_assembler:=false: SLAM runs, and nothing publishes /rtabmap/cloud_map.
+x6 (final review I2) launches with the default map_assembler:=false (D24): SLAM runs, and nothing publishes /rtabmap/cloud_map.
 x5 (Task 9) checks /ugv/map/stats from the same moving stack: map_stats is launched, reads rtabmap's graph and info,
    and reports the calibration file's placeholder flag.
 Skipped unless ROS 2 + rtabmap_ros + an installed ugv_localization are available (colcon test).
@@ -500,7 +500,9 @@ def _map_data_problems(msgs: list, width: int, height: int, expect_m: float) -> 
     return problems, len(first)
 
 
-@pytest.mark.parametrize("stack", [{"speed": _X4_SPEED}], ids=["moving-320x240"], indirect=True)
+@pytest.mark.parametrize(
+    "stack", [{"speed": _X4_SPEED, "launch_args": ("map_assembler:=true",)}], ids=["moving-320x240"], indirect=True
+)
 def test_x4_rtabmap_3d_map_outputs(stack: Stack) -> None:
     """Task 8. RTAB-Map must publish its 3D products, not only the 2D /map: a coloured 3D /rtabmap/cloud_map, the
     growing /rtabmap/mapPath, and /rtabmap/mapData whose graph nodes carry what the elevation mapper needs (depth,
@@ -703,8 +705,9 @@ def _late_attach_window(infos: list, statuses: list, steps: list, assembled: lis
 @pytest.mark.parametrize(
     "stack",
     [
-        {"speed": _X4_SPEED, "grid_probe": False},
-        {"speed": _X4_SPEED, "grid_probe": False, "timing": "laptop", "size": _BIG, "camera_reliable": True},
+        {"speed": _X4_SPEED, "grid_probe": False, "launch_args": ("map_assembler:=true",)},
+        {"speed": _X4_SPEED, "grid_probe": False, "timing": "laptop", "size": _BIG, "camera_reliable": True,
+         "launch_args": ("map_assembler:=true",)},
     ],
     ids=["default-320x240", "laptop-640x480-reliable-camera"],
     indirect=True,
@@ -847,10 +850,10 @@ def test_x5_map_stats_on_the_real_stack(stack: Stack) -> None:
 
 
 @pytest.mark.parametrize(
-    "stack", [{"speed": _X4_SPEED, "launch_args": ("map_assembler:=false",)}], ids=["moving-320x240-no-assembler"], indirect=True
+    "stack", [{"speed": _X4_SPEED}], ids=["moving-320x240-default-no-assembler"], indirect=True
 )
 def test_x6_map_assembler_off_leaves_slam_running_and_no_cloud_map(stack: Stack) -> None:
-    """Final review I2: map_assembler:=false (a long mission, its memory not spent) starts no map_assembler, so nothing
+    """Final review I2 + PR #40 review (mindmap D24): the default (map_assembler:=false, opt-in) starts no map_assembler, so nothing
     publishes /rtabmap/cloud_map (rtabmap's own copy stays on /rtabmap/slam/cloud_map); SLAM, mapGraph and the graph
     still grow."""
     seen = stack.seen

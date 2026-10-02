@@ -90,7 +90,8 @@ ros2 launch ugv_bringup bringup.launch.py profile:=live_cam     calibration_file
 ```
 
 Optional: `transport_latency_s:=<s>`, `allow_placeholder_calibration:=true` (bring-up only, see above),
-`map_assembler:=false` (no 3D map for the viewer, for a long mission: `docs/mapping/README.md`).
+`map_assembler:=true` (3D map cloud for the web viewer; off by default because its memory grows with the map:
+`docs/mapping/README.md`).
 
 Starts camera driver, robot description (`ugv_robot_description`: base_link -> camera_optical_frame from the
 measured mount, no defaults), Dev 1 perception, Dev 2 localization, Dev 3 semantic costmap (`ugv_costmap`),
