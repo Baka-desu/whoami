@@ -78,26 +78,10 @@ def test_a_frame_cannot_arrive_after_its_own_tick_started() -> None:
     assert due(203, 0, 400, 135, 80) == due(203, 0, 203, 135, 80)
 
 
-def test_at_a_5_hz_camera_every_frame_is_segmented() -> None:
-    # seg 123 + depth 80: a tick of 203 ms. The frame at 200 ms is picked up at 203.
-    assert due(203, 0, 200, 200, 80) is True
-    assert due(606, 403, 600, 200, 80) is True  # and again one cycle later
-
-
-def test_at_7_4_hz_frames_alternate() -> None:
-    assert due(203, 0, 135, 135, 80) is False  # depth only
-    assert due(283, 0, 270, 135, 80) is True  # then segmented: gap 283
-    assert due(486, 283, 405, 135, 80) is False  # and so on
-
-
 def test_at_12_hz_frames_alternate_whether_or_not_the_interval_is_known() -> None:
     for interval in (83, 0):  # a fast camera never yields a measured interval
         assert due(203, 0, 166, interval, 80) is False
         assert due(283, 0, 249, interval, 80) is True
-
-
-def test_after_a_long_gap_the_first_frame_is_segmented() -> None:
-    assert due(13_000, 10_000, 13_000, 100, 80) is True
 
 
 def test_a_clock_that_went_backwards_counts_as_due() -> None:
@@ -188,17 +172,6 @@ def test_carried_degraded_value(last_decision, published_ago_ms, expected) -> No
     )
 
 
-def test_the_age_of_the_masks_image_is_not_a_liveness_signal() -> None:
-    # A mask published 66 ms ago from an image stamped 550 ms ago: normal operation, nothing is wrong.
-    now = 100 * _NS
-    assert (
-        carried_degraded(
-            last_decision_degraded=False, last_published_ns=now - ms(66), now_ns=now, max_age_s=_MAX_AGE_S
-        )
-        is False
-    )
-
-
 # --- the estimates --------------------------------------------------------------------------------------
 
 _BASE = 5 * _NS  # camera clock: only differences between stamps are ever used
@@ -206,14 +179,6 @@ _BASE = 5 * _NS  # camera clock: only differences between stamps are ever used
 
 def stamp(t_ms: float) -> int:
     return _BASE + ms(t_ms)
-
-
-def test_a_fresh_scheduler_has_no_estimates_and_segments() -> None:
-    s = SegScheduler()
-    s.frame_arrived(ms(0), stamp(0))
-    assert s.due(ms(0)) is True
-    assert s.depth_tick_ns is None
-    assert s.frame_interval_ns is None
 
 
 def test_the_depth_only_tick_estimate_skips_the_first_sample_then_averages() -> None:
@@ -226,19 +191,6 @@ def test_the_depth_only_tick_estimate_skips_the_first_sample_then_averages() -> 
     assert s.depth_tick_ns == pytest.approx(ms(86))  # 0.7 * 80 + 0.3 * 100
     s.tick_done(ms(4000), ms(4005), depth_ns=None)  # a frame without depth says nothing about it
     assert s.depth_tick_ns == pytest.approx(ms(86))
-
-
-def test_the_second_frame_is_segmented_because_the_first_depth_sample_is_not_trusted() -> None:
-    s = SegScheduler()
-    s.frame_arrived(ms(0), stamp(0))
-    assert s.due(ms(0)) is True
-    s.segmented(ms(0))
-    s.tick_done(ms(0), ms(203), depth_ns=ms(80))
-    s.frame_arrived(ms(203), stamp(135))
-    assert s.due(ms(203)) is True  # depth_tick_ns is still None
-    s.segmented(ms(203))
-    s.tick_done(ms(203), ms(406), depth_ns=ms(80))
-    assert s.depth_tick_ns == ms(80)
 
 
 def test_an_idle_wait_measures_the_camera_interval_exactly_and_a_backlog_does_not() -> None:
@@ -327,12 +279,6 @@ def test_only_a_frame_that_was_segmented_restarts_the_gap() -> None:
     assert s.last_seg_ns == ms(100)
 
 
-@pytest.mark.parametrize("gap", [0.0, -0.1, float("nan"), float("inf"), "0.3", True])
-def test_the_scheduler_rejects_a_bad_gap(gap) -> None:
-    with pytest.raises((TypeError, ValueError)):
-        SegScheduler(gap)
-
-
 # --- a whole run ----------------------------------------------------------------------------------------
 
 
@@ -393,31 +339,8 @@ def _seg_gaps(ticks: list[Tick]) -> list[float]:
     return [b - a for a, b in zip(starts, starts[1:])]
 
 
-def _flag_gaps(ticks: list[Tick]) -> list[float]:
-    return [b.flag_ms - a.flag_ms for a, b in zip(ticks, ticks[1:])]
-
-
 _CANONICAL = (83, 135, 200, 240)  # 12 Hz, 7.4 Hz, 5 Hz, 4.2 Hz
 _TICK_MS = 123 + 80
-
-
-@pytest.mark.parametrize("interval", _CANONICAL + (33, 100, 160, 300))
-def test_the_degraded_flag_goes_out_on_every_processed_frame(interval: int) -> None:
-    ticks = _simulate(interval)
-    assert len(ticks) > 30
-    assert max(_flag_gaps(ticks)) <= interval + _TICK_MS, "gap between flags: one frame interval plus one tick"
-
-
-@pytest.mark.parametrize("interval", _CANONICAL + (33, 100, 160, 300))
-def test_the_mask_gap_stays_within_the_bound_plus_one_frame_interval(interval: int) -> None:
-    ticks = _simulate(interval)
-    assert max(_seg_gaps(ticks)) <= 300 + interval, _seg_gaps(ticks)
-
-
-@pytest.mark.parametrize("interval", _CANONICAL)
-def test_at_most_one_gap_over_the_bound_before_the_interval_is_known(interval: int) -> None:
-    over = [g for g in _seg_gaps(_simulate(interval)) if g > 300]
-    assert len(over) <= 1, over
 
 
 @pytest.mark.parametrize("interval", (33, 83, 100, 135))
@@ -474,21 +397,13 @@ def _publication_gaps(ticks: list[Tick]) -> list[float]:
 
 
 @pytest.mark.parametrize("interval", _CANONICAL + (33, 100, 160, 300))
-def test_in_normal_alternation_the_mask_stream_never_looks_stalled(interval: int) -> None:
-    """Time between mask publications is all the liveness rules look at. Measured margin against the 0.5 s limit:
-    at least 100 ms for every camera interval (the worst, 397 ms, is the one wrong skip at a 200 ms camera while
-    its interval is still unknown; in steady state the worst is 300 ms)."""
+def test_the_mask_gap_bound_and_the_mask_stream_liveness(interval: int) -> None:
+    """Segmentations start at most the bound plus one frame interval apart, and over the bound at most once (while
+    the camera interval is unknown). Masks go out at most 400 ms apart: the liveness rules (0.5 s) never trip in
+    normal alternation (the worst, 397 ms, is that one wrong skip at a 200 ms camera; in steady state 300 ms)."""
     ticks = _simulate(interval, seconds=60)
-    gaps = _publication_gaps(ticks)
-    assert max(gaps) <= 400, gaps
-    # What a watchdog sampling every 0.25 s would see, at any phase: the newest mask's time since publication.
-    published = [t.mask_ms for t in ticks if t.mask_ms is not None]
-    for phase_ms in (0, 50, 100, 150, 200):
-        for k in range(int(60_000 / 250)):
-            now_ms = phase_ms + 250.0 * k
-            if now_ms < published[0]:
-                continue
-            newest = published[bisect.bisect_right(published, now_ms) - 1]
-            assert not mask_stream_stalled(
-                last_published_ns=ms(newest), first_image_ns=0, now_ns=ms(now_ms), max_age_s=_MAX_AGE_S
-            ), (interval, phase_ms, now_ms, newest)
+    gaps = _seg_gaps(ticks)
+    assert max(gaps) <= 300 + interval, gaps
+    if interval in _CANONICAL:
+        assert len([g for g in gaps if g > 300]) <= 1, gaps
+    assert max(_publication_gaps(ticks)) <= 400

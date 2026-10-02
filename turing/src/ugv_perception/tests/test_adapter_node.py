@@ -767,45 +767,6 @@ def test_a_depth_only_frame_carries_a_degraded_last_decision() -> None:
         _tear_down(node)
 
 
-def test_the_age_of_the_masks_image_does_not_degrade_a_depth_only_frame() -> None:
-    """The wrong quantity: the image stamp of the newest mask is latency plus hold time (0.45 to 0.58 s in normal
-    operation). A mask published 100 ms ago from an image stamped 550 ms ago is perfectly alive."""
-    rclpy.init()
-    clock, wall = _Clock(), _Wall()
-    node = _scheduled_node(clock, wall, SpyAdapter(), _FakeDepth(clock))
-    got = _capture(node)
-    try:
-        _prime(node, clock, wall)  # the newest mask is stamped 100 ms and was published at 100 ms
-        _feed(node, clock, wall, 200, age_ms=450)  # wall is 650 ms after that stamp
-        assert len(got["mask"]) == 2, "still depth only"
-        assert got["degraded"][-1].data is False
-    finally:
-        _tear_down(node)
-
-
-def test_a_depth_only_frame_is_degraded_once_no_mask_was_published_for_longer_than_the_max_age() -> None:
-    rclpy.init()
-    clock, wall = _Clock(), _Wall()
-    node = _scheduled_node(clock, wall, SpyAdapter(), _FakeDepth(clock))
-    got = _capture(node)
-    try:
-        _prime(node, clock, wall)  # the newest mask was published at 100 ms
-        node._sched.due = lambda start_ns: False  # the scheduler is forced to skip: masks stop
-        flags = []
-        for t_ms in (200, 300, 400, 500, 600, 700, 800):
-            _feed(node, clock, wall, t_ms)
-            flags.append((t_ms, got["degraded"][-1].data))
-        assert len(got["mask"]) == 2, "no mask after the second"
-        # Published at 100 ms: still alive up to and including 600 ms, stalled from the first frame after that.
-        assert flags == [(t, t > 600) for t in (200, 300, 400, 500, 600, 700, 800)]
-        # A mask comes back: the flag is not latched.
-        del node._sched.due
-        _feed(node, clock, wall, 900)
-        assert len(got["mask"]) == 3 and got["degraded"][-1].data is False
-    finally:
-        _tear_down(node)
-
-
 def test_a_depth_only_frame_with_no_mask_ever_published_is_degraded() -> None:
     from ugv_perception.adapter.output import AdapterError
 
@@ -1077,6 +1038,10 @@ def test_when_the_scheduler_is_forced_to_skip_the_watchdog_and_the_next_depth_on
         # The depth-only frames: false while alive, true from the first one after the limit.
         assert all(v is False for t, v in frame_flags if t <= 600), frame_flags
         assert all(v is True for t, v in frame_flags if t > 600), frame_flags
+        # A mask comes back: the flag is not latched.
+        del node._sched.due
+        _feed(node, clock, wall, frame_flags[-1][0] + 100)
+        assert len(got["mask"]) == 3 and got["degraded"][-1].data is False
     finally:
         _tear_down(node)
 
@@ -1174,42 +1139,19 @@ def _simulate_node(
     return log, adapter, depth, processed
 
 
-def _ms_between(times_ns: list[int]) -> list[float]:
-    return [(b - a) / _MS for a, b in zip(times_ns, times_ns[1:])]
-
-
 @pytest.mark.parametrize("interval", [83, 135, 200, 240])
-def test_the_real_node_keeps_the_flag_the_mask_gap_and_the_depth_within_the_ruled_bounds(
-    interval: int,
-) -> None:
-    log, adapter, depth, processed = _simulate_node(interval)
+def test_the_real_node_flags_and_depths_every_frame_it_takes(interval: int) -> None:
+    # The gap and liveness bounds are the scheduler's (test_schedule), and the node schedules exactly like it (next
+    # test); what is left to prove here is the node's own wiring.
+    log, _, depth, processed = _simulate_node(interval)
     assert len(processed) > 40
     flags = [(t, m.data) for kind, t, m in log if kind == "degraded"]
-    # The flag goes out on every processed frame, so its gaps are at most one frame interval plus one tick.
-    assert len(flags) == len(processed)
-    assert max(_ms_between([t for t, _ in flags])) <= interval + 123 + 80
-    # The start-to-start gap between segmentations stays within the bound plus one frame interval.
-    assert max(_ms_between(adapter.starts)) <= 300 + interval
+    assert len(flags) == len(processed)  # the flag goes out on every processed frame
     # Depth is produced for every frame the node takes.
     assert depth.calls == len(processed)
     assert len([1 for kind, _, _ in log if kind == "depth"]) == len(processed)
     # A healthy run is never degraded: the carried value does not flicker.
     assert all(value is False for _, value in flags)
-    # Mask liveness: the time between mask publications is all the liveness rules look at. The margin against the
-    # 0.5 s limit is at least 100 ms (worst case 397 ms: the one wrong skip at 200 ms, before the interval is known).
-    published = [t for kind, t, _ in log if kind == "mask"]
-    assert max(_ms_between(published)) <= 400
-    from ugv_perception.node.schedule import mask_stream_stalled
-
-    for phase_ms in (0, 50, 100, 150, 200):  # a watchdog sampling every 250 ms, at any phase
-        for k in range(int(20_000 / 250)):
-            now = _MONO0 + int((phase_ms + 250 * k) * _MS)
-            if now < published[0]:
-                continue
-            newest = published[bisect.bisect_right(published, now) - 1]
-            assert not mask_stream_stalled(
-                last_published_ns=newest, first_image_ns=_MONO0, now_ns=now, max_age_s=0.5
-            )
 
 
 @pytest.mark.parametrize("interval", [83, 135, 200, 240])

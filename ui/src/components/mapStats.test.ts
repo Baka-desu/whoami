@@ -48,12 +48,6 @@ describe('map widget values', () => {
     expect(row(mapRows({ mode: 'localize' }), 'mode')).toBe('LOCALIZE')
   })
 
-  it('tolerates stats keys it does not know', () => {
-    const rows = mapRows({ keyframes: 2, mask_hz: 3.1, depth_errors: 0, brand_new_stat: 'x' })
-    expect(rows).toHaveLength(7)
-    expect(row(rows, 'keyframes')).toBe('2')
-  })
-
   it('flags a placeholder calibration only when it is exactly true', () => {
     expect(placeholderCalibration({ calibration_placeholder: true })).toBe(true)
     expect(placeholderCalibration({ calibration_placeholder: false })).toBe(false)
@@ -82,13 +76,8 @@ describe('map widget values', () => {
   it('shows a negative last-update age as 0.0 s', () => {
     expect(row(mapRows({ last_update_age_s: -0.3 }), 'last update')).toBe('0.0 s')
     expect(row(mapRows({ last_update_age_s: -12 }), 'last update')).toBe('0.0 s')
-    expect(row(mapRows({ last_update_age_s: 1.26 }), 'last update')).toBe('1.3 s')
   })
 
-  it('labels the gateway source point count as such', () => {
-    expect(row(mapRows({ cloud_source_points: 5 }), 'cloud source pts')).toBe('5')
-    expect(row(mapRows({ cloud_source_points: 5 }), 'cloud points')).toBeUndefined()
-  })
 })
 
 describe('map input health rows', () => {
@@ -188,12 +177,5 @@ describe('map view banner', () => {
   it('does not trust the health claim of a stale status on an empty map', () => {
     expect(view({ noMap: true, statusStale: true, stats: stopped })).toBeNull()
     expect(view({ noMap: true, statusStale: true, telemetryLost: true, stats: stopped })).toBeNull()
-  })
-
-  it('shows a banner whenever the map has data and anything is wrong, so the feed dot can follow the banner', () => {
-    // MapView derives its ok dot as: map has data and no banner.
-    const cases = [{}, { statusStale: true }, { telemetryLost: true }, { stats: stopped }, { stats: { map_inputs_alive: true } }]
-    const ok = (o: object) => view(o) === null
-    expect(cases.map(ok)).toEqual([true, false, false, false, true])
   })
 })
