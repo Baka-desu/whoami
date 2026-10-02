@@ -920,6 +920,22 @@ def test_the_supervisor_counts_a_restart_and_names_what_failed():
         assert _wait(lambda: maps.stats().get("map_inputs_alive") is True, timeout=6.0), "did not come back after a restart"
 
 
+def test_a_failing_map_health_update_never_stops_the_gateways_executor():
+    """The map health timer shares the gateway's executor with the e-stop republish and the §12 watches: an exception
+    in it is logged, never raised, so the executor keeps spinning (and the timer keeps firing)."""
+    with bare_gateway() as (gw, maps):
+        assert _wait(lambda: maps.stats().get("map_inputs_alive") is True)
+        calls = []
+
+        def broken():
+            calls.append(time.monotonic())
+            raise RuntimeError("map health is broken")
+
+        gw._map_inputs.publish_health = broken
+        # an unguarded timer would end the spin at the first call; guarded, it keeps being called every period
+        assert _wait(lambda: len(calls) >= 4, timeout=4.0 * ros_node.MAP_HEALTH_PERIOD_S + 3.0), f"{len(calls)} calls"
+
+
 # ------------------------------------------------------------------------------- what a map layer may be made of
 
 

@@ -203,14 +203,25 @@ class GatewayNode(Node):
 
     def _start_map_inputs(self) -> None:
         # the timer first: if it cannot be created nothing is running yet that would have to be undone
-        self.create_timer(MAP_HEALTH_PERIOD_S, self._publish_map_health)
+        self.create_timer(MAP_HEALTH_PERIOD_S, self._map_health_tick)
         if self._map_error is None:
             try:
                 self._map_inputs = _MapInputs(self, self._maps, self.map_cfg, self._tf_buffer, self._map)
             except Exception as exc:  # noqa: BLE001 - _MapInputs has already taken down what it started
                 self._map_error = f"map inputs are off, they failed to start: {type(exc).__name__}: {exc}"
                 self.get_logger().error(self._map_error)
-        self._publish_map_health()
+        self._map_health_tick()
+
+    def _map_health_tick(self) -> None:
+        """The map health timer runs on the gateway's executor, next to the e-stop republish and the §12 watches: an
+        exception escaping a callback there would end that executor's spin and take them down with it, so a failure
+        is logged (throttled) and never raised, like the map side's `_guarded` callbacks."""
+        try:
+            self._publish_map_health()
+        except Exception as exc:  # noqa: BLE001 - see the docstring
+            self.get_logger().error(
+                f"map health update failed: {type(exc).__name__}: {exc}", throttle_duration_sec=10.0
+            )
 
     def _publish_map_health(self) -> None:
         """The gateway's side of the map inputs' health, on the gateway's executor (see _MapInputs.publish_health);
