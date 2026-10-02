@@ -58,6 +58,8 @@
     Vis/MaxDepth: "8.0"             # m — DA3 metric error grows with range; tune from depth_report
     Kp/MaxDepth: "8.0"              # same cap for loop-closure vocabulary words
     Rtabmap/DetectionRate: "2"      # Hz; pose_validity slam_max_age_s must exceed 1/rate
+    Mem/NotLinkedNodesKept: "false" # don't save deleted nodes (weight -9): resuming a db whose last node was deleted aborts
+                                    # rtabmap in Memory::addLink; a parked robot also filled 207 MB with 191 of them
     RGBD/LinearUpdate: "0.1"        # m between graph nodes
     RGBD/AngularUpdate: "0.1"       # rad between graph nodes
     RGBD/ProximityBySpace: "true"   # local loop closures

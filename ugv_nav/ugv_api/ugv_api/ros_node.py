@@ -8,7 +8,7 @@ Subscribes : /camera/camera_info          sensor_msgs/CameraInfo  stamp only (§
              /ugv/nav2_heartbeat          std_msgs/Bool           (Dev 4 -> Dev 5)
              /ugv/nav2_status             std_msgs/String         transient local
              /ugv/e_stop                  std_msgs/Bool           any publisher (CLI, this gateway)
-             /ugv/safety_status           std_msgs/String         Dev 5 arbiter (not implemented yet)
+             /ugv/safety_status           std_msgs/String         Dev 5 arbiter (latched, on change)
              /cmd_vel                     geometry_msgs/Twist     final command, read only
              TF map->base_link (polled; the pose is what GET /map/pose and the SSE `pose` event report)
              map viewer inputs, on a node of their own (ugv_api_map) in a second rclpy context (class _MapInputs):
@@ -125,7 +125,8 @@ class GatewayNode(Node):
         self.create_subscription(String, "/ugv/nav2_status", self._value(k.NAV2_STATUS), latched)
         # Volatile + reliable matches both `ros2 topic pub` (volatile) and latched publishers.
         self.create_subscription(Bool, "/ugv/e_stop", self._value(k.E_STOP), 10)
-        self.create_subscription(String, "/ugv/safety_status", self._value(k.SAFETY_STATUS), 10)
+        # The arbiter publishes it latched and only on change: a volatile reader misses the one sample.
+        self.create_subscription(String, "/ugv/safety_status", self._value(k.SAFETY_STATUS), latched)
         self.create_subscription(Twist, "/cmd_vel", self._on_cmd_vel, flags)
 
         self._pub_estop = self.create_publisher(Bool, "/ugv/e_stop", latched)

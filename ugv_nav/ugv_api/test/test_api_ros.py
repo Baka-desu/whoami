@@ -1019,3 +1019,15 @@ def test_elevation_halves_without_a_stamp_never_pair(graph):
         stats = _map_status(c)["stats"]
     assert r.status_code != 200 or codec.decode_elevation(r.content)["resolution_m"] != pytest.approx(0.375)
     assert stats.get("elevation_known_cells") != 4, "cells were counted for a half that never paired"
+
+
+def test_a_latched_arbiter_status_published_before_discovery_is_received(graph):
+    # The Dev 5 arbiter publishes /ugv/safety_status latched and only on change: a gateway that misses the one
+    # sample reports the arbiter absent while it is running and holding the robot.
+    c = graph["client"]
+    with own_participant("ugv_api_test_arbiter") as other:
+        pub = other.create_publisher(String, "/ugv/safety_status",
+                                     QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
+        pub.publish(String(data="L1 ESTOP: e_stop"))  # once, before the gateway has discovered this participant
+        body = _wait(lambda: (lambda b: b if b["arbiter"]["present"] else None)(_safety(c)), timeout=8.0)
+    assert body and body["arbiter"]["status"] == "L1 ESTOP: e_stop", _safety(c)
