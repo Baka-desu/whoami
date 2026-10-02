@@ -1,14 +1,14 @@
 """/ugv/map/stats publisher: the map's statistics for the web viewer (docs/localization/interfaces.md).
 
-Subscribes : graph_topic  rtabmap_msgs/MapGraph  pose graph: keyframe count, path length, "did the map change"
-             info_topic   rtabmap_msgs/Info      loop-closure / proximity-detection events
+Subscribes : graph_topic  rtabmap_msgs/MapGraph  pose graph: keyframe count, path length, closure links,
+                                                 "did the map change"
              Not /rtabmap/cloud_map and not /rtabmap/mapData: a subscriber on either makes RTAB-Map assemble
-             and send the whole map every step. The graph is poses and links only.
+             and send the whole map every step. The graph is poses and links only. Not /rtabmap/info either.
 Publishes  : /ugv/map/stats  std_msgs/String  one JSON object of scalars (keys: ugv_localization.mapstats),
              every 1/publish_rate_hz s, reliable + transient local (a late subscriber gets the latest)
 Params     : mode (mapping | localize, required), database_path (file whose size is reported; "" = none),
              calibration_file (camera calibration YAML; its `placeholder` flag is reported; "" = none),
-             publish_rate_hz (1.0), graph_topic (/rtabmap/mapGraph), info_topic (/rtabmap/info)
+             publish_rate_hz (1.0), graph_topic (/rtabmap/mapGraph)
 """
 
 from __future__ import annotations
@@ -21,11 +21,11 @@ import rclpy
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
-from rtabmap_msgs.msg import Info, MapGraph
+from rtabmap_msgs.msg import MapGraph
 from std_msgs.msg import String
 
 from ugv_localization.camera import load_calibration
-from ugv_localization.mapstats import MapStats
+from ugv_localization.mapstats import MapStats, regular_file_size
 from ugv_localization.modes import parse_mode
 
 _NS_PER_S = 1_000_000_000
@@ -36,23 +36,24 @@ class MapStatsNode(Node):
         super().__init__("map_stats")
         mode = parse_mode(self.declare_parameter("mode", "").value)
         db = self.declare_parameter("database_path", "").value
-        self._db_path = os.path.expanduser(db) if db else ""
+        self._db_path = db or ""  # regular_file_size() expands ~
         calibration_file = self.declare_parameter("calibration_file", "").value
         rate_hz = float(self.declare_parameter("publish_rate_hz", 1.0).value)
         if not (math.isfinite(rate_hz) and rate_hz > 0.0):
             raise RuntimeError(f"publish_rate_hz must be > 0, got {rate_hz}")
         graph_topic = self.declare_parameter("graph_topic", "/rtabmap/mapGraph").value
-        info_topic = self.declare_parameter("info_topic", "/rtabmap/info").value
 
+        # A graph that arrives before the sim clock starts (localize sends it once) is kept and applied on the
+        # first tick with a clock, so it is stamped when the clock starts instead of being lost.
+        self._pending: tuple[list[int], list[tuple[float, ...]], list[tuple[int, int, int]]] | None = None
         self._stats = MapStats(mode, self._calibration_is_placeholder(calibration_file))
 
         latched = QoSProfile(
             depth=1, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.TRANSIENT_LOCAL
         )
         self._pub = self.create_publisher(String, "/ugv/map/stats", latched)
-        # Same QoS as the rtabmap publishers (reliable; the graph is transient local, info is volatile).
+        # Same QoS as the rtabmap publishers (reliable, transient local).
         self.create_subscription(MapGraph, graph_topic, self._on_graph, latched)
-        self.create_subscription(Info, info_topic, self._on_info, 10)
         self.create_timer(1.0 / rate_hz, self._tick)
         self.get_logger().info(
             f"map stats: mode={mode.value}, database_path={self._db_path or '-'}, publishing /ugv/map/stats"
@@ -75,30 +76,30 @@ class MapStatsNode(Node):
         return now_ns / _NS_PER_S if now_ns > 0 else None  # None: use_sim_time and /clock not received yet
 
     def _on_graph(self, msg: MapGraph) -> None:
-        now_s = self._now_s()
-        if now_s is None:
-            return
         poses = [
             (p.position.x, p.position.y, p.position.z, p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w)
             for p in msg.poses
         ]
+        links = [(int(k.from_id), int(k.to_id), int(k.type)) for k in msg.links]
+        self._pending = (list(msg.poses_id), poses, links)
+        self._apply_pending()
+
+    def _apply_pending(self) -> None:
+        now_s = self._now_s()
+        if now_s is None or self._pending is None:
+            return  # no clock yet: keep the graph, the next tick applies it
+        ids, poses, links = self._pending
+        self._pending = None
         try:
-            self._stats.on_graph(list(msg.poses_id), poses, now_s)
+            self._stats.on_graph(ids, poses, now_s, links)
         except ValueError as exc:
             self.get_logger().warning(f"dropping malformed map graph: {exc}", throttle_duration_sec=5.0)
 
-    def _on_info(self, msg: Info) -> None:
-        self._stats.on_info(int(msg.loop_closure_id), int(msg.proximity_detection_id))
-
     def _db_bytes(self) -> int | None:
-        if not self._db_path:
-            return None
-        try:
-            return os.path.getsize(self._db_path)
-        except OSError:
-            return None  # no file (yet)
+        return regular_file_size(self._db_path)
 
     def _tick(self) -> None:
+        self._apply_pending()
         snapshot = self._stats.snapshot(self._now_s() or 0.0, self._db_bytes())
         self._pub.publish(String(data=json.dumps(snapshot, allow_nan=False, separators=(",", ":"))))
 

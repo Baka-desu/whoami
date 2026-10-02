@@ -7,7 +7,9 @@ import math
 
 import pytest
 
-from ugv_localization.mapstats import MapStats, path_length
+import os
+
+from ugv_localization.mapstats import CLOSURE_LINK_TYPES, MapStats, closure_pairs, path_length, regular_file_size
 from ugv_localization.modes import Mode
 
 _KEYS = (
@@ -50,39 +52,49 @@ def test_m3_path_length_is_the_polyline_not_the_displacement() -> None:
 
 # --- loop closures ----------------------------------------------------------------------------
 
+NEIGHBOR, GLOBAL, LOCAL_SPACE, LOCAL_TIME, USER, VIRTUAL, MERGED, PRIOR, LANDMARK, GRAVITY = range(10)  # rtabmap::Link::Type
 
-def test_m4_a_loop_closure_id_is_counted_once() -> None:
+
+def _closures(links: list[tuple[int, int, int]], mode: Mode = Mode.MAPPING) -> int:
+    s = _stats(mode)
+    s.on_graph([1, 2, 3], _LINE, 100.0, links)
+    return _snap(s)["loop_closures"]
+
+
+def test_m4_a_parked_robot_graph_with_only_neighbour_links_has_no_closures() -> None:
+    assert _closures([(1, 2, NEIGHBOR), (2, 3, NEIGHBOR), (3, 3, GRAVITY)]) == 0
+    assert _closures([]) == 0
+
+
+def test_m5_the_three_closure_types_count_and_nothing_else_does() -> None:
+    assert _closures([(1, 3, GLOBAL)]) == 1
+    assert _closures([(1, 3, GLOBAL), (1, 2, LOCAL_SPACE), (2, 3, USER)]) == 3
+    others = [LOCAL_TIME, VIRTUAL, MERGED, PRIOR, LANDMARK, GRAVITY, NEIGHBOR, 10, 97, 99, -1]
+    assert _closures([(1, 3, k) for k in others]) == 0
+
+
+def test_m6_duplicate_and_reversed_pairs_are_one_closure() -> None:
+    assert _closures([(1, 3, GLOBAL), (1, 3, GLOBAL), (3, 1, GLOBAL), (3, 1, USER)]) == 1
+    assert _closures([(1, 3, GLOBAL), (1, 2, GLOBAL)]) == 2
+
+
+def test_m7_closures_follow_the_latest_graph_and_a_fresh_database_starts_over() -> None:
     s = _stats()
-    for _ in range(5):  # the same event reported again and again
-        s.on_info(7, 0)
-    assert _snap(s)["loop_closures"] == 1
-
-
-def test_m5_distinct_events_are_counted_and_zero_ids_are_not_events() -> None:
-    s = _stats()
-    s.on_info(0, 0)
-    s.on_info(7, 0)
-    s.on_info(9, 0)
-    s.on_info(0, 4)  # a proximity detection is an event of its own
-    s.on_info(0, 4)
-    s.on_info(0, 0)
-    assert _snap(s)["loop_closures"] == 3
-
-
-def test_m6_a_parked_robot_that_keeps_matching_the_same_node_adds_nothing() -> None:
-    # Measured on the real stack: once the robot stops, every step (2 per second) reports the same loop_closure_id.
-    s = _stats()
-    s.on_info(22, 0)
-    before = _snap(s)["loop_closures"]
-    for _ in range(100):
-        s.on_info(22, 0)
-    assert before == 1 and _snap(s)["loop_closures"] == 1
-
-
-def test_m7_loop_and_proximity_with_the_same_id_are_two_events() -> None:
-    s = _stats()
-    s.on_info(7, 7)
+    s.on_graph([1, 2, 3], _LINE, 100.0, [(1, 3, GLOBAL), (1, 2, LOCAL_SPACE)])
     assert _snap(s)["loop_closures"] == 2
+    s.on_graph([1], [(0.0, 0.0)], 110.0, [])  # rtabmap restarted on a new database: ids restart, graph shrinks
+    snap = _snap(s, 111.0)
+    assert (snap["loop_closures"], snap["keyframes"]) == (0, 1)
+    assert snap["last_update_age_s"] == pytest.approx(1.0)
+
+
+def test_m7b_closure_ids_are_clean_ints_in_a_localize_graph() -> None:
+    assert _closures([(1, 3, GLOBAL)], Mode.LOCALIZE) == 1
+
+
+def test_closure_pairs_helper_and_type_set() -> None:
+    assert CLOSURE_LINK_TYPES == frozenset({GLOBAL, LOCAL_SPACE, USER})
+    assert closure_pairs([(5, 2, GLOBAL), (2, 5, USER), (4, 4, GRAVITY)]) == 1
 
 
 # --- last_update_age_s ------------------------------------------------------------------------
@@ -192,8 +204,7 @@ def test_m18_non_finite_floats_become_null() -> None:
 
 def test_m19_every_key_is_a_json_scalar_with_the_documented_type() -> None:
     s = _stats(Mode.LOCALIZE, placeholder=True)
-    s.on_graph([1, 2, 3], _LINE, 100.0)
-    s.on_info(4, 0)
+    s.on_graph([1, 2, 3], _LINE, 100.0, [(1, 3, GLOBAL)])
     snap = s.snapshot(101.0, 4096)
     assert tuple(snap) == _KEYS
     assert snap == {
@@ -201,12 +212,12 @@ def test_m19_every_key_is_a_json_scalar_with_the_documented_type() -> None:
         "loop_closures": 1,
         "path_length_m": pytest.approx(11.0),
         "db_bytes": 4096,
-        "last_update_age_s": pytest.approx(1.0),
+        "last_update_age_s": None,
         "mode": "localize",
         "calibration_placeholder": True,
     }
     assert type(snap["keyframes"]) is int and type(snap["loop_closures"]) is int and type(snap["db_bytes"]) is int
-    assert type(snap["path_length_m"]) is float and type(snap["last_update_age_s"]) is float
+    assert type(snap["path_length_m"]) is float and snap["last_update_age_s"] is None
     assert all(v is None or type(v) in (int, float, str, bool) for v in snap.values())
     assert json.loads(json.dumps(snap, allow_nan=False)) == snap
 
@@ -256,3 +267,48 @@ def test_m24_mode_and_placeholder_types_are_checked() -> None:
         MapStats("mapping")  # type: ignore[arg-type]
     with pytest.raises(TypeError):
         MapStats(Mode.MAPPING, calibration_placeholder="no")  # type: ignore[arg-type]
+
+
+# --- review round 1 ---------------------------------------------------------------------------
+
+
+def test_localize_mode_has_no_update_age_even_with_a_graph() -> None:
+    s = _stats(Mode.LOCALIZE)
+    s.on_graph([1, 2], _LINE[:2], 100.0)
+    assert _snap(s, 500.0)["last_update_age_s"] is None
+    assert _snap(s, 500.0)["keyframes"] == 2
+
+
+def test_mapping_mode_keeps_its_age() -> None:
+    s = _stats(Mode.MAPPING)
+    s.on_graph([1, 2], _LINE[:2], 100.0)
+    assert _snap(s, 104.0)["last_update_age_s"] == pytest.approx(4.0)
+
+
+def test_a_graph_with_a_nan_pose_equals_itself() -> None:
+    s = _stats()
+    nan_graph = [(0.0, 0.0), (math.nan, 1.0)]
+    s.on_graph([1, 2], nan_graph, 100.0)
+    s.on_graph([1, 2], [(0.0, 0.0), (math.nan, 1.0)], 105.0)
+    assert _snap(s, 106.0)["last_update_age_s"] == pytest.approx(6.0)
+    s.on_graph([1, 2], [(0.0, 0.0), (2.0, 1.0)], 107.0)  # a real change still resets it
+    assert _snap(s, 108.0)["last_update_age_s"] == pytest.approx(1.0)
+
+
+def test_regular_file_size_of_a_file(tmp_path) -> None:
+    f = tmp_path / "rtabmap.db"
+    f.write_bytes(b"x" * 123)
+    assert regular_file_size(str(f)) == 123
+
+
+def test_regular_file_size_is_none_for_directory_missing_or_empty_path(tmp_path) -> None:
+    assert regular_file_size(str(tmp_path)) is None
+    assert regular_file_size(str(tmp_path / "nope.db")) is None
+    assert regular_file_size("") is None
+
+
+def test_regular_file_size_expands_the_home_directory(tmp_path, monkeypatch) -> None:
+    (tmp_path / "m.db").write_bytes(b"abcd")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    assert regular_file_size(os.path.join("~", "m.db")) == 4
