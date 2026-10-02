@@ -55,6 +55,27 @@ describe('PathHold', () => {
     expect(eased.path[eased.path.length - 1].x).not.toBeCloseTo(jumped[jumped.length - 1].x, 5)
   })
 
+  it('lands on the new path once the post-move ease finishes', () => {
+    const hold = new PathHold()
+    hold.setPose(pose())
+    hold.apply(analysis(open(), 1))
+    const shifted = open()
+    for (let z = 0; z < TH; z++) for (let x = (TW - 1) / 2; x < TW; x++) shifted[z * TW + x] = 2
+    hold.setPose(pose(1, 0))
+    let last = hold.apply(analysis(shifted, 2))
+    for (let stamp = 3; stamp <= 8; stamp++) last = hold.apply(analysis(shifted, stamp))
+    expect(last.path).toEqual(findPath(shifted))
+  })
+
+  it('keeps the debounced grid when the same mask is drawn again', () => {
+    const hold = new PathHold()
+    const first = hold.apply(analysis(lethal(), 1))
+    expect(first.grid[0]).toBe(1) // one hazard frame is not lethal yet
+    const again = hold.apply(analysis(lethal(), 1))
+    expect(again.grid[0]).toBe(1)
+    expect(again.grid).not.toBe(first.grid)
+  })
+
   it('with no pose, ignores one far goal and eases on the next', () => {
     const hold = new PathHold()
     const first = hold.apply(analysis(open(), 1))

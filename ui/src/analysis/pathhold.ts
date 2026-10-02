@@ -122,7 +122,8 @@ export class PathHold {
     }
     // The same mask is analysed on every camera frame. Count a mask once.
     if (this.lastStamp === raw.meta.stamp && this.shown) {
-      return { ...raw, path: this.shown, pathPx: pathPixels(this.shown, raw.meta) }
+      // Later camera frames of this mask must keep the debounced grid the path was searched on.
+      return { ...raw, grid: this.stable.slice(), path: this.shown, pathPx: pathPixels(this.shown, raw.meta) }
     }
     this.lastStamp = raw.meta.stamp
 
@@ -160,6 +161,8 @@ export class PathHold {
       this.farStreak = 0
       next = ease(this.shown, candidate)
       if (this.settling > 0) this.settling--
+      // The last step lands on the new path. Stopping at a 35% ease would freeze short of it.
+      if (this.settling === 0) next = candidate
     }
 
     const changed = next !== this.shown
