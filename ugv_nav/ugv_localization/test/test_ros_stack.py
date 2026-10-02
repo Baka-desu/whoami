@@ -8,6 +8,8 @@ exact-stamp sync, TF ownership) — not RTAB-Map accuracy. Inputs mimic the team
          with the raw K; source image stamp + optical frame) — exactly turing node/cloud.py's format.
          depth_input:=image (default): Dev 1 af7ebbf /perception/depth/image, 32FC1 m, NaN holes, RGB stamp.
 x3 (Task 23) counts real 640x480 frames and the QoS of the rgbd_image subscriptions.
+x4 (Task 8) moves the robot (wheel odometry + the scene sliding past the camera) so RTAB-Map adds graph nodes,
+   and checks the 3D map outputs: /rtabmap/cloud_map, /rtabmap/mapPath, /rtabmap/mapData.
 Skipped unless ROS 2 + rtabmap_ros + an installed ugv_localization are available (colcon test).
 The scene is a static random texture at 3 m: synthetic test input, not a product calibration.
 """
@@ -33,9 +35,9 @@ except Exception:  # noqa: BLE001
 
 import numpy as np  # noqa: E402
 from geometry_msgs.msg import TransformStamped  # noqa: E402
-from nav_msgs.msg import OccupancyGrid, Odometry  # noqa: E402
+from nav_msgs.msg import OccupancyGrid, Odometry, Path as NavPath  # noqa: E402
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data  # noqa: E402
-from rtabmap_msgs.msg import Info, OdomInfo, RGBDImage  # noqa: E402
+from rtabmap_msgs.msg import Info, MapData, OdomInfo, RGBDImage  # noqa: E402
 from sensor_msgs.msg import CameraInfo, Image, PointCloud2, PointField  # noqa: E402
 from std_msgs.msg import Bool, Float64, String  # noqa: E402
 from tf2_msgs.msg import TFMessage  # noqa: E402
@@ -70,16 +72,32 @@ def _scene(w: int, h: int):
 
 
 _K, _TEXTURE, _DEPTH, _POINTS = _scene(_W, _H)
+_SCENE_DEPTH_M = 3.0  # the scene is a fronto-parallel plane this far from the camera (see _scene)
+
+
+def _wide_texture(w: int, h: int, extra: int) -> np.ndarray:
+    """A random texture w + extra pixels wide, same 4x4-pixel blocks as _scene: a moving camera sees a w-wide
+    window of it, so every frame shows new texture and the scene never repeats (no accidental loop closures)."""
+    return np.random.default_rng(7).integers(0, 255, size=(h // 4, (w + extra) // 4, 3), dtype=np.uint8).repeat(4, 0).repeat(4, 1)
 
 
 class Stack:
     def __init__(
         self, tmp: Path, odom_source: str, depth_input: str, *, timing: str = "default",
-        size: tuple[int, int] = (_W, _H), camera_reliable: bool = False,
+        size: tuple[int, int] = (_W, _H), camera_reliable: bool = False, speed: float = 0.0,
     ) -> None:
         self.depth_input = depth_input
         self.w, self.h = size
         self.k, self.texture, self.depth, self.points = _scene(self.w, self.h)
+        # speed > 0 (m/s): the robot slides sideways at that speed. /wheel/odom reports the pose and the scene moves
+        # across the image by the matching number of pixels (a plane at _SCENE_DEPTH_M: shift = fx * y / depth), so wheel
+        # odometry, visual odometry and the pixels agree. Sideways because a pure image shift is exact; a real
+        # differential drive cannot do it, the test only needs pose and pixels to move together. Texture for 5 minutes.
+        self.speed = speed
+        self.y = 0.0  # metres travelled sideways so far
+        self._last_t: float | None = None
+        self._max_shift = int(self.k[0] * speed * 300.0 / _SCENE_DEPTH_M) // 4 * 4  # pixels, a whole number of blocks
+        self._wide = _wide_texture(self.w, self.h, self._max_shift) if speed else None
         self.published = 0  # camera frames published so far (each one complete: image + info + depth)
         self.domain = 30 + (os.getpid() % 30)
         self.ctx = rclpy.Context()
@@ -125,12 +143,24 @@ class Stack:
             TFMessage, "/tf", lambda m: self.seen["tf"].extend((x.header.frame_id, x.child_frame_id) for x in m.transforms), 100
         )
 
+    def _advance(self, now_s: float) -> np.ndarray:
+        """Move the robot to now and return the rgb8 texture it sees there (the static scene when speed is 0)."""
+        if self._wide is None:
+            return self.texture
+        if self._last_t is not None:
+            self.y += self.speed * min(now_s - self._last_t, 0.5)  # a pause between run() calls is not travel
+        self._last_t = now_s
+        shift = min(int(round(self.k[0] * self.y / _SCENE_DEPTH_M)), self._max_shift)
+        start = self._max_shift - shift  # moving left (+y) the scene slides right: the window slides left
+        return self._wide[:, start : start + self.w]
+
     def publish(self, *, wheel: bool, depth: bool) -> None:
-        stamp = self.node.get_clock().now().to_msg()
+        now = self.node.get_clock().now()
+        stamp = now.to_msg()
         img = Image()
         img.header.stamp, img.header.frame_id = stamp, _FRAME
         img.height, img.width, img.encoding, img.step = self.h, self.w, "rgb8", 3 * self.w
-        img.data = self.texture.tobytes()
+        img.data = self._advance(now.nanoseconds * 1e-9).tobytes()
         info = CameraInfo()
         info.header.stamp, info.header.frame_id = stamp, _FRAME
         info.width, info.height, info.distortion_model = self.w, self.h, "plumb_bob"
@@ -158,6 +188,7 @@ class Stack:
         if wheel:
             o = Odometry()
             o.header.stamp, o.header.frame_id, o.child_frame_id = stamp, "odom", "base_link"
+            o.pose.pose.position.y = self.y
             o.pose.pose.orientation.w = 1.0
             o.pose.covariance = list(_COV)
             self.pub_wheel.publish(o)
@@ -198,6 +229,19 @@ class Stack:
             "pub": names(self.node.get_publishers_info_by_topic(topic)),
             "sub": names(self.node.get_subscriptions_info_by_topic(topic)),
         }
+
+    def watch_map_outputs(self) -> dict[str, list]:
+        """Record /rtabmap/cloud_map, /rtabmap/mapPath and /rtabmap/mapData. rtabmap assembles them only while someone
+        subscribes. QoS as the publishers have it (`ros2 topic info -v`, rtabmap_ros 0.23.7): cloud_map RELIABLE +
+        TRANSIENT_LOCAL (node param `latch`), mapPath and mapData RELIABLE + VOLATILE. Deep queues: this probe is
+        single-threaded and must not lose a message itself."""
+        out: dict[str, list] = {"cloud": [], "path": [], "mapdata": []}
+        volatile = QoSProfile(depth=100, reliability=ReliabilityPolicy.RELIABLE)
+        latched = QoSProfile(depth=100, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self.node.create_subscription(PointCloud2, "/rtabmap/cloud_map", out["cloud"].append, latched)
+        self.node.create_subscription(NavPath, "/rtabmap/mapPath", out["path"].append, volatile)
+        self.node.create_subscription(MapData, "/rtabmap/mapData", out["mapdata"].append, volatile)
+        return out
 
     def close(self) -> str:
         os.killpg(self.proc.pid, signal.SIGINT)
@@ -334,3 +378,85 @@ def test_x3_every_synced_frame_reaches_odometry_and_slam(stack: Stack) -> None:
         problems.append("odometry produced fewer than 90% as many odom_info as rgbd_image frames")
     assert not problems, "; ".join(problems) + " | " + counts
     print(counts)
+
+
+_X4_SPEED = 0.3  # m/s: RTAB-Map processes 2 frames/s (Rtabmap/DetectionRate), so 0.15 m per frame beats RGBD/LinearUpdate 0.1
+
+
+def _cloud_field(c: PointCloud2, name: str, dtype: str) -> np.ndarray:
+    """One 4-byte field of every point of c (dtype '<f4' for x/y/z, '<u4' for the packed rgb)."""
+    f = next(f for f in c.fields if f.name == name)
+    rows = np.frombuffer(bytes(c.data), dtype=np.uint8).reshape(-1, c.point_step)
+    return rows[:, f.offset : f.offset + 4].copy().view(dtype)[:, 0]
+
+
+@pytest.mark.parametrize("stack", [{"speed": _X4_SPEED}], ids=["moving-320x240"], indirect=True)
+def test_x4_rtabmap_3d_map_outputs(stack: Stack) -> None:
+    """Task 8. RTAB-Map must publish its 3D products, not only the 2D /map: a coloured 3D /rtabmap/cloud_map, the
+    growing /rtabmap/mapPath, and /rtabmap/mapData whose graph nodes carry what the elevation mapper needs (depth,
+    camera info, camera-to-base transform). The robot has to move, or RTAB-Map adds no graph nodes after the first."""
+    out = stack.watch_map_outputs()
+    seen = stack.seen
+    stack.run(
+        90.0,
+        until=lambda: out["path"] and len(out["path"][-1].poses) >= 2 and any(c.width * c.height for c in out["cloud"]),
+    )
+    poses_early = len(out["path"][-1].poses) if out["path"] else 0
+    stack.run(10.0)  # keep moving: the path must keep growing
+    problems = []
+
+    # /map: the 2D occupancy grid stays (Nav2 and the pose checks use it)
+    grid = seen["map"][-1] if seen["map"] else None
+    if grid is None or not any(v != -1 for v in grid.data):
+        problems.append("/map is missing or has no known cell")
+
+    # /rtabmap/cloud_map: non-empty, coloured, genuinely 3D (Grid/3D false gives a flat z = 0 cloud)
+    clouds = [c for c in out["cloud"] if c.width * c.height]
+    names = [f.name for f in clouds[-1].fields] if clouds else []
+    z_span = 0.0
+    if clouds:
+        z = _cloud_field(clouds[-1], "z", "<f4")
+        z_span = float(z.max() - z.min())
+    if not clouds:
+        problems.append("/rtabmap/cloud_map never had a point")
+    else:
+        colour_field = next((n for n in ("rgb", "rgba") if n in names), None)
+        if colour_field is None:
+            problems.append(f"cloud_map has no rgb/rgba field: {names}")
+        elif not _cloud_field(clouds[-1], colour_field, "<u4").any():
+            problems.append("cloud_map colour is all zero")
+        if z_span < 0.2:
+            problems.append(f"cloud_map is flat (z spans {z_span:.3f} m): Grid/3D is off")
+        if clouds[-1].header.frame_id != "map":
+            problems.append(f"cloud_map frame_id {clouds[-1].header.frame_id!r}, not 'map'")
+
+    # /rtabmap/mapPath: at least 2 poses, and more of them later in the run
+    lens = [len(p.poses) for p in out["path"]]
+    if not lens or max(lens) < 2:
+        problems.append(f"mapPath never had 2 poses: {lens[-5:]}")
+    elif lens[-1] < poses_early + 3:
+        problems.append(f"mapPath did not grow: {poses_early} poses early, {lens[-1]} at the end")
+
+    # /rtabmap/mapData: the message that brings a graph node carries its depth, camera info and camera-to-base transform.
+    # Later entries for the same id do not: for each processed frame that adds no node (the robot has not moved 0.1 m since
+    # the last one) RTAB-Map sends the newest graph node again, same id and stamp, with its images empty. So check the
+    # first entry of each id that is in graph.poses_id (an entry whose id is not in the graph is not a node delivery).
+    first: dict[int, object] = {}
+    for m in out["mapdata"]:
+        in_graph = set(m.graph.poses_id)
+        for node in m.nodes:
+            if node.id in in_graph:
+                first.setdefault(node.id, node.data)
+    bad = [(i, f) for i, d in first.items() for f in ("right_compressed", "left_camera_info", "local_transform") if not len(getattr(d, f))]
+    checked = len(first)
+    if checked < 3:
+        problems.append(f"mapData delivered only {checked} graph node(s) in {len(out['mapdata'])} messages")
+    if bad:
+        problems.append(f"mapData graph nodes delivered with empty data: {bad[:6]}")
+
+    summary = (
+        f"clouds={len(out['cloud'])} (points {[c.width * c.height for c in out['cloud'][-3:]]}, fields {names}, z span {z_span:.2f} m) "
+        f"mapPath lens={lens[:3]}..{lens[-3:]} (early {poses_early}) mapData msgs={len(out['mapdata'])} graph nodes checked={checked}"
+    )
+    assert not problems, "; ".join(problems) + " | " + summary
+    print(summary)

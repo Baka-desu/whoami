@@ -32,6 +32,14 @@
     qos: 1                      # 0 = system default (best effort for a subscriber), 1 = reliable, 2 = best effort
     topic_queue_size: 2
 
+    # 3D map outputs for the web viewer and the elevation mapper (docs/superpowers/plans/2026-10-02-3d-mapping-elevation.md):
+    # /rtabmap/cloud_map, /rtabmap/mapPath, /rtabmap/mapGraph, /rtabmap/mapData. rtabmap only assembles them while someone
+    # subscribes. Values are the 0.23.7 defaults (checked with `ros2 param get`), pinned so an upgrade cannot change them.
+    cloud_output_voxelized: true       # cloud_map voxelised at Grid/CellSize, not one point per depth pixel
+    cloud_subtract_filtering: false    # keep every node's points (true removes points the earlier nodes already cover)
+    map_always_update: false           # no map rebuild while the graph is unchanged (robot parked)
+    latch: true                        # cloud_map, mapGraph and /map are TRANSIENT_LOCAL: a late subscriber gets the last one
+
     # ---- RTAB-Map library params (strings) ------------------------------------------
     Reg/Strategy: "0"               # visual registration
     Reg/Force3DoF: "true"           # ground robot: x, y, yaw only
@@ -54,7 +62,7 @@
 
     # Occupancy grid /map from DA3 depth (optional for Dev 3; not a Nav2 requirement).
     Grid/Sensor: "1"                # 1 = depth image (0 = laser scan, 2 = both)
-    Grid/3D: "false"                # 2D grid
+    Grid/3D: "true"                 # keep the 3D local maps: /rtabmap/cloud_map is a coloured 3D cloud (false = flat z=0)
     Grid/CellSize: "0.05"
     Grid/RangeMin: "0.3"
     Grid/RangeMax: "5.0"            # shorter than Vis/MaxDepth: far DA3 depth smears obstacles
