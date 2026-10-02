@@ -1,283 +1,201 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
-import { unavailableAnalyzer, type Analyzer } from './analysis/analyzer'
-import { RosPerception } from './analysis/ros-analyzer'
-import { useFreshness } from './analysis/freshness'
+import { Component, lazy, Suspense, useEffect, useState, type ReactNode } from 'react'
+import { CameraView } from './components/CameraView'
+import { CommandPanel } from './components/CommandPanel'
 import { Inspector } from './components/Inspector'
+import { SafetyBoard } from './components/SafetyBoard'
 import { SourcePanel } from './components/SourcePanel'
+import { StatusWidgets } from './components/StatusWidgets'
 import { TopBar } from './components/TopBar'
-import { Viewport } from './components/Viewport'
-import { openCamera } from './source/camera'
-import { connectRos, type CameraCalibration, type RosApi, type RosOptions } from './source/rosbridge'
-import { basePoseInMap, fresh, type Pose2D, type RobotSnapshot, type RobotState } from './source/robot'
 import {
-  assumedIntrinsics, type Analysis, type FrameMeta, type Intrinsics, type Layers, type SourceKind, type Status,
-} from './types'
+  parseView, slotOnError, slotOnProps, slotState, type MainView, type SlotFailure, type SlotState,
+} from './map/mapToggles'
+import { ApiError, api, isLive, subscribeTelemetry, type Mode, type Telemetry } from './source/api'
+import { noteRobotPose, useCameraSource } from './source/useCameraSource'
 
-const FRAME_INTERVAL_MS = 250
-const ROBOT_SNAPSHOT_MS = 250 // topics arrive at up to 20 Hz; re-render at 4 Hz
-const START_POSE_MAX_AGE_MS = 1000
+const CLOCK_MS = 250 // re-check telemetry freshness at 4 Hz so a dead stream reads NO SIGNAL promptly
 
-// ROS 2 frames are analysed by Dev 1's Perception Port outputs received over rosbridge. Uploads and the browser
-// camera have no perception backend (no REST analyzer yet), so they stay unavailable rather than faked.
-const rosPerception = new RosPerception()
-const analyzerFor = (src: SourceKind): Analyzer => (src === 'ros2' ? rosPerception : unavailableAnalyzer)
+// three.js is large, so the map view is its own lazily loaded chunk: the camera view's first paint does not pay for it.
+const MapView = lazy(() => import('./components/MapView').then((m) => ({ default: m.MapView })))
 
+const VIEWS: MainView[] = ['camera', 'map']
+const VIEW_KEY = 'ugv.console.view'
+
+const savedView = (): MainView => {
+  try {
+    return parseView(localStorage.getItem(VIEW_KEY))
+  } catch {
+    return 'camera'
+  }
+}
+
+interface SlotProps {
+  resetKey: string // a new key (another view, another attempt) clears a failure
+  fallback: (failure: SlotFailure) => ReactNode
+  children: ReactNode
+}
+
+// Error boundary around the main view only. A view that fails - its code cannot be downloaded (a stale chunk after a
+// redeploy, a network hiccup) or it throws while rendering or in an effect (say, a malformed frame) - shows its
+// failure in the view area; without this React would unmount the whole console, the e-stop and safety board with it.
+// The state logic is in mapToggles.ts (slotState / slotOnError / slotOnProps), where it is tested.
+class ViewBoundary extends Component<SlotProps, SlotState> {
+  state: SlotState = slotState(this.props.resetKey)
+
+  static getDerivedStateFromError(error: unknown) {
+    return slotOnError(error)
+  }
+
+  static getDerivedStateFromProps(props: SlotProps, state: SlotState) {
+    return slotOnProps(state, props.resetKey)
+  }
+
+  render() {
+    return this.state.failed ? this.props.fallback(this.state.failed) : this.props.children
+  }
+}
+
+type Message = { text: string; reasons?: string[]; error: boolean } | null
+
+const fromError = (e: unknown): Message =>
+  e instanceof ApiError
+    ? { text: `${e.problem.title}${e.problem.detail ? `: ${e.problem.detail}` : ''}`, reasons: e.problem.reasons, error: true }
+    : { text: String(e), error: true }
+
+// Operator console. The main area shows one of two views, picked in the top bar: the camera view (Dev 1's mask /
+// depth / path over the live image) or the 3D map view; both are display only, and only the shown one is mounted.
+// Left sidebar: the operator's commands (e-stop §3.1, mapping|localize §10, map-frame goal §11) through Dev 5's
+// gateway (/api/v1), and the camera source. Right sidebar: §12 health table, robot status, perception details.
 export default function App() {
-  const [source, setSource] = useState<SourceKind>('upload')
-  const [frame, setFrame] = useState<ImageBitmap | null>(null)
-  const [analysis, setAnalysis] = useState<Analysis | null>(null)
-  const [layers, setLayers] = useState<Layers>({ image: true, mask: true, depth: false, path: true })
-  const [status, setStatus] = useState<Status>('idle')
-  const [note, setNote] = useState('')
-  const [fps, setFps] = useState(0)
-  const [live, setLive] = useState(false)
-  const [rosOn, setRosOn] = useState(false)
-  const [rosCfg, setRosCfg] = useState<RosOptions>({
-    url: 'ws://localhost:9090',
-    imageTopic: '/image_raw/compressed',
-    infoTopic: '/camera_info',
-  })
-  const lastFrameAt = useRef(0)
-  const rosInfo = useRef<CameraCalibration | null>(null)
-  const freshness = useFreshness(analysis)
-  const ingestSeq = useRef(0)
-  const rosApi = useRef<RosApi | null>(null)
-  const robotRef = useRef<RobotState>({})
-  const [robot, setRobot] = useState<RobotSnapshot | null>(null)
-  const [rosConnected, setRosConnected] = useState(false)
-  const [goalStatus, setGoalStatus] = useState('')
-  const [estop, setEstop] = useState(false)
-  const estopRef = useRef(false)
-  // Mission reference pose in `map` (archV1.md §9), frozen from Dev 2's TF when the operator sets
-  // the start; goals are expressed relative to it, never to wherever the robot is later.
-  const [startPose, setStartPose] = useState<Pose2D | null>(null)
+  const [telemetry, setTelemetry] = useState<Telemetry | null>(null)
+  const [connected, setConnected] = useState(false)
+  const [now, setNow] = useState(() => Date.now())
+  const [estopBusy, setEstopBusy] = useState(false)
+  const [message, setMessage] = useState<Message>(null)
+  const [view, setView] = useState<MainView>(savedView)
+  const [viewAttempt, setViewAttempt] = useState(0) // bumped by "try again" after a failed view
+  const cam = useCameraSource()
+  // The map view's image panels show the robot camera only (not the browser camera or an upload), and its depth only
+  // while that analysis is current: one feed for both views, nothing fetched twice.
+  const onRobot = cam.source === 'ros2'
+  const robotImage = onRobot ? cam.frame : null
+  const robotDepth = onRobot && cam.freshness?.ok ? cam.analysis?.depth ?? null : null
 
-  const ingest = useCallback(async (bmp: ImageBitmap, src: SourceKind, stamp: number, frameId: string, streaming: boolean, K?: Intrinsics | null) => {
-    const receivedAt = Date.now()
-    const meta: FrameMeta = {
-      source: src, frameId, stamp, receivedAt, width: bmp.width, height: bmp.height,
-      K: K ?? assumedIntrinsics(bmp.width, bmp.height), kAssumed: !K, streaming,
-    }
-    const now = performance.now()
-    const dt = now - lastFrameAt.current
-    lastFrameAt.current = now
-    setFps((f) => (dt > 0 && dt < 2000 ? f * 0.7 + (1000 / dt) * 0.3 : 0))
-    setFrame(bmp)
-    const seq = ++ingestSeq.current
-    let result: Analysis | null = null
-    try {
-      result = await analyzerFor(src).analyze(bmp, meta)
-    } catch {
-      result = null
-    }
-    if (seq === ingestSeq.current) setAnalysis(result) // a newer frame already took over
+  const pickView = (v: MainView) => {
+    setView(v)
+    try { localStorage.setItem(VIEW_KEY, v) } catch { /* not persisted */ }
+  }
+
+  const viewFailed = (f: SlotFailure) => (
+    <section className="viewfail" role="alert">
+      <b>{view} view {f.load ? 'failed to load' : 'stopped'}</b>
+      <span>{f.detail}</span>
+      <span>The rest of the console, the e-stop included, keeps working.</span>
+      <div className="viewfail-actions">
+        {view === 'map' && (
+          <button type="button" className="btn primary" onClick={() => pickView('camera')}>back to camera view</button>
+        )}
+        {f.load ? (
+          <button type="button" className="btn" onClick={() => window.location.reload()}>reload page</button>
+        ) : (
+          <button type="button" className="btn" onClick={() => setViewAttempt((a) => a + 1)}>try again</button>
+        )}
+      </div>
+    </section>
+  )
+
+  useEffect(() => subscribeTelemetry(setTelemetry, setConnected), [])
+  useEffect(() => {
+    const t = window.setInterval(() => setNow(Date.now()), CLOCK_MS)
+    return () => window.clearInterval(t)
   }, [])
 
-  useEffect(() => () => frame?.close(), [frame])
-
-  const stopLive = () => { setLive(false); setRosOn(false) }
-  const afterStop = frame ? 'still' : 'idle'
-
-  const pickSource = (s: SourceKind) => {
-    stopLive()
-    setSource(s)
-    setNote('')
-    setStatus(afterStop)
-  }
-
-  const upload = async (file: File) => {
-    stopLive()
-    setNote('')
-    try {
-      await ingest(await createImageBitmap(file), 'upload', Date.now(), file.name, false)
-      setStatus('still')
-    } catch {
-      setStatus('error')
-      setNote(`cannot read ${file.name}`)
+  const live = isLive(telemetry, now)
+  const safety = live ? telemetry.safety : undefined
+  const pose = live ? telemetry.pose : undefined
+  useEffect(() => {
+    if (pose?.available && pose.x !== null && pose.y !== null && pose.qx !== null && pose.qy !== null && pose.qz !== null && pose.qw !== null) {
+      noteRobotPose({ x: pose.x, y: pose.y, qx: pose.qx, qy: pose.qy, qz: pose.qz, qw: pose.qw })
+    } else {
+      noteRobotPose(null)
     }
-  }
+  }, [pose])
+  const gateReasons = safety ? safety.watches.filter((w) => !w.ok).map((w) => `${w.name}: ${w.reason}`) : []
 
-  const setLiveCamera = (on: boolean) => {
-    setLive(on)
-    if (!on) setStatus(afterStop)
-  }
-
-  const takePhoto = async () => {
-    if (live) return setLiveCamera(false)
+  const run = async (fn: () => Promise<string>) => {
     try {
-      const cam = await openCamera()
-      await new Promise((r) => setTimeout(r, 500)) // let exposure settle
-      await ingest(await createImageBitmap(cam.video), 'camera', Date.now(), 'camera', false)
-      cam.stop()
-      setStatus('still')
-      setNote('')
+      setMessage({ text: await fn(), error: false })
     } catch (e) {
-      setStatus('error')
-      setNote(`camera: ${(e as Error).message}`)
+      setMessage(fromError(e))
     }
   }
 
-  useEffect(() => {
-    if (!live) return
-    let cancelled = false
-    let busy = false
-    let timer: number | undefined
-    let stop = () => {}
-    openCamera().then((cam) => {
-      if (cancelled) return cam.stop()
-      stop = cam.stop
-      setStatus('live')
-      setNote('')
-      timer = window.setInterval(async () => {
-        if (busy) return
-        busy = true
-        try {
-          await ingest(await createImageBitmap(cam.video), 'camera', Date.now(), 'camera', true)
-        } finally {
-          busy = false
-        }
-      }, FRAME_INTERVAL_MS)
-    }).catch((e: Error) => {
-      setLive(false)
-      setStatus('error')
-      setNote(`camera: ${e.message}`)
+  const setEstop = async (asserted: boolean) => {
+    setEstopBusy(true)
+    await run(async () => {
+      const r = await api.setEstop(asserted)
+      return r.assertedByGateway ? 'E-stop asserted.' : 'E-stop released by this console.'
     })
-    return () => {
-      cancelled = true
-      window.clearInterval(timer)
-      stop()
-    }
-  }, [live, ingest])
+    setEstopBusy(false)
+  }
 
-  useEffect(() => {
-    if (!rosOn) return
-    const disconnect = connectRos(rosCfg, {
-      onInfo: (calib) => { rosInfo.current = calib },
-      onFrame: (bmp, stamp, frameId) => {
-        let resolvedK: Intrinsics | null = null
-        const calib = rosInfo.current
-        if (calib) {
-          const normFrameId = frameId.replace(/^\//, '')
-          const normCalibId = calib.frameId.replace(/^\//, '')
-          if (!normCalibId || normFrameId === normCalibId) {
-            if (calib.width > 0 && calib.height > 0) {
-              const scaleX = bmp.width / calib.width
-              const scaleY = bmp.height / calib.height
-              resolvedK = {
-                fx: calib.K.fx * scaleX,
-                fy: calib.K.fy * scaleY,
-                cx: calib.K.cx * scaleX,
-                cy: calib.K.cy * scaleY,
-              }
-            } else {
-              resolvedK = calib.K
-            }
-          }
-        }
-        void ingest(bmp, 'ros2', stamp, frameId, true, resolvedK)
-        setStatus('live')
-      },
-      onStatus: (text, ok) => {
-        setNote(text)
-        setRosConnected(ok)
-        if (!ok) { setStatus('error'); rosApi.current = null }
-      },
-      onReady: (api) => {
-        rosApi.current = api
-        if (estopRef.current) api.setEstop(true) // an asserted e-stop survives a reconnect
-      },
-      onGoalUpdate: setGoalStatus,
-      onState: (patch) => {
-        Object.assign(robotRef.current, patch)
-        if (patch.perceptionDegraded) rosPerception.setHealth({ degraded: patch.perceptionDegraded.value })
-        if (patch.portMeta) rosPerception.setHealth({ valid: patch.portMeta.value.valid })
-      },
-      onMask: (m) => rosPerception.pushMask(m),
-      onDepth: (d) => rosPerception.pushDepth(d),
+  const setMode = (mode: Mode) => run(async () => `Localization mode set to ${await api.setMode(mode)}.`)
+
+  const sendGoal = (x: number, y: number, yaw: number) =>
+    run(async () => {
+      const g = await api.sendGoal(x, y, yaw)
+      return `Goal ${g.id.slice(0, 8)} sent: ${g.state}.`
     })
-    const snapshotTimer = window.setInterval(() => setRobot({ ...robotRef.current, now: Date.now() }), ROBOT_SNAPSHOT_MS)
-    return () => {
-      window.clearInterval(snapshotTimer)
-      rosApi.current = null
-      robotRef.current = {}
-      rosPerception.reset()
-      setRobot(null); setRosConnected(false); setStartPose(null)
-      disconnect()
-    }
-    // rosCfg is locked while connected
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rosOn, ingest])
 
-  const toggleRos = (on: boolean) => {
-    setRosOn(on)
-    if (!on) {
-      rosInfo.current = null
-      setNote('')
-      setGoalStatus('')
-      setStatus(afterStop)
-    }
-  }
-
-  // Goal gate (UI convenience only - Dev 5's safety authority is the real one): never send while
-  // the pose is invalid, Nav2 is not heartbeating, perception is degraded, or e-stop is asserted.
-  const now = robot?.now ?? 0
-  const poseValid = robot ? fresh(robot.poseValid, now) : undefined
-  const nav2Up = robot ? fresh(robot.nav2Heartbeat, now) : undefined
-  const perceptionDegraded = robot ? fresh(robot.perceptionDegraded, now) : undefined
-  const goalBlockedReason = !rosConnected ? ''
-    : estop ? 'e-stop asserted'
-    : poseValid !== true ? 'pose not valid'
-    : nav2Up !== true ? 'Nav2 not active'
-    : perceptionDegraded ? 'perception degraded'
-    : freshness && !freshness.ok ? freshness.label.toLowerCase()
-    : ''
-  const canSendGoal = rosConnected && !goalBlockedReason && !!startPose
-
-  const setStart = () => {
-    const p = robot ? basePoseInMap(robot, Date.now()) : null
-    if (poseValid !== true) return setGoalStatus('cannot set start: pose not valid')
-    if (!p || Date.now() - p.receivedAt > START_POSE_MAX_AGE_MS) return setGoalStatus('cannot set start: no fresh map->base_link TF')
-    setStartPose(p)
-    setGoalStatus('')
-  }
-
-  // fwd/left are metres in the start pose's frame (x forward, y left); relYaw is relative to its heading.
-  const sendGoal = (fwd: number, left: number, relYaw: number) => {
-    const ref = startPose
-    if (!rosApi.current || !canSendGoal || !ref) return
-    const c = Math.cos(ref.yaw), s = Math.sin(ref.yaw)
-    setGoalStatus('goal sent, waiting for feedback...')
-    rosApi.current.sendGoal({
-      x: ref.x + c * fwd - s * left,
-      y: ref.y + s * fwd + c * left,
-      yawRad: ref.yaw + relYaw,
-      frameId: 'map',
-    })
-  }
-
-  const toggleEstop = (asserted: boolean) => {
-    if (!rosApi.current) return
-    rosApi.current.setEstop(asserted)
-    estopRef.current = asserted
-    setEstop(asserted)
-  }
+  const cancelGoal = (id: string) => run(async () => `Goal ${id.slice(0, 8)}: ${(await api.cancelGoal(id)).state}.`)
 
   return (
     <div className="app">
-      <TopBar status={status} fps={fps} note={note} analyzerOnline={analyzerFor(source).available} />
-      <SourcePanel
-        source={source} onSource={pickSource}
-        layers={layers} onLayers={setLayers}
-        live={live} onLive={setLiveCamera} onPhoto={takePhoto} onUpload={upload}
-        rosCfg={rosCfg} onRosCfg={setRosCfg} rosOn={rosOn} onRosOn={toggleRos}
-        rosConnected={rosConnected} goalStatus={goalStatus}
-        onSendGoal={sendGoal} onCancelGoal={() => rosApi.current?.cancelGoal()}
-        canSendGoal={canSendGoal} goalBlockedReason={goalBlockedReason}
-        hasStart={!!startPose} canSetStart={rosConnected && poseValid === true} onSetStart={setStart}
-        estop={estop} onEstop={toggleEstop}
-      />
-      <Viewport frame={frame} analysis={analysis} layers={layers} freshness={freshness} />
-      <Inspector analysis={analysis} freshness={freshness} robot={robot} estop={estop} />
+      <TopBar connected={connected} live={live} safetyOk={safety?.ok ?? null} />
+      <nav className="viewswitch" aria-label="Main view">
+        {VIEWS.map((v) => (
+          <button key={v} type="button" className={view === v ? 'on' : ''} aria-pressed={view === v} onClick={() => pickView(v)}>
+            {v}
+          </button>
+        ))}
+      </nav>
+      <aside className="panel source">
+        <CommandPanel
+          live={live}
+          estopAsserted={safety?.eStop.asserted ?? false}
+          estopBusy={estopBusy}
+          onEstop={setEstop}
+          mode={live ? telemetry.localization?.requestedMode ?? null : null}
+          onMode={setMode}
+          gateReasons={gateReasons}
+          activeGoal={live ? telemetry.navigation?.activeGoal ?? null : null}
+          onSendGoal={sendGoal}
+          onCancelGoal={cancelGoal}
+          message={message}
+        />
+        <SourcePanel cam={cam} />
+      </aside>
+      <ViewBoundary resetKey={`${view}:${viewAttempt}`} fallback={viewFailed}>
+        {view === 'camera' ? (
+          <CameraView cam={cam} />
+        ) : (
+          <Suspense fallback={<section className="mapview" aria-busy="true" />}>
+            <MapView telemetry={telemetry} live={live} image={robotImage} depth={robotDepth} />
+          </Suspense>
+        )}
+      </ViewBoundary>
+      <aside className="panel inspector">
+        <SafetyBoard safety={safety} live={live} />
+        <p className="inspector-hint">drag widgets to rearrange · alt + arrows on keyboard</p>
+        <StatusWidgets
+          live={live}
+          command={telemetry?.command}
+          navigation={telemetry?.navigation}
+          localization={telemetry?.localization}
+          eStop={safety?.eStop}
+          map={telemetry?.map}
+        />
+        <Inspector analysis={cam.analysis} freshness={cam.freshness} />
+      </aside>
     </div>
   )
 }

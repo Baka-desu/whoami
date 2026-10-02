@@ -1,0 +1,8 @@
+# LAPTOP timing overlay on pose_validity.yaml (localization.launch.py timing:=laptop; launch passes it as
+# profile_overlay_path, every other key comes from the base file). On an RTX 4060 laptop DA3 depth arrives
+# ~1 Hz and ~0.7 s after the image, so the 0.5 s defaults mark a tracking robot permanently invalid.
+# Not for a deployed robot. Keys must exist in the base file (a typo fails at load).
+localization_max_age_s: 1.5   # TF map->base_link
+odom_max_age_s: 1.5           # /odom (selected source from odom_selector)
+depth_max_age_s: 1.5          # DA3 depth Image stamp (= source image stamp): includes DA3 latency
+slam_max_age_s: 4.0           # rtabmap/info; published per processed frame (Rtabmap/DetectionRate)

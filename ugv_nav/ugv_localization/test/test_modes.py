@@ -97,3 +97,13 @@ def test_m14_params_are_copies(tmp_path: Path) -> None:
     plan = plan_mode(Mode.MAPPING, str(tmp_path / "a.db"), fresh=False)
     plan.rtabmap_params()["Mem/IncrementalMemory"] = "false"
     assert plan.rtabmap_params()["Mem/IncrementalMemory"] == "true"
+
+
+def test_m15_mapping_db_does_not_keep_deleted_nodes() -> None:
+    # Resuming a database whose last saved node was deleted (weight -9) aborts rtabmap in Memory::addLink
+    # (fromS->getWeight() >= 0). Deleted nodes are saved only while Mem/NotLinkedNodesKept is true.
+    import yaml
+
+    cfg = Path(__file__).resolve().parents[1] / "config" / "rtabmap_rgbd.yaml"
+    params = yaml.safe_load(cfg.read_text(encoding="utf-8"))["/**"]["ros__parameters"]
+    assert params["Mem/NotLinkedNodesKept"] == "false"

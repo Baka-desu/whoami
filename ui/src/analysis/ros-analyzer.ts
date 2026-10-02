@@ -4,10 +4,13 @@
 // The UI frame and the mask are different messages, so each analysis is paired with the NEWEST mask and reports
 // the mask's own age: a perception node that stalls goes STALE even while camera frames keep arriving (the
 // returned meta carries the mask's stamp and arrival time, which is what the freshness clock reads).
+// The drawn path is then held (pathhold.ts): it stays put until the gateway pose moves, and it is dropped
+// when its corridor stays lethal.
 import { GH, GW, PERCEPTION_MAX_AGE_MS, type Analysis, type FrameMeta } from '../types'
 import type { RosDepth, RosMask } from '../source/rosimage'
 import type { Analyzer } from './analyzer'
 import { buildAnalysis } from './groundmap'
+import { PathHold, type RobotPose } from './pathhold'
 
 export interface PerceptionHealth {
   degraded?: boolean // /ugv/perception_degraded
@@ -42,6 +45,7 @@ export class RosPerception implements Analyzer {
   private mask: RosMask | null = null
   private depth: RosDepth | null = null
   private health: PerceptionHealth = {}
+  private path = new PathHold()
 
   get available(): boolean {
     return this.mask !== null && Date.now() - this.mask.receivedAt <= CONNECTED_MS
@@ -61,10 +65,16 @@ export class RosPerception implements Analyzer {
     this.health = { ...this.health, ...h }
   }
 
+  // Gateway pose (map -> base_link). Null when telemetry is down: the path then eases instead of freezing.
+  setPose(pose: RobotPose | null): void {
+    this.path.setPose(pose)
+  }
+
   reset(): void {
     this.mask = null
     this.depth = null
     this.health = {}
+    this.path.reset()
   }
 
   async analyze(_frame: ImageBitmap, meta: FrameMeta): Promise<Analysis | null> {
@@ -89,9 +99,9 @@ export class RosPerception implements Analyzer {
     const d = this.depth
     const depth = d && d.stampMs === mask.stampMs && frameKey(d.frameId) === frameKey(mask.frameId) ? resampleDepth(d) : null
 
-    return buildAnalysis({
+    return this.path.apply(buildAnalysis({
       meta: { ...meta, stamp: mask.stampMs, receivedAt: mask.receivedAt },
       mask: classes, depth, latencyMs: performance.now() - t0, reasons,
-    })
+    }))
   }
 }

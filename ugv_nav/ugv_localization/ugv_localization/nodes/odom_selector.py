@@ -30,7 +30,8 @@ class OdomSelectorNode(Node):
         if not profile_path:
             raise RuntimeError("profile_path parameter is required")
         policy = parse_odom_source(self.declare_parameter("odom_source", "auto").value)
-        cfg = load_odom_select_config(profile_path)
+        overlay_path = self.declare_parameter("profile_overlay_path", "").value  # e.g. odom_select_laptop.yaml
+        cfg = load_odom_select_config(profile_path, overlay_path or None)
         self._odom_frame = cfg.wheel_gate.odom_frame
         self._base_frame = cfg.wheel_gate.base_frame
         self._gates = {Source.WHEEL: OdomGate(cfg.wheel_gate), Source.VISUAL: OdomGate(cfg.visual_gate)}

@@ -56,7 +56,7 @@ button, input { font: inherit; color: inherit; }
 
 .app {
   display: grid;
-  grid-template: 48px minmax(0, 1fr) / 264px minmax(0, 1fr) 420px;
+  grid-template: 48px minmax(0, 1fr) / 300px minmax(0, 1fr) 400px;
   grid-template-areas: 'top top top' 'source view inspect';
   height: 100vh;
 }
@@ -326,4 +326,127 @@ input:disabled { opacity: 0.5; }
 
 @media (hover: none) {
   .btn, .tabs button, .toggle, .drop { -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
+}
+
+/* operator console: §12 safety board */
+.board { place-items: stretch; }
+.board-inner { display: grid; gap: 16px; align-content: start; width: 100%; max-width: 920px; justify-self: center; }
+.verdict { display: grid; gap: 4px; padding: 18px 20px; border: 1px solid var(--line-strong); background: var(--panel); }
+.verdict span { font-size: 11px; letter-spacing: 0.22em; color: var(--dim); }
+.verdict b { font-size: 26px; letter-spacing: 0.16em; }
+.verdict em { font-style: normal; font-size: 12px; color: var(--dim); }
+.verdict.ok b { color: var(--accent); text-shadow: var(--glow); }
+.verdict.hold { border-color: var(--alert); }
+.verdict.hold b { color: var(--alert); }
+.watch-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; }
+.watch { display: grid; gap: 4px; padding: 14px 16px; border: 1px solid var(--line-strong); background: var(--panel); min-height: 96px; }
+.watch span { font-size: 11px; letter-spacing: 0.12em; color: var(--dim); text-transform: uppercase; }
+.watch b { font-size: 18px; letter-spacing: 0.16em; color: var(--accent); }
+.watch p { margin: 0; font-size: 11px; color: var(--dim); overflow-wrap: anywhere; }
+.watch.trip { border-color: var(--alert); }
+.watch.trip b { color: var(--on-pale); background: var(--alert); justify-self: start; padding: 0 8px; }
+.watch.trip p { color: var(--orange); }
+.arbiter { display: grid; gap: 4px; padding: 14px 16px; border: 1px dashed var(--line-strong); }
+.arbiter span { font-size: 11px; letter-spacing: 0.12em; color: var(--dim); text-transform: uppercase; }
+.arbiter b { font-size: 14px; letter-spacing: 0.08em; }
+.arbiter p { margin: 0; font-size: 11px; color: var(--dim); }
+.arbiter.absent { border-color: var(--orange); }
+.arbiter.absent b { color: var(--orange); }
+.tabs.two { grid-template-columns: repeat(2, 1fr); }
+.tabs button:disabled { opacity: 0.4; cursor: not-allowed; }
+.btn.estop { width: 100%; padding: 18px 0; font-size: 16px; letter-spacing: 0.24em; font-weight: 700; }
+code { font-size: 10px; color: var(--text); overflow-wrap: anywhere; }
+
+/* Main page = the camera view; the console lives in the two sidebars. */
+.camera { grid-area: view; display: grid; grid-template-rows: auto minmax(0, 1fr); min-height: 0; }
+.camera > .viewport { grid-area: auto; padding: 12px; }
+.livefeed-bar { display: flex; align-items: center; gap: 10px; padding: 8px 14px; font-size: 11px; border-bottom: 1px solid var(--line); min-width: 0; }
+.livefeed-bar > span:nth-child(2) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.livefeed-bar .dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--dim); }
+.livefeed-bar .dot.ok { background: var(--accent, #6ee7b7); }
+.livefeed-bar .dot.bad { background: #f87171; }
+.livefeed-bar .flag { flex: none; font-size: 10px; letter-spacing: 0.12em; color: var(--orange); border: 1px solid var(--orange); padding: 1px 6px; }
+.livefeed-layers { margin-left: auto; display: flex; gap: 6px; flex: none; }
+.livefeed-layers button { font: inherit; font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; padding: 3px 10px; background: none; color: var(--dim); border: 1px solid var(--line-strong); cursor: pointer; }
+.livefeed-layers button.on { color: inherit; border-color: var(--accent, #6ee7b7); }
+
+/* Right sidebar: §12 board, then the robot and perception widget grids. */
+.inspector .board { padding: 4px 4px 16px; margin-bottom: 12px; }
+.board .verdict { padding: 12px 14px; margin-bottom: 10px; }
+.board .verdict b { font-size: 18px; }
+.board .watch-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-bottom: 10px; }
+.board .watch { min-height: 0; padding: 10px 12px; }
+.board .watch b { font-size: 14px; }
+.sidegroup { margin-bottom: 16px; }
+.sidegroup-title { margin: 4px 2px 8px; font-size: 11px; font-weight: 500; letter-spacing: 0.22em; color: var(--dim); text-transform: uppercase; }
+
+/* camera | map switch (App.tsx), laid over the middle of the top bar in the top bar's own ink */
+.viewswitch { grid-area: top; justify-self: center; align-self: center; z-index: 1; display: flex; border: 1px solid var(--on-pale); }
+.viewswitch button { padding: 2px 12px; background: none; border: 0; color: var(--on-pale); font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase; opacity: 0.6; cursor: pointer; transition: opacity 0.18s var(--ease), background 0.18s var(--ease); }
+.viewswitch button + button { border-left: 1px solid var(--on-pale); }
+.viewswitch button:hover { opacity: 1; }
+.viewswitch button:focus-visible { outline-color: var(--on-pale); opacity: 1; }
+.viewswitch button.on { background: var(--on-pale); color: var(--pale); font-weight: 700; opacity: 1; }
+
+/* Map view (MapView.tsx): the 3D map with the depth and camera panels inset on its left edge, as in the owner's
+   reference picture. Everything is scoped under .mapview; the .viewport canvas rules above belong to the camera view
+   and reach neither the GL canvas (MapScene styles it inline) nor the panels' canvases. */
+.mapview { grid-area: view; display: grid; grid-template-rows: auto minmax(0, 1fr); min-height: 0; }
+/* The bar fits one row from a 1280 px window (view area ~580 px): the status text takes only what the controls leave
+   (flex-basis 0, so it can never push them onto a second row) and holds no numbers that could be cut; compact
+   controls; below 1280 px the controls may wrap. */
+.mapview .livefeed-bar > span:nth-child(2) { flex: 1 1 0; min-width: 0; }
+.mapview .livefeed-layers { flex: 0 1 auto; flex-wrap: wrap; justify-content: flex-end; gap: 4px; }
+.mapview .livefeed-layers button { padding: 3px 6px; }
+.mapview .livefeed-layers button:disabled { opacity: 0.4; cursor: not-allowed; }
+.mapview-stage { position: relative; min-height: 0; overflow: hidden; background: var(--bg); }
+.mapview-gl { position: absolute; inset: 0; }
+.mapview-stage::before, .mapview-stage::after {
+  content: '';
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  border: 2px solid var(--accent);
+  pointer-events: none;
+  z-index: 2;
+}
+.mapview-stage::before { top: 8px; left: 8px; border-right: 0; border-bottom: 0; }
+.mapview-stage::after { right: 8px; bottom: 8px; border-left: 0; border-top: 0; }
+/* Centred over the map, above the image panels (same z-index as them, later in the DOM is not enough on a narrow stage),
+   and wrapping inside the stage's width instead of running under them or past the edge. */
+.mapview .banner { left: 16px; right: 16px; width: fit-content; max-width: calc(100% - 32px); margin-inline: auto; box-sizing: border-box; text-align: center; z-index: 4; }
+.mapview-insets { position: absolute; top: 16px; left: 16px; z-index: 3; display: grid; gap: 10px; width: clamp(160px, 24%, 320px); max-height: calc(100% - 32px); overflow: hidden; }
+.mapview-inset { margin: 0; background: rgba(3, 16, 12, 0.88); border: 1px solid var(--line-strong); }
+.mapview-inset figcaption { padding: 3px 8px; font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--dim); border-bottom: 1px solid var(--line); }
+.mapview-inset canvas { display: block; width: 100%; height: auto; max-height: 34vh; object-fit: contain; }
+.mapview-info {
+  position: absolute;
+  right: 28px;
+  bottom: 28px;
+  z-index: 3;
+  padding: 4px 10px;
+  background: rgba(3, 16, 12, 0.82);
+  border: 1px solid var(--line);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--dim);
+  pointer-events: none;
+}
+
+/* A main view that failed (App.tsx's boundary): shown in the view area only, the console around it keeps working. */
+.viewfail { grid-area: view; display: grid; place-content: center; justify-items: center; gap: 8px; padding: 24px; text-align: center; color: var(--dim); min-height: 0; }
+.viewfail b { font-size: 16px; letter-spacing: 0.24em; text-transform: uppercase; color: var(--orange); }
+.viewfail span { max-width: 56ch; overflow-wrap: anywhere; }
+.viewfail-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: 8px; }
+
+@media (max-width: 1000px) {
+  /* the top bar wraps here, so the switch gets a row of its own under it */
+  .app { grid-template: auto auto minmax(320px, 60vh) auto auto / 1fr; grid-template-areas: 'top' 'switch' 'view' 'source' 'inspect'; }
+  .viewswitch { grid-area: switch; justify-self: start; margin: 8px 16px; border-color: var(--line-strong); }
+  .viewswitch button { color: var(--dim); opacity: 1; }
+  .viewswitch button + button { border-left-color: var(--line-strong); }
+  .viewswitch button.on { background: var(--pale); color: var(--on-pale); }
+  .mapview { border-bottom: 1px solid var(--line-strong); }
+  .mapview-insets { width: clamp(120px, 30%, 220px); }
 }

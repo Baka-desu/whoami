@@ -163,3 +163,59 @@ def test_c14_empty_distortion_allowed_for_ideal_sim_camera() -> None:
         p=_P,
     )
     assert cal.d == (0.0, 0.0, 0.0, 0.0, 0.0)
+
+
+# --- placeholder flag --------------------------------------------------------------------------------------------
+
+
+def test_c15_placeholder_defaults_to_false_and_existing_files_load_as_before(tmp_path: Path) -> None:
+    cal = load_calibration(_write_yaml(tmp_path))
+    assert cal.placeholder is False
+
+
+@pytest.mark.parametrize("flag", [True, False])
+def test_c16_placeholder_is_read_from_the_optional_top_level_key(tmp_path: Path, flag: bool) -> None:
+    cal = load_calibration(_write_yaml(tmp_path, placeholder=flag))
+    assert cal.placeholder is flag
+    assert cal.k == _K  # the flag does not change what is loaded
+
+
+@pytest.mark.parametrize("bad", ["true", "yes please", 1, 0, None, [True], {"a": 1}])
+def test_c17_placeholder_must_be_a_boolean(tmp_path: Path, bad) -> None:
+    with pytest.raises(CalibrationError, match="placeholder"):
+        load_calibration(_write_yaml(tmp_path, placeholder=bad))
+
+
+def test_c18_placeholder_survives_a_yaml_roundtrip_and_is_absent_when_false(tmp_path: Path) -> None:
+    flagged = load_calibration(_write_yaml(tmp_path, placeholder=True))
+    again = tmp_path / "again.yaml"
+    again.write_text(yaml.safe_dump(calibration_to_yaml_dict(flagged)), encoding="utf-8")
+    assert load_calibration(again) == flagged and load_calibration(again).placeholder is True
+    assert "placeholder" not in calibration_to_yaml_dict(load_calibration(_write_yaml(tmp_path)))
+
+
+_CAMERAS = Path(__file__).resolve().parents[2] / "config" / "cameras"
+
+
+@pytest.mark.skipif(not _CAMERAS.is_dir(), reason="config/cameras is not next to this test (installed copy)")
+def test_c19_a_copy_of_another_cameras_intrinsics_must_be_flagged_as_a_placeholder() -> None:
+    """The phone ships with the laptop webcam's K/D until it is calibrated. That is only honest while the file
+    says so: a file carrying the laptop's K without `placeholder: true` is a silent lie about the camera."""
+    laptop = load_calibration(_CAMERAS / "laptop_webcam_640x480.yaml")
+    assert laptop.placeholder is False
+    for path in sorted(_CAMERAS.glob("*.yaml")):
+        cal = load_calibration(path)
+        if path.name != "laptop_webcam_640x480.yaml" and cal.k == laptop.k and cal.d == laptop.d:
+            assert cal.placeholder, f"{path.name} carries the laptop webcam's intrinsics but is not flagged"
+
+
+@pytest.mark.skipif(not _CAMERAS.is_dir(), reason="config/cameras is not next to this test (installed copy)")
+def test_c20_the_shipped_phone_calibration_is_a_flagged_640x480_placeholder() -> None:
+    path = _CAMERAS / "phone_640x480.yaml"
+    if not path.is_file():
+        pytest.fail("phone_640x480.yaml is missing")
+    cal = load_calibration(path)
+    laptop = load_calibration(_CAMERAS / "laptop_webcam_640x480.yaml")
+    assert cal.camera_name == "phone" and (cal.width, cal.height) == (640, 480)
+    if cal.placeholder:  # once the owner calibrates the phone the flag is removed and K differs
+        assert (cal.k, cal.d, cal.r, cal.p) == (laptop.k, laptop.d, laptop.r, laptop.p)

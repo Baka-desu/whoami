@@ -1,0 +1,9 @@
+# LAPTOP timing overlay on rgbd_sync.yaml (localization.launch.py timing:=laptop; launch passes
+# [rgbd_sync.yaml, this file], later wins). Best effort lost raw 640x480 frames, so DA3 depth (stamped with that
+# frame, arriving ~0.7 s later) found no exact RGB match and odometry stalled for seconds. Dev 5's camera driver
+# publishes reliable, so the laptop subscribes reliable with a deeper per-topic queue.
+/**:
+  ros__parameters:
+    topic_queue_size: 30
+    qos: 1                      # reliable inputs (matches Dev 5's reliable driver; would not connect to a best-effort one)
+    qos_camera_info: 1          # reliable CameraInfo per frame

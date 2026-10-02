@@ -12,7 +12,11 @@
     publish_null_when_lost: true    # lost → huge covariance marker; odom_selector drops it
     subscribe_rgbd: true
     wait_for_transform: 0.2
-    topic_queue_size: 10
+    # rgbd_image is ~2.1 MB per message at 640x480. Best effort drops most of them in transport (measured:
+    # odometry saw 23 of 116 frames, docs/mapping/baseline.md "Task 23"), so the input is RELIABLE.
+    qos: 1                          # 0 = system default (best effort for a subscriber), 1 = reliable, 2 = best effort
+    # Reader queue of the input: a slow consumer drops the older frames instead of working through a backlog.
+    topic_queue_size: 2
 
     # ---- RTAB-Map library params (strings) ------------------------------------------
     Odom/Strategy: "0"              # Frame-to-Map

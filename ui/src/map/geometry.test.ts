@@ -1,0 +1,229 @@
+import { describe, expect, it } from 'vitest'
+import type { GridFrame } from './codec'
+import { buildGridTexture, colorByHeight, depthToRgba, writeRamp } from './geometry'
+
+const NaN_ = Number.NaN
+
+function rampAt(t: number): number[] {
+  const out = new Uint8Array(3)
+  writeRamp(t, out, 0)
+  return Array.from(out)
+}
+
+const rgbAt = (colors: Uint8Array | Uint8ClampedArray, i: number, stride = 3) => Array.from(colors.subarray(i * stride, i * stride + 3))
+const luminance = ([r, g, b]: number[]) => 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+describe('colour ramp', () => {
+  it('ends are distinct and the middle sits between them', () => {
+    const lo = rampAt(0)
+    const hi = rampAt(1)
+    expect(lo).not.toEqual(hi)
+    expect(rampAt(0.5)).not.toEqual(lo)
+    expect(rampAt(0.5)).not.toEqual(hi)
+  })
+
+  it('is perceptually ordered: luminance never decreases from low to high', () => {
+    let prev = -1
+    for (let i = 0; i <= 100; i++) {
+      const y = luminance(rampAt(i / 100))
+      expect(y).toBeGreaterThanOrEqual(prev - 0.5) // rounding to bytes may wobble by well under 1
+      prev = y
+    }
+    expect(luminance(rampAt(1))).toBeGreaterThan(luminance(rampAt(0)) + 100)
+  })
+
+  it('clamps outside 0..1 and sends non-finite input to the low colour', () => {
+    expect(rampAt(-5)).toEqual(rampAt(0))
+    expect(rampAt(7)).toEqual(rampAt(1))
+    expect(rampAt(NaN_)).toEqual(rampAt(0))
+    expect(rampAt(Infinity)).toEqual(rampAt(1))
+  })
+
+  it('writes three bytes at the offset and nothing else', () => {
+    const out = new Uint8Array(9).fill(9)
+    writeRamp(1, out, 3)
+    expect(Array.from(out.subarray(0, 3))).toEqual([9, 9, 9])
+    expect(Array.from(out.subarray(3, 6))).toEqual(rampAt(1))
+    expect(Array.from(out.subarray(6))).toEqual([9, 9, 9])
+  })
+})
+
+describe('colorByHeight', () => {
+  const pts = (...z: number[]) => Float32Array.from(z.flatMap((v, i) => [i, -i, v]))
+
+  it('colours each point by its z from the shared ramp', () => {
+    const c = colorByHeight(pts(0, 1, 2, 4), 0, 4)
+    expect(c).toBeInstanceOf(Uint8Array)
+    expect(c.length).toBe(12)
+    expect(rgbAt(c, 0)).toEqual(rampAt(0))
+    expect(rgbAt(c, 1)).toEqual(rampAt(0.25))
+    expect(rgbAt(c, 2)).toEqual(rampAt(0.5))
+    expect(rgbAt(c, 3)).toEqual(rampAt(1))
+  })
+
+  it('clamps z outside zMin..zMax', () => {
+    const c = colorByHeight(pts(-10, 10), 0, 1)
+    expect(rgbAt(c, 0)).toEqual(rampAt(0))
+    expect(rgbAt(c, 1)).toEqual(rampAt(1))
+  })
+
+  it('gives every point the mid colour when zMax <= zMin', () => {
+    for (const [lo, hi] of [[2, 2], [3, 1]]) {
+      const c = colorByHeight(pts(0, 2, 9), lo, hi)
+      for (let i = 0; i < 3; i++) expect(rgbAt(c, i)).toEqual(rampAt(0.5))
+    }
+  })
+
+  it('gives non-finite z the low colour', () => {
+    const c = colorByHeight(pts(NaN_, Infinity, -Infinity, 2), 0, 4)
+    expect(rgbAt(c, 0)).toEqual(rampAt(0))
+    expect(rgbAt(c, 1)).toEqual(rampAt(0))
+    expect(rgbAt(c, 2)).toEqual(rampAt(0))
+    expect(rgbAt(c, 3)).toEqual(rampAt(0.5))
+  })
+
+  it('returns an empty array for no points and handles 500k points', () => {
+    expect(colorByHeight(new Float32Array(0), 0, 1).length).toBe(0)
+    const n = 500_000
+    const xyz = new Float32Array(3 * n)
+    for (let i = 0; i < n; i++) xyz[3 * i + 2] = i / n
+    const c = colorByHeight(xyz, 0, 1)
+    expect(c.length).toBe(3 * n)
+    expect(rgbAt(c, 0)).toEqual(rampAt(0))
+    expect(luminance(rgbAt(c, n - 1))).toBeGreaterThan(luminance(rgbAt(c, 0)))
+  })
+})
+
+function grid(width: number, height: number, cells: number[]): GridFrame {
+  return { epoch: 1, seq: 1, stampS: 0, width, height, resolution: 0.05, originX: 0, originY: 0, originYaw: 0, cells: Int8Array.from(cells) }
+}
+
+const texel = (t: Uint8ClampedArray, i: number) => Array.from(t.subarray(4 * i, 4 * i + 4))
+
+describe('buildGridTexture', () => {
+  it('is RGBA, width * height * 4, as a Uint8ClampedArray', () => {
+    const t = buildGridTexture(grid(3, 2, [0, 0, 0, 0, 0, 0]))
+    expect(t).toBeInstanceOf(Uint8ClampedArray)
+    expect(t.length).toBe(3 * 2 * 4)
+  })
+
+  it('makes unknown (-1) and free (0) cells fully transparent', () => {
+    const t = buildGridTexture(grid(2, 1, [-1, 0]))
+    expect(texel(t, 0)[3]).toBe(0)
+    expect(texel(t, 1)[3]).toBe(0)
+  })
+
+  it('treats any other negative value as unknown', () => {
+    const t = buildGridTexture(grid(2, 1, [-2, -128]))
+    expect(texel(t, 0)[3]).toBe(0)
+    expect(texel(t, 1)[3]).toBe(0)
+  })
+
+  it('draws the inflation halo (1..98) translucent, getting stronger with the cost', () => {
+    const t = buildGridTexture(grid(4, 1, [1, 30, 70, 98]))
+    const alphas = [0, 1, 2, 3].map((i) => texel(t, i)[3])
+    for (const a of alphas) {
+      expect(a).toBeGreaterThan(0)
+      expect(a).toBeLessThan(255)
+    }
+    expect(alphas[1]).toBeGreaterThan(alphas[0])
+    expect(alphas[2]).toBeGreaterThan(alphas[1])
+    expect(alphas[3]).toBeGreaterThan(alphas[2])
+  })
+
+  it('draws 99 (inscribed) and 100 (lethal) opaque in two different strong colours', () => {
+    const t = buildGridTexture(grid(4, 1, [98, 99, 100, 50]))
+    expect(texel(t, 1)[3]).toBe(255)
+    expect(texel(t, 2)[3]).toBe(255)
+    expect(texel(t, 1).slice(0, 3)).not.toEqual(texel(t, 2).slice(0, 3))
+    expect(texel(t, 0)[3]).toBeLessThan(255)
+    // lethal reads as the hottest colour (red channel above the others)
+    const [r, g, b] = texel(t, 2)
+    expect(r).toBeGreaterThan(g)
+    expect(r).toBeGreaterThan(b)
+  })
+
+  it('shares the ramp with the height colours for the halo', () => {
+    const t = buildGridTexture(grid(1, 1, [50]))
+    expect(texel(t, 0).slice(0, 3)).toEqual(rampAt(0.5))
+  })
+
+  it('treats a value above 100 as lethal rather than dropping it', () => {
+    const t = buildGridTexture(grid(1, 1, [127]))
+    expect(texel(t, 0)).toEqual(texel(buildGridTexture(grid(1, 1, [100])), 0))
+  })
+
+  it('keeps texture row 0 = grid row 0, row-major (a cell at row 1, col 2 of a 3 x 2 grid is texel 5)', () => {
+    const cells = [0, 0, 0, 0, 0, 100]
+    const t = buildGridTexture(grid(3, 2, cells))
+    for (let i = 0; i < 5; i++) expect(texel(t, i)[3]).toBe(0)
+    expect(texel(t, 5)[3]).toBe(255)
+    const top = buildGridTexture(grid(3, 2, [100, 0, 0, 0, 0, 0]))
+    expect(texel(top, 0)[3]).toBe(255)
+  })
+
+  it('returns an empty array for an empty grid', () => {
+    expect(buildGridTexture(grid(0, 0, [])).length).toBe(0)
+  })
+
+  it('handles a 512 x 512 grid', () => {
+    const cells = new Array<number>(512 * 512).fill(-1)
+    cells[512 * 512 - 1] = 100
+    const t = buildGridTexture(grid(512, 512, cells))
+    expect(t.length).toBe(512 * 512 * 4)
+    expect(t[t.length - 1]).toBe(255)
+  })
+})
+
+const metres = (...m: number[]) => Float32Array.from(m)
+
+describe('depthToRgba', () => {
+  it('is RGBA, width * height * 4, as a Uint8ClampedArray', () => {
+    const t = depthToRgba(metres(1, 2, 3, 4, 5, 6), 3, 2, 8)
+    expect(t).toBeInstanceOf(Uint8ClampedArray)
+    expect(t.length).toBe(24)
+  })
+
+  it('makes holes (NaN, infinite, zero or negative) fully transparent', () => {
+    const t = depthToRgba(metres(NaN_, Infinity, 0, -1, 1), 5, 1, 8)
+    for (let i = 0; i < 4; i++) expect(texel(t, i)).toEqual([0, 0, 0, 0])
+    expect(texel(t, 4)[3]).toBe(255)
+  })
+
+  it('is a grey ramp over 0..maxRangeM, near bright and far dark', () => {
+    const t = depthToRgba(metres(0.5, 2, 4, 8), 4, 1, 8)
+    const greys = [0, 1, 2, 3].map((i) => texel(t, i))
+    for (const [r, g, b, a] of greys) {
+      expect(r).toBe(g)
+      expect(g).toBe(b)
+      expect(a).toBe(255)
+    }
+    expect(greys[0][0]).toBeGreaterThan(greys[1][0])
+    expect(greys[1][0]).toBeGreaterThan(greys[2][0])
+    expect(greys[2][0]).toBeGreaterThan(greys[3][0])
+    expect(greys[3][0]).toBe(0) // at max range
+    expect(greys[2][0]).toBeCloseTo(128, -1) // half range, about mid grey
+  })
+
+  it('clamps beyond the maximum range to the far colour and keeps the pixel visible', () => {
+    expect(texel(depthToRgba(metres(65.5), 1, 1, 8), 0)).toEqual([0, 0, 0, 255])
+  })
+
+  it('stays row-major: image row 0 first', () => {
+    const t = depthToRgba(metres(NaN_, NaN_, NaN_, 1), 2, 2, 8)
+    expect(texel(t, 3)[3]).toBe(255)
+    for (let i = 0; i < 3; i++) expect(texel(t, i)[3]).toBe(0)
+  })
+
+  it('does not throw on a degenerate range and still marks holes transparent', () => {
+    const t = depthToRgba(metres(NaN_, 1), 2, 1, 0)
+    expect(texel(t, 0)[3]).toBe(0)
+    expect(texel(t, 1)).toEqual([128, 128, 128, 255])
+  })
+
+  it('leaves pixels the data does not reach transparent and handles 640 x 480', () => {
+    expect(depthToRgba(metres(), 0, 0, 8).length).toBe(0)
+    expect(texel(depthToRgba(metres(1), 2, 1, 8), 1)).toEqual([0, 0, 0, 0])
+    expect(depthToRgba(new Float32Array(640 * 480).fill(2.5), 640, 480, 8).length).toBe(640 * 480 * 4)
+  })
+})

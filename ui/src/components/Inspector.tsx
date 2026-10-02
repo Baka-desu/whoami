@@ -1,8 +1,6 @@
 import type { ReactNode } from 'react'
 import type { Freshness } from '../analysis/freshness'
 import { PERCEPTION_MAX_AGE_MS, CLASS_NAMES, CLASS_RGB, type Analysis } from '../types'
-import type { RobotSnapshot } from '../source/robot'
-import { NavMapWidget, RobotWidget } from './RobotPanel'
 import { TopDownMap } from './TopDownMap'
 import DraggableWidgetGrid, { type WidgetItem, type WidgetSize } from './ui/draggable-widget-grid'
 
@@ -27,20 +25,18 @@ function Row({ k, v, tone }: { k: string; v: ReactNode; tone?: 'trip' | 'warn' }
 interface Props {
   analysis: Analysis | null
   freshness: Freshness | null
-  robot: RobotSnapshot | null
-  estop: boolean
 }
 
-type WidgetId = 'navmap' | 'robot' | 'analysis' | 'ground' | 'classes' | 'depth' | 'health' | 'source'
+type WidgetId = 'analysis' | 'ground' | 'classes' | 'depth' | 'health' | 'source'
 
 const SIZE: Record<WidgetId, WidgetSize> = {
-  navmap: 'lg', robot: 'lg', analysis: 'wide', ground: 'lg', classes: 'wide', depth: 'wide', health: 'wide', source: 'wide',
+  analysis: 'wide', ground: 'lg', classes: 'wide', depth: 'wide', health: 'wide', source: 'wide',
 }
 const LABEL: Record<WidgetId, string> = {
-  navmap: 'Navigation map', robot: 'Robot state', analysis: 'Analysis', ground: 'Ground map',
+  analysis: 'Analysis', ground: 'Ground map',
   classes: 'Classes', depth: 'Depth', health: 'Health', source: 'Source',
 }
-const ORDER_KEY = 'whoami.inspector.order'
+const ORDER_KEY = 'ugv.console.perception.order'
 
 // The arrangement is a per-browser preference (not app state): saved order, filtered to the widgets
 // that exist right now.
@@ -61,19 +57,16 @@ function remember(items: WidgetItem[]) {
   } catch { /* storage unavailable: the order just won't persist */ }
 }
 
-export function Inspector({ analysis: a, freshness: fr, robot, estop }: Props) {
+export function Inspector({ analysis: a, freshness: fr }: Props) {
   const ids: WidgetId[] = []
-  if (robot) ids.push('navmap', 'robot')
   if (!a || !fr) ids.push('analysis')
   else ids.push('ground', 'classes', 'depth', 'health', 'source')
 
   const render = (id: WidgetId): ReactNode => {
-    if (id === 'navmap' && robot) return <NavMapWidget robot={robot} />
-    if (id === 'robot' && robot) return <RobotWidget robot={robot} estop={estop} />
     if (id === 'analysis') {
       return (
         <Section title="Analysis">
-          <p className="dim">No analysis available. Add a photo or start a source; results appear once a perception backend is connected.</p>
+          <p className="dim">No analysis available. Start a camera source; results appear once Dev 1's Perception Port is publishing.</p>
         </Section>
       )
     }
@@ -89,7 +82,7 @@ export function Inspector({ analysis: a, freshness: fr, robot, estop }: Props) {
               <span><i style={{ background: '#2c2c2c' }} />UNKNOWN / INFLATED</span>
               <span><i style={{ background: '#ff2a2a' }} />LETHAL</span>
             </div>
-            <p className="dim">Costmap, 0.25 m cells. Unknown is never free.</p>
+            <p className="dim">Flat-ground preview from the mask, 0.25 m cells. Not Nav2's costmap. Unknown is never free.</p>
           </Section>
         )
       case 'classes':
@@ -151,19 +144,19 @@ export function Inspector({ analysis: a, freshness: fr, robot, estop }: Props) {
   }
 
   return (
-    <aside className="panel inspector">
-      <p className="inspector-hint">drag widgets to rearrange · alt + arrows on keyboard</p>
+    <div className="sidegroup">
+      <h4 className="sidegroup-title">Perception</h4>
       {/* remount when the set of widgets changes; the grid keeps its own order between changes */}
       <DraggableWidgetGrid
         key={ids.join(',')}
         items={ordered(ids)}
         onChange={remember}
         renderItem={(item) => render(item.id as WidgetId)}
-        maxColumns={3}
+        maxColumns={2}
         cellSize={200}
         gap={12}
         radius={4}
       />
-    </aside>
+    </div>
   )
 }

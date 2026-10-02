@@ -52,7 +52,8 @@ class PoseValidityNode(Node):
         if self._depth_stride < 1:
             raise RuntimeError("depth_stride must be >= 1")
 
-        profile = load_validity_profile(profile_path)
+        overlay_path = self.declare_parameter("profile_overlay_path", "").value  # e.g. pose_validity_laptop.yaml
+        profile = load_validity_profile(profile_path, overlay_path or None)
         self._profile = profile
         self._monitor = PoseValidityMonitor(profile, mode)
         self._cam_frame: str | None = None
