@@ -9,7 +9,8 @@ Nodes:
   rgbd_sync      camera RGB + depth image + CameraInfo → /rtabmap/rgbd_image (exact stamps)
   rgbd_odometry  visual odometry on rgbd_image → /rtabmap/odom_visual   (odom_source auto|visual)
   odom_selector  wheel | visual | auto → /odom + TF odom->base_link     (the only publisher)
-  rtabmap        RGB-D SLAM → TF map->odom, /map (occupancy from depth), /rtabmap/info
+  rtabmap        RGB-D SLAM → TF map->odom, /map (occupancy from depth), /rtabmap/info, mapPath, mapData
+  map_assembler  /rtabmap/mapData → /rtabmap/cloud_map (the 3D map, assembled outside the SLAM step)
   pose_validity  /ugv/pose_valid heartbeat
   distance_tracker /ugv/localization/distance_travelled (odometry estimate) + distance_basis label
   map_stats      /ugv/map/stats JSON (keyframes, loop closures, path length, db size, calibration placeholder)
@@ -42,6 +43,8 @@ _ODOM_VISUAL = "/rtabmap/odom_visual"
 _ODOM_INFO = "/rtabmap/odom_info"
 _DEPTH_FROM_CLOUD = "/rtabmap/depth/image"
 _DEPTH_INPUTS = ("cloud", "image")
+_CLOUD_MAP = "/rtabmap/cloud_map"  # the viewer's 3D map, from map_assembler
+_SLAM_CLOUD_MAP = "/rtabmap/slam/cloud_map"  # rtabmap's own copy, moved out of the way
 
 
 def _to_bool(text: str, name: str) -> bool:
@@ -177,7 +180,24 @@ def _setup(context, *args, **kwargs):
                 ("odom", "/odom"),
                 ("odom_info", _ODOM_INFO),
                 ("map", "/map"),
+                # Its own cloud_map is assembled inside the SLAM step: never subscribe this one (map_assembler serves the real one)
+                ("cloud_map", _SLAM_CLOUD_MAP),
             ],
+        ),
+        # The 3D map for the viewer, assembled in its own process from /rtabmap/mapData (Task 8 review I1). rtabmap builds
+        # cloud_map inside its SLAM callback, and the first step after a late subscriber (the gateway, on demand) attaches
+        # assembles the whole map: 0.17-0.35 s at 275-415 nodes, growing with the map (docs/mapping/baseline.md "Task 8 fix
+        # round 1"). Same Grid/* and map params as rtabmap (the YAML is /**); its other map topics stay under
+        # /rtabmap/assembler/. map_cleanup false: its cache survives the viewer closing, so a re-attach adds only the new
+        # nodes (0.2 s instead of 1.4-2.8 s) and its depth-1 mapData subscription drops nothing meanwhile.
+        Node(
+            package="rtabmap_util",
+            executable="map_assembler",
+            name="map_assembler",
+            namespace="rtabmap/assembler",
+            output="screen",
+            parameters=[os.path.join(cfg, "rtabmap_rgbd.yaml"), {**common, "rtabmap": "/rtabmap/rtabmap", "map_cleanup": False}],
+            remappings=[("mapData", "/rtabmap/mapData"), ("cloud_map", _CLOUD_MAP)],
         ),
         Node(
             package="ugv_localization",

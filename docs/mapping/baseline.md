@@ -311,3 +311,117 @@ start-up (not investigated). Decision: keep 2 and say so in the YAML comment.
   `rtabmap` and `rgbd_odometry` main threads sit in `pipe_write`. With the launch output sent to a file the same 330 s runs
   completed (608 and 609 steps, no gap over 0.65 s). The existing tests stay under the limit (`test_x1` runs up to about 150 s);
   I did not check whether it explains the historical flakiness of `test_x1[image]`. Fix: write the launch output to a file.
+
+## Task 8 fix round 1: a viewer attaching `cloud_map` mid-mission (review I1)
+
+**When:** 2026-10-02, branch `mapping-3d`, `ugv-run` container, real launch file and RTAB-Map nodes fed synthetic sensors
+(`test/test_ros_stack.py`). **Question:** the gateway (`ugv_api`) subscribes `/rtabmap/cloud_map` and `/rtabmap/mapPath` only
+while a viewer is open (destroyed `idle_timeout_s` = 10 s after the last request). rtabmap builds `cloud_map` inside its SLAM
+callback, so the first step after a late attach assembles the whole map. Does that stall SLAM enough to matter
+(`/rtabmap/info` gaps, `slam_stale` on `/ugv/pose_valid`)? The Task 8 risk check only covered subscribers attached at t = 0.
+
+**Method** (`test_m1_measure_late_cloud_map_attach`, opt-in, skipped by default):
+```
+MSYS_NO_PATHCONV=1 docker exec -e PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 -e UGV_MEASURE_LATE_ATTACH=1 -e UGV_MEASURE_MAP_S=150 \
+  -e UGV_MEASURE_CYCLES=3 -e UGV_MEASURE_OUT=/tmp/late_attach.jsonl ugv-run bash -lc 'ulimit -c 0; \
+  cd /ws/src/ugv_nav/ugv_localization && source /opt/ros/lyrical/setup.bash && source /ws/install/setup.bash && \
+  python3 -m pytest -p no:cacheprovider test/test_ros_stack.py -k "m1 and default" -q'      # or "m1 and laptop"
+```
+The robot slides sideways at 0.3 m/s (about 2 graph nodes per second). Nothing subscribes any map topic while mapping (the
+probe's own `/map` subscription is off: nothing subscribes `/map` on the robot either, and it would keep rtabmap's map cache
+warm). After `MAP_S` seconds the probe attaches like the gateway (`cloud_map` RELIABLE + TRANSIENT_LOCAL depth 1, `mapPath`
+RELIABLE depth 1) for 15 s, detaches for 20 s, and repeats. Per attach: worst `/rtabmap/info` arrival gap in the 10 s after it
+(the gap spanning the attach counts), the largest stamp age `/rtabmap/info` reached before the next one (what `slam_max_age_s`,
+2.0 s `default` / 4.0 s `laptop`, is compared with), the pose status reasons, the cloud size, rtabmap's own `Maps update` +
+`pub` time from its per-step log line and (after the fix) map_assembler's `Updating` + `Publishing data` time.
+Profiles: `default` timing, 320x240, best-effort camera, frames at 10 Hz; `laptop` timing (the live profile), 640x480,
+reliable camera, frames at 4 Hz.
+
+### Before: rtabmap assembles `cloud_map` in its SLAM step (16 attaches, 6 runs)
+
+"Clean gap" = worst gap in the 60 s before the first attach of the run (no subscriber at all).
+
+| Run | Attach at s | Graph node | Cloud | Cloud after s | Clean gap s | Gap after s | Stamp age after s | Attach step maps+pub | `slam_stale` |
+|---|---|---|---|---|---|---|---|---|---|
+| default a | 150 | 275 | 38.9k | 0.43 | 0.67 | 0.64 | 0.96 | 172 ms | no |
+|  | 185 | 340 | 46.6k | 0.49 | - | 0.69 | 0.99 | 207 ms | no |
+|  | 220 | 405 | 54.4k | 0.64 | - | **1.07** | 1.37 | 239 ms | no |
+| laptop a | 150 | 284 | 44.2k | 0.34 | 0.60 | **1.56** | 1.90 | 221 ms | no |
+|  | 185 | 348 | 52.1k | 0.32 | - | 0.78 | 1.16 | 237 ms | no |
+|  | 220 | 415 | 60.2k | 0.64 | - | 0.80 | 1.33 | 270 ms | no |
+| default b | 150 | 275 | 41.4k | 0.60 | 0.64 | 0.68 | 1.00 | 193 ms | no |
+|  | 185 | 339 | 49.1k | 0.27 | - | 0.79 | 1.10 | 254 ms | no |
+|  | 220 | 404 | 56.8k | 0.32 | - | 0.85 | 1.15 | 273 ms | no |
+| laptop b | 150 | 280 | 45.0k | 0.22 | 0.76 | 0.68 | 1.03 | 187 ms | no |
+|  | 185 | 343 | 52.9k | 0.32 | - | 0.73 | 1.14 | 215 ms | no |
+|  | 220 | 405 | 60.9k | 0.47 | - | 0.85 | 1.22 | 350 ms | no |
+| laptop c | 190 | 350 | 65.7k | 0.60 | 0.64 | **2.35** | 2.71 | 223 ms | no |
+|  | 225 | 403 | 76.2k | 0.45 | - | **2.84** | 3.22 | 279 ms | no |
+| default c | 190 | 348 | 47.3k | 0.75 | 0.77 | 0.80 | 1.06 | 236 ms | no |
+|  | 225 | 413 | 55.1k | 0.55 | - | 0.77 | 1.06 | 252 ms | no |
+
+- With no subscriber rtabmap's `Maps update` + `pub` is 1-4 ms per step. The step right after an attach costs **172-350 ms more,
+  about 0.6-0.9 ms per graph node**, and **every re-attach pays it again** (`map_cleanup` true, the default, clears the cache when the
+  last subscriber leaves). At 2 nodes/s that is about 1.2-1.7 s in one step after 15-20 minutes of mapping.
+- `slam_stale` appeared in none of the 6 runs. 4 of 16 attaches had a gap of 1.0 s or more in the 10 s after them. The two laptop c
+  gaps (2.35, 2.84 s) are probably mostly input stalls of the 640x480 harness (the laptop runs show 2-2.9 s gaps with `camera_stale`
+  when no viewer is attached too; known since the Task 8 risk check), so not all of the 4 are the attach itself.
+
+**Decision:** the controller's threshold was "apply the `map_assembler` fallback if the worst gap on attach is >= 1.0 s OR `slam_stale`
+appears on attach in any run". The gap condition is met (1.07 s in a `default` run, where the harness shows no input stalls), and the
+attach cost grows linearly with the map, so the **fallback is applied**: `rtabmap_util/map_assembler` (`/rtabmap/assembler/map_assembler`,
+same `rtabmap_rgbd.yaml`) builds `/rtabmap/cloud_map` from `/rtabmap/mapData` in its own process; rtabmap's own copy is remapped to
+`/rtabmap/slam/cloud_map`, which nothing may subscribe (`localization.launch.py`).
+
+### After: `map_assembler` (20 attaches, 7 runs)
+
+First with the assembler's defaults (`map_cleanup` true, 5 runs), then with `map_cleanup: false` on the assembler only (2 runs, the
+shipped configuration). "Gap before" = worst gap in the 20 s before the attach (no viewer). "Assembler s" = its update + publish time
+for the message after the attach.
+
+| Run | Attach at s | Graph node | Cloud | Cloud after s | Gap before s | Gap after s | Stamp age after s | rtabmap maps+pub | Assembler s | `slam_stale` |
+|---|---|---|---|---|---|---|---|---|---|---|
+| default a | 150 | 276 | 40.1k | 1.90 | 0.62 | 0.61 | 0.91 | 5 ms | 1.58 | no |
+|  | 185 | 341 | 48.3k | 1.99 | 0.61 | 0.61 | 0.90 | 4 ms | 1.80 | no |
+|  | 220 | 406 | 56.0k | 2.25 | 0.60 | 0.60 | 0.94 | 3 ms | 2.14 | no |
+| laptop a | 150 | 269 | 47.5k | 1.70 | 0.55 | 0.64 | 1.24 | 8 ms | 1.36 | no |
+|  | 185 | 335 | 56.9k | 2.09 | 0.67 | 0.57 | 0.94 | 4 ms | 1.70 | no |
+|  | 220 | 402 | 65.4k | 2.43 | 0.65 | 0.65 | 1.00 | 5 ms | 2.04 | no |
+| default b | 150 | 272 | 37.7k | 1.39 | 0.58 | 0.58 | 0.84 | 3 ms | 1.37 | no |
+|  | 185 | 338 | 45.9k | 2.04 | 0.58 | 0.59 | 0.87 | 3 ms | 1.73 | no |
+|  | 220 | 403 | 53.2k | 2.87 | 0.67 | 0.62 | 1.03 | 5 ms | 2.80 | no |
+| laptop b | 150 | 268 | 47.2k | 1.51 | 0.55 | 0.73 | 1.06 | 4 ms | 1.37 | no |
+|  | 185 | 336 | 55.2k | 2.34 | 0.61 | 0.71 | 1.04 | 4 ms | 1.72 | no |
+|  | 220 | 403 | 63.1k | 2.26 | 0.55 | 0.71 | 1.07 | 4 ms | 2.05 | no |
+| laptop c | 190 | 352 | 52.5k | 2.23 | 2.06 | 0.61 | 0.94 | 8 ms | 1.87 | no |
+|  | 225 | 407 | 60.1k | 2.09 | 2.88 | 0.56 | 0.91 | 4 ms | 1.98 | no |
+| default, `map_cleanup: false` | 150 | 275 | 39.3k | 1.85 | 0.61 | 0.57 | 0.83 | 10 ms | 1.46 | no |
+|  | 185 | 340 | 47.0k | 0.61 | 0.60 | 0.60 | 0.88 | 4 ms | 0.19 | no |
+|  | 220 | 405 | 54.8k | 0.50 | 0.59 | 0.65 | 0.94 | 5 ms | 0.19 | no |
+| laptop, `map_cleanup: false` | 150 | 285 | 46.7k | 2.31 | 0.57 | 0.69 | 1.06 | 4 ms | 1.68 | no |
+|  | 185 | 351 | 54.6k | 0.31 | 0.66 | 0.59 | 0.97 | 5 ms | 0.20 | no |
+|  | 220 | 419 | 62.7k | 0.85 | 0.70 | 0.67 | 1.05 | 4 ms | 0.20 | no |
+
+- SLAM no longer notices the viewer: worst gap after an attach 0.56-0.73 s, the same as before it; rtabmap's map work per step
+  3-10 ms with the assembler permanently subscribed to `mapData`; `slam_stale` in none of the 7 runs. (The 2.06 and 2.88 s "gap before"
+  in laptop c are harness input stalls with no viewer attached, with `camera_stale`.)
+- The assembler is slower than rtabmap at the first assembly: about 5 ms per node (1.4-2.8 s at 270-406 nodes) against rtabmap's
+  0.6-0.9 ms, and the first cloud reaches the viewer 1.4-2.9 s after the attach (0.2-0.75 s before the fix).
+- Its `mapData` subscription keeps one message (`rclcpp::QoS(1)`, hard-coded in rtabmap_util 0.23.7). Messages arriving while it
+  assembles are dropped, and with them those nodes' local maps (a node's data arrives only once). Whole runs, rtabmap steps minus
+  messages the assembler processed: 4-7 per run with `map_cleanup` true (1-2 at every attach plus 1-2 at start-up), **3 per run with
+  `map_cleanup: false`** (re-attaches cost 0.19-0.20 s and drop nothing; the cloud arrives 0.3-0.9 s after the attach). Hence
+  `map_cleanup: false` on the assembler. Peak memory is the same either way, because the cache is only built while a viewer is attached.
+- Memory (RSS sampled every 5 s, `map_cleanup: false` runs): map_assembler 195 -> 283 MB (`default`) and 197 -> 353 MB (`laptop`) during
+  the first 150 s with no viewer (it keeps every node's data), 624-730 MB right after the first attach (the grid cache), 894 / 1062 MB at
+  about 470 nodes. rtabmap itself: 1.20 / 1.34 GB at the same time.
+
+### Found, not fixed
+
+- The assembler drops nodes (above): a few local maps are missing from the viewer's cloud for the rest of the run. Display only; the
+  elevation mapper subscribes `mapData` itself with a deep queue. Fixing it needs a deeper subscription in rtabmap_util (upstream) or a
+  republish of the whole map through `/rtabmap/rtabmap/publish_maps`, which runs in rtabmap and would bring the stall back.
+- Assembler memory grows with the map (about 1.5-1.8 MB per node once a viewer has been opened, from about 290 -> 470 nodes); check it on
+  the live laptop on a long mission.
+- `localize` mode not measured: the assembler loads the existing map once, 1 s after start, through `/rtabmap/rtabmap/get_map_data`
+  (waiting at most 5 s for the service). If rtabmap takes longer to load its database, the assembler has only the nodes it receives later.

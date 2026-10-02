@@ -10,7 +10,9 @@ exact-stamp sync, TF ownership) — not RTAB-Map accuracy. Inputs mimic the team
 x3 (Task 23) counts the frames that reach odometry (320x240 in the default case, 640x480 in the laptop case) and the QoS
    of the rgbd_image subscriptions.
 x4 (Task 8) moves the robot (wheel odometry + the scene sliding past the camera) so RTAB-Map adds graph nodes,
-   and checks the 3D map outputs: /rtabmap/cloud_map, /rtabmap/mapPath, /rtabmap/mapData.
+   and checks the 3D map outputs: /rtabmap/cloud_map (from map_assembler), /rtabmap/mapPath, /rtabmap/mapData.
+m1 (Task 8 review I1) is a measurement, skipped unless UGV_MEASURE_LATE_ATTACH is set: a viewer attaching cloud_map
+   mid-mission vs the SLAM step rate and /ugv/pose_valid.
 x5 (Task 9) checks /ugv/map/stats from the same moving stack: map_stats is launched, reads rtabmap's graph and info,
    and reports the calibration file's placeholder flag.
 Skipped unless ROS 2 + rtabmap_ros + an installed ugv_localization are available (colcon test).
@@ -22,10 +24,13 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
+import re
 import signal
 import subprocess
+import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -88,11 +93,20 @@ def _wide_texture(w: int, h: int, extra: int) -> np.ndarray:
     return np.random.default_rng(7).integers(0, 255, size=(h // 4, (w + extra) // 4, 3), dtype=np.uint8).repeat(4, 0).repeat(4, 1)
 
 
+def _spawn(argv: list[str], env: dict[str, str], log: Path):
+    """Start argv in its own process group with stdout and stderr in the file `log`; returns (process, log file object).
+    Never a pipe: nothing reads it while a test runs, a pipe holds 64 KB, and rtabmap logs a line per SLAM step. A long
+    run then fills it and every node blocks in write() (measured: rtabmap and rgbd_odometry stopped after about 190 s, their
+    main threads in pipe_write; docs/mapping/baseline.md "Review fixes for 0c5f1d9")."""
+    out = open(log, "wb")
+    return subprocess.Popen(argv, env=env, stdout=out, stderr=subprocess.STDOUT, start_new_session=True), out
+
+
 class Stack:
     def __init__(
         self, tmp: Path, odom_source: str, depth_input: str, *, timing: str = "default",
         size: tuple[int, int] = (_W, _H), camera_reliable: bool = False, speed: float = 0.0,
-        placeholder_calibration: bool = False,
+        placeholder_calibration: bool = False, grid_probe: bool = True,
     ) -> None:
         self.depth_input = depth_input
         self.w, self.h = size
@@ -124,14 +138,15 @@ class Stack:
             path = tmp / "placeholder_calibration.yaml"
             path.write_text(yaml.safe_dump(calibration_to_yaml_dict(dataclasses.replace(cal, placeholder=True))), encoding="utf-8")
             calibration_args = [f"calibration_file:={path}"]
-        self.proc = subprocess.Popen(
+        self.log_path = tmp / "launch.log"
+        self.proc, self._log = _spawn(
             [
                 "ros2", "launch", "ugv_localization", "localization.launch.py",
                 "mode:=mapping", "fresh_db:=true", f"odom_source:={odom_source}", "profile:=live_cam",
                 f"database_path:={tmp / 'rtabmap.db'}", f"depth_input:={depth_input}", f"timing:={timing}",
                 *calibration_args,
             ],
-            env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, start_new_session=True,
+            env, self.log_path,
         )
         n = self.node
         camera_qos = _RELIABLE_CAMERA if camera_reliable else _BEST_EFFORT
@@ -152,7 +167,8 @@ class Stack:
         n.create_subscription(Info, "/rtabmap/info", self.seen["info"].append, 10)
         n.create_subscription(Odometry, "/odom", self.seen["odom"].append, 20)
         n.create_subscription(Odometry, "/rtabmap/odom_visual", self.seen["vo"].append, 20)
-        n.create_subscription(OccupancyGrid, "/map", self.seen["map"].append, _LATCHED)
+        if grid_probe:  # off: nothing subscribes /map (as on the robot), so rtabmap keeps no map cache up to date
+            n.create_subscription(OccupancyGrid, "/map", self.seen["map"].append, _LATCHED)
         n.create_subscription(Bool, "/ugv/pose_valid", lambda m: self.seen["valid"].append(m.data), 50)
         n.create_subscription(String, "/ugv/localization_status", lambda m: self.seen["status"].append(m.data), 10)
         n.create_subscription(String, "/ugv/localization/odom_source", lambda m: self.seen["source"].append(m.data), _LATCHED)
@@ -265,14 +281,33 @@ class Stack:
     def close(self) -> str:
         os.killpg(self.proc.pid, signal.SIGINT)
         try:
-            out, _ = self.proc.communicate(timeout=20)
+            self.proc.wait(timeout=20)
         except subprocess.TimeoutExpired:
             os.killpg(self.proc.pid, signal.SIGKILL)
-            out, _ = self.proc.communicate()
+            self.proc.wait()
+        self._log.close()
         self.ex.shutdown()
         self.node.destroy_node()
         rclpy.shutdown(context=self.ctx)
-        return out or ""
+        return self.log_path.read_text(encoding="utf-8", errors="replace")
+
+
+def test_x0_a_chatty_launch_never_blocks(tmp_path: Path) -> None:
+    """The launch output goes to a file. Nothing reads it while a test runs, and a 64 KB pipe filled in about 190 s of
+    rtabmap's one-line-per-step log: every node then blocked in write() (rtabmap and rgbd_odometry stopped)."""
+    proc, log = _spawn([sys.executable, "-c", "for i in range(3000): print('x' * 100, flush=True)"], dict(os.environ), tmp_path / "out.log")
+    try:
+        try:
+            code = proc.wait(timeout=20)
+        except subprocess.TimeoutExpired:
+            pytest.fail("the child did not finish: its output pipe is full and nobody reads it")
+        assert code == 0
+    finally:
+        if proc.poll() is None:
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait()
+        log.close()
+    assert (tmp_path / "out.log").stat().st_size >= 300_000
 
 
 @pytest.fixture
@@ -283,9 +318,8 @@ def stack(tmp_path: Path, request):
         odom_source, depth_input = request.param if isinstance(request.param, tuple) else ("auto", request.param)
         s = Stack(tmp_path, odom_source, depth_input)
     yield s
-    log = s.close()
-    (tmp_path / "launch.log").write_text(log, encoding="utf-8")
-    print(f"launch log: {tmp_path / 'launch.log'}")
+    s.close()
+    print(f"launch log: {s.log_path}")
 
 
 @pytest.mark.parametrize("stack", ["cloud", "image"], indirect=True)
@@ -409,6 +443,61 @@ def _cloud_field(c: PointCloud2, name: str, dtype: str) -> np.ndarray:
     return rows[:, f.offset : f.offset + 4].copy().view(dtype)[:, 0]
 
 
+def _z_span_problem(z: np.ndarray) -> str | None:
+    """Why a cloud's heights say it is not 3D (None when they span at least 0.2 m). NaN-safe: a NaN span must not pass."""
+    z = z[np.isfinite(z)]
+    if not z.size:
+        return "cloud_map has no finite z"
+    span = float(z.max() - z.min())
+    return None if span >= 0.2 else f"cloud_map is flat (z spans {span:.3f} m): Grid/3D is off"
+
+
+def _depth_png_problem(depth: bytes, width: int, height: int, expect_m: float) -> str | None:
+    """Why a node's right_compressed is not what the elevation mapper will decode: a PNG whose 4 bytes per pixel are a
+    float32 depth in metres (rtabmap wraps 32-bit depth that way when Mem/SaveDepth16Format is false, it is not RVL)."""
+    import cv2  # noqa: PLC0415 - only this check needs it
+
+    im = cv2.imdecode(np.frombuffer(depth, dtype=np.uint8), cv2.IMREAD_UNCHANGED)
+    if im is None:
+        return "right_compressed is not a decodable image"
+    if im.dtype != np.uint8 or im.ndim != 3 or im.shape[2] != 4:
+        return f"right_compressed decodes to {im.shape} {im.dtype}, not 4 x uint8 (a float32 per pixel)"
+    d = np.ascontiguousarray(im).view("<f4")[..., 0]
+    if d.shape != (height, width):
+        return f"right_compressed is {d.shape[1]}x{d.shape[0]}, the camera is {width}x{height}"
+    valid = d[np.isfinite(d) & (d > 0)]
+    if not valid.size or abs(float(np.median(valid)) - expect_m) > 0.05:
+        return f"right_compressed depth median {float(np.median(valid)) if valid.size else None} m, the scene is at {expect_m} m"
+    return None
+
+
+def _map_data_problems(msgs: list, width: int, height: int, expect_m: float) -> tuple[list[str], int]:
+    """(problems, graph nodes checked) for a list of /rtabmap/mapData messages. The message that brings a graph node carries
+    its depth, camera info and camera-to-base transform. Later entries for the same id do not: for each processed frame that
+    adds no node (the robot has not moved 0.1 m since the last one) RTAB-Map sends the newest graph node again, same id and
+    stamp, with its images empty. So check the first entry of each id that is in graph.poses_id (an entry whose id is not
+    in the graph is not a node delivery), and that every node of the final graph was delivered at least once."""
+    first: dict[int, object] = {}
+    for m in msgs:
+        in_graph = set(m.graph.poses_id)
+        for node in m.nodes:
+            if node.id in in_graph:
+                first.setdefault(node.id, node.data)
+    problems = []
+    if len(first) < 3:
+        problems.append(f"mapData delivered only {len(first)} graph node(s) in {len(msgs)} messages")
+    bad = [(i, f) for i, d in first.items() for f in ("right_compressed", "left_camera_info", "local_transform") if not len(getattr(d, f))]
+    if bad:
+        problems.append(f"mapData graph nodes delivered with empty data: {bad[:6]}")
+    missing = sorted(i for i in (msgs[-1].graph.poses_id if msgs else ()) if i > 0 and i not in first)
+    if missing:
+        problems.append(f"graph nodes never delivered through mapData: {missing[:6]}")
+    png = next((d.right_compressed for _, d in sorted(first.items()) if len(d.right_compressed)), None)
+    if png is not None and (why := _depth_png_problem(bytes(png), width, height, expect_m)):
+        problems.append(why)
+    return problems, len(first)
+
+
 @pytest.mark.parametrize("stack", [{"speed": _X4_SPEED}], ids=["moving-320x240"], indirect=True)
 def test_x4_rtabmap_3d_map_outputs(stack: Stack) -> None:
     """Task 8. RTAB-Map must publish its 3D products, not only the 2D /map: a coloured 3D /rtabmap/cloud_map, the
@@ -424,7 +513,7 @@ def test_x4_rtabmap_3d_map_outputs(stack: Stack) -> None:
     stack.run(10.0)  # keep moving: the path must keep growing
     problems = []
 
-    # /map: the 2D occupancy grid stays (Nav2 and the pose checks use it)
+    # /map: rtabmap's 2D occupancy grid must survive Grid/3D (nothing in the repo consumes it yet; the gateway reads /global_costmap)
     grid = seen["map"][-1] if seen["map"] else None
     if grid is None or not any(v != -1 for v in grid.data):
         problems.append("/map is missing or has no known cell")
@@ -432,10 +521,8 @@ def test_x4_rtabmap_3d_map_outputs(stack: Stack) -> None:
     # /rtabmap/cloud_map: non-empty, coloured, genuinely 3D (Grid/3D false gives a flat z = 0 cloud)
     clouds = [c for c in out["cloud"] if c.width * c.height]
     names = [f.name for f in clouds[-1].fields] if clouds else []
-    z_span = 0.0
-    if clouds:
-        z = _cloud_field(clouds[-1], "z", "<f4")
-        z_span = float(z.max() - z.min())
+    z = _cloud_field(clouds[-1], "z", "<f4") if clouds else np.zeros(0, dtype="<f4")
+    z_span = float(np.nanmax(z) - np.nanmin(z)) if np.isfinite(z).any() else float("nan")
     if not clouds:
         problems.append("/rtabmap/cloud_map never had a point")
     else:
@@ -444,10 +531,15 @@ def test_x4_rtabmap_3d_map_outputs(stack: Stack) -> None:
             problems.append(f"cloud_map has no rgb/rgba field: {names}")
         elif not _cloud_field(clouds[-1], colour_field, "<u4").any():
             problems.append("cloud_map colour is all zero")
-        if z_span < 0.2:
-            problems.append(f"cloud_map is flat (z spans {z_span:.3f} m): Grid/3D is off")
+        if why := _z_span_problem(z):
+            problems.append(why)
         if clouds[-1].header.frame_id != "map":
             problems.append(f"cloud_map frame_id {clouds[-1].header.frame_id!r}, not 'map'")
+    # ... and it comes from map_assembler, not from rtabmap: rtabmap assembles its own copy inside the SLAM step, and a
+    # viewer opened mid-mission made that step assemble the whole map at once (review I1, docs/mapping/baseline.md)
+    cloud_pubs = sorted({i.node_name for i in stack.node.get_publishers_info_by_topic("/rtabmap/cloud_map")})
+    if cloud_pubs != ["map_assembler"]:
+        problems.append(f"/rtabmap/cloud_map is published by {cloud_pubs}, not by map_assembler alone")
 
     # /rtabmap/mapPath: at least 2 poses, and more of them later in the run
     lens = [len(p.poses) for p in out["path"]]
@@ -456,22 +548,9 @@ def test_x4_rtabmap_3d_map_outputs(stack: Stack) -> None:
     elif lens[-1] < poses_early + 3:
         problems.append(f"mapPath did not grow: {poses_early} poses early, {lens[-1]} at the end")
 
-    # /rtabmap/mapData: the message that brings a graph node carries its depth, camera info and camera-to-base transform.
-    # Later entries for the same id do not: for each processed frame that adds no node (the robot has not moved 0.1 m since
-    # the last one) RTAB-Map sends the newest graph node again, same id and stamp, with its images empty. So check the
-    # first entry of each id that is in graph.poses_id (an entry whose id is not in the graph is not a node delivery).
-    first: dict[int, object] = {}
-    for m in out["mapdata"]:
-        in_graph = set(m.graph.poses_id)
-        for node in m.nodes:
-            if node.id in in_graph:
-                first.setdefault(node.id, node.data)
-    bad = [(i, f) for i, d in first.items() for f in ("right_compressed", "left_camera_info", "local_transform") if not len(getattr(d, f))]
-    checked = len(first)
-    if checked < 3:
-        problems.append(f"mapData delivered only {checked} graph node(s) in {len(out['mapdata'])} messages")
-    if bad:
-        problems.append(f"mapData graph nodes delivered with empty data: {bad[:6]}")
+    # /rtabmap/mapData: what the elevation mapper will consume (see _map_data_problems)
+    md_problems, checked = _map_data_problems(out["mapdata"], stack.w, stack.h, _SCENE_DEPTH_M)
+    problems += md_problems
 
     summary = (
         f"clouds={len(out['cloud'])} (points {[c.width * c.height for c in out['cloud'][-3:]]}, fields {names}, z span {z_span:.2f} m) "
@@ -479,6 +558,172 @@ def test_x4_rtabmap_3d_map_outputs(stack: Stack) -> None:
     )
     assert not problems, "; ".join(problems) + " | " + summary
     print(summary)
+
+
+def _float_depth_png(w: int, h: int, metres: float = 3.0) -> bytes:
+    """What rtabmap puts in right_compressed: a w x h float32 depth image reinterpreted as 4 x uint8 and PNG-compressed."""
+    import cv2  # noqa: PLC0415
+
+    d = np.full((h, w), metres, dtype="<f4")
+    d[: h // 6] = np.nan  # the sky band
+    return bytes(cv2.imencode(".png", d.view(np.uint8).reshape(h, w, 4))[1])
+
+
+def _md(graph_ids: list[int], *entries: tuple[int, bytes]) -> SimpleNamespace:
+    """A fake /rtabmap/mapData message: the graph and the node entries (id, right_compressed)."""
+    nodes = [SimpleNamespace(id=i, data=SimpleNamespace(right_compressed=png, left_camera_info=[0], local_transform=[0])) for i, png in entries]
+    return SimpleNamespace(graph=SimpleNamespace(poses_id=graph_ids), nodes=nodes)
+
+
+def test_x4a_map_data_checks_node_deliveries_not_image_less_repeats() -> None:
+    png = _float_depth_png(64, 48)
+    msgs = [_md([1], (1, png)), _md([1], (1, b"")), _md([1, 2], (2, png)), _md([1, 2, 3], (3, png)), _md([1, 2, 3], (3, b""))]
+    assert _map_data_problems(msgs, 64, 48, 3.0) == ([], 3)  # the repeats of nodes 1 and 3 carry no images and are fine
+
+
+def test_x4a_map_data_flags_a_node_that_never_arrived_or_arrived_empty() -> None:
+    png = _float_depth_png(64, 48)
+    problems, _ = _map_data_problems([_md([1, 2, 3], (1, png), (2, png), (3, png)), _md([1, 2, 3, 4])], 64, 48, 3.0)
+    assert problems == ["graph nodes never delivered through mapData: [4]"]
+    problems, _ = _map_data_problems([_md([1, 2, 3], (1, png), (2, b""), (3, png))], 64, 48, 3.0)
+    assert problems == ["mapData graph nodes delivered with empty data: [(2, 'right_compressed')]"]
+    problems, _ = _map_data_problems([_md([1, 2], (1, png), (2, png))], 64, 48, 3.0)
+    assert problems and problems[0].startswith("mapData delivered only 2 graph node(s)")
+
+
+def test_x4a_depth_must_be_a_png_of_float32_metres() -> None:
+    import cv2
+
+    assert _depth_png_problem(_float_depth_png(64, 48), 64, 48, 3.0) is None
+    assert "not a decodable image" in _depth_png_problem(b"\x00\x01 an rvl blob", 64, 48, 3.0)
+    gray16 = bytes(cv2.imencode(".png", np.full((48, 64), 3000, dtype=np.uint16))[1])  # the 16-bit millimetre format
+    assert "not 4 x uint8" in _depth_png_problem(gray16, 64, 48, 3.0)
+    assert "camera is 128x96" in _depth_png_problem(_float_depth_png(64, 48), 128, 96, 3.0)
+    assert "median" in _depth_png_problem(_float_depth_png(64, 48, metres=7.0), 64, 48, 3.0)
+
+
+def test_x4a_flat_or_nan_heights_are_not_3d() -> None:
+    nan = float("nan")
+    assert _z_span_problem(np.array([0.0, 0.0, 0.0], dtype="<f4")) is not None  # Grid/3D false: z = 0
+    assert _z_span_problem(np.array([nan, nan], dtype="<f4")) is not None  # a NaN span must not pass as "not flat"
+    assert _z_span_problem(np.zeros(0, dtype="<f4")) is not None
+    assert _z_span_problem(np.array([nan, -0.8, 0.9], dtype="<f4")) is None
+
+
+_STEP_LOG = re.compile(
+    r"\[(?P<t>\d+\.\d+)\] \[rtabmap\.rtabmap\]: rtabmap \((?P<node>\d+)\): .*?RTAB-Map=(?P<core>[\d.]+)s, "
+    r"Maps update=(?P<maps>[\d.]+)s pub=(?P<pub>[\d.]+)s"
+)
+_ASSEMBLER_LOG = re.compile(  # map_assembler, once per /rtabmap/mapData message it processes
+    r"\[(?P<t>\d+\.\d+)\] \[[\w.]*map_assembler\]: map_assembler: Updating = (?P<upd>[\d.]+)s, Publishing data = (?P<pubd>[\d.]+)s"
+)
+
+
+def _late_attach_window(infos: list, statuses: list, steps: list, assembled: list, t0: int, t1: int) -> dict:
+    """Numbers for the arrival-time window [t0, t1) ns: /rtabmap/info steps, the largest gap between consecutive infos whose
+    later one arrived in the window (the pair spanning t0 counts), the largest stamp age an info reached before the next one
+    replaced it (what pose_validity's slam_max_age_s is compared with), the pose status reasons seen, rtabmap's own
+    per-step `Maps update` + `pub` time from its log, and map_assembler's messages and largest update + publish time."""
+    gap = age = 0.0
+    n = 0
+    for (a0, s0), (a1, _s1) in zip(infos, infos[1:]):
+        if t0 <= a1 < t1:
+            n += 1
+            gap, age = max(gap, (a1 - a0) / 1e9), max(age, (a1 - s0) / 1e9)
+    reasons = sorted({r for a, s in statuses if t0 <= a < t1 for r in s.split(",") if r != "valid"})
+    maps = [st for st in steps if t0 <= st["t"] < t1]
+    asm = [a for a in assembled if t0 <= a["t"] < t1]
+    return {
+        "steps": n, "max_gap_s": round(gap, 3), "max_stamp_age_s": round(age, 3), "reasons": reasons,
+        "max_maps_pub_s": round(max((st["maps"] + st["pub"] for st in maps), default=0.0), 4),
+        "max_step_s": round(max((st["core"] + st["maps"] + st["pub"] for st in maps), default=0.0), 4),
+        "log_steps": len(maps), "assembler_msgs": len(asm),
+        "assembler_max_s": round(max((a["upd"] + a["pubd"] for a in asm), default=0.0), 4),
+    }
+
+
+@pytest.mark.skipif(
+    not os.environ.get("UGV_MEASURE_LATE_ATTACH"),
+    reason="measurement, not a check (docs/mapping/baseline.md 'Task 8 fix round 1'): set UGV_MEASURE_LATE_ATTACH=1",
+)
+@pytest.mark.parametrize(
+    "stack",
+    [
+        {"speed": _X4_SPEED, "grid_probe": False},
+        {"speed": _X4_SPEED, "grid_probe": False, "timing": "laptop", "size": _BIG, "camera_reliable": True},
+    ],
+    ids=["default-320x240", "laptop-640x480-reliable-camera"],
+    indirect=True,
+)
+def test_m1_measure_late_cloud_map_attach(stack: Stack) -> None:
+    """Task 8 review I1. The gateway subscribes /rtabmap/cloud_map + /rtabmap/mapPath only while a viewer is open (destroyed
+    idle_timeout_s = 10 s after the last request), so rtabmap first assembles the whole cloud in its SLAM callback when
+    someone opens the viewer mid-mission. Map UGV_MEASURE_MAP_S seconds (default 150) with no map subscriber (not even
+    /map: nothing subscribes it on the robot), then attach like the gateway, detach and re-attach (UGV_MEASURE_CYCLES,
+    default 3). Per attach: the /rtabmap/info gap and stamp age in the 10 s after it vs the 20 s before, pose status
+    reasons, cloud size, rtabmap's own map-assembly time, and (since the fix) map_assembler's time and message count,
+    which must equal rtabmap's steps (its mapData subscription keeps 1). Appends one JSON line to UGV_MEASURE_OUT if set."""
+    map_s = float(os.environ.get("UGV_MEASURE_MAP_S", "150"))
+    cycles = int(os.environ.get("UGV_MEASURE_CYCLES", "3"))
+    hz = _X3_HZ if stack.w == _BIG[0] else 10.0  # 640x480: about the live rate (each rgbd_image is 2.1 MB)
+    clock, node = stack.node.get_clock(), stack.node
+    infos: list[tuple[int, int]] = []  # (arrival ns, header stamp ns)
+    statuses: list[tuple[int, str]] = []
+    node.create_subscription(
+        Info, "/rtabmap/info", lambda m: infos.append((clock.now().nanoseconds, m.header.stamp.sec * 10**9 + m.header.stamp.nanosec)), 50
+    )
+    node.create_subscription(String, "/ugv/localization_status", lambda m: statuses.append((clock.now().nanoseconds, m.data)), 50)
+    start = clock.now().nanoseconds
+    stack.run(map_s, hz=hz)
+    attaches = []
+    for _ in range(cycles):
+        clouds: list[tuple[int, int, int]] = []  # (arrival ns, points, stamp ns)
+        t_attach = clock.now().nanoseconds
+        subs = [  # the gateway's QoS: depth 1, reliable, the offered durability (cloud_map latched, mapPath volatile)
+            node.create_subscription(
+                PointCloud2, "/rtabmap/cloud_map",
+                lambda m: clouds.append((clock.now().nanoseconds, m.width * m.height, m.header.stamp.sec * 10**9 + m.header.stamp.nanosec)),
+                QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.TRANSIENT_LOCAL),
+            ),
+            node.create_subscription(NavPath, "/rtabmap/mapPath", lambda _m: None, QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE)),
+        ]
+        stack.run(15.0, hz=hz)
+        for sub in subs:
+            node.destroy_subscription(sub)
+        fresh = [c for c in clouds if c[2] >= t_attach - 2 * 10**9]  # not the latched cloud of the previous attach
+        attaches.append({
+            "t_attach_s": round((t_attach - start) / 1e9, 1),
+            "first_fresh_cloud_after_s": round((fresh[0][0] - t_attach) / 1e9, 2) if fresh else None,
+            "cloud_points": [fresh[0][1], fresh[-1][1]] if fresh else None, "clouds": len(clouds),
+            "t0": t_attach,
+        })
+        stack.run(20.0, hz=hz)  # viewer closed: the gateway drops the subscriptions; mapping goes on
+    log = stack.log_path.read_text(encoding="utf-8", errors="replace")
+    steps = [
+        {"t": int(float(m["t"]) * 1e9), "node": int(m["node"]), "core": float(m["core"]), "maps": float(m["maps"]), "pub": float(m["pub"])}
+        for m in _STEP_LOG.finditer(log)
+    ]
+    assembled = [{"t": int(float(m["t"]) * 1e9), "upd": float(m["upd"]), "pubd": float(m["pubd"])} for m in _ASSEMBLER_LOG.finditer(log)]
+    s = 10**9
+    for a in attaches:
+        t0 = a.pop("t0")
+        a["graph_node_at_attach"] = max((st["node"] for st in steps if st["t"] < t0), default=None)
+        a["before_20s"] = _late_attach_window(infos, statuses, steps, assembled, t0 - 20 * s, t0)  # no viewer
+        a["after_10s"] = _late_attach_window(infos, statuses, steps, assembled, t0, t0 + 10 * s)
+    result = {
+        "profile": "laptop-640x480" if stack.w == _BIG[0] else "default-320x240", "map_s": map_s, "hz": hz,
+        "infos": len(infos), "log_steps": len(steps), "assembler_msgs": len(assembled), "attaches": attaches,
+        "cloud_map_publishers": sorted({i.node_name for i in node.get_publishers_info_by_topic("/rtabmap/cloud_map")}),
+        "no_viewer_60s_to_first_attach": _late_attach_window(
+            infos, statuses, steps, assembled, start + 60 * s, start + int(map_s * 1e9)
+        ),
+        "whole_run": _late_attach_window(infos, statuses, steps, assembled, start, clock.now().nanoseconds),
+    }
+    print(json.dumps(result))
+    if out := os.environ.get("UGV_MEASURE_OUT"):
+        with open(out, "a", encoding="utf-8") as f:
+            f.write(json.dumps(result) + "\n")
+    assert infos and all(a["cloud_points"] for a in attaches), "the measurement did not run: " + json.dumps(result)
 
 
 _STATS_KEYS = ("keyframes", "loop_closures", "path_length_m", "db_bytes", "last_update_age_s", "mode", "calibration_placeholder")

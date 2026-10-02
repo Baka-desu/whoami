@@ -57,9 +57,76 @@ Sim ground-truth depth camera for bring-up / DA3 benchmark: `depth_topic:=<its t
 | `/ugv/localization/reset_distance` | `std_srvs/Empty` (service) | Dev 4 / operator | zero the total, e.g. at each new goal |
 | `/ugv/map/stats` | `std_msgs/String` (one JSON object) | web viewer (gateway: the `stats` of the map status) | `map_stats` node, 1 Hz, reliable + transient local (a late subscriber gets the latest). Scalars only: `keyframes` (int, poses in the latest graph), `loop_closures` (int, loop-closure and proximity-detection matches seen on `/rtabmap/info` since start; each matched node counts once per kind, so a parked robot that keeps re-matching the same node adds nothing), `path_length_m` (float, x/y polyline through the graph poses in id order), `db_bytes` (int or null, size of the database file, null if there is none), `last_update_age_s` (float or null, seconds since the graph last changed, null before the first graph), `mode` (`mapping` or `localize`), `calibration_placeholder` (bool, the `placeholder` flag of the `calibration_file` launch argument, false when none). A non-finite float is null. Reads only `/rtabmap/mapGraph` and `/rtabmap/info`, never `cloud_map` or `mapData` (a subscriber on either makes RTAB-Map assemble and send the whole map every step) |
 | `/rtabmap/info` | `rtabmap_msgs/Info` | eval | RTAB-Map native |
+| `/rtabmap/cloud_map` | `sensor_msgs/PointCloud2` | web viewer (gateway, on demand) | the whole 3D map, coloured, from `map_assembler`, once per SLAM step while subscribed. See **3D map outputs** |
+| `/rtabmap/mapPath` | `nav_msgs/Path` | web viewer (gateway, on demand) | graph poses in `map`. See **3D map outputs** |
+| `/rtabmap/mapData` | `rtabmap_msgs/MapData` | elevation mapper (Task 12) | each new graph node's depth, camera info and camera pose, **once**. See **`/rtabmap/mapData` consumer contract** |
 | `rtabmap.db` | file | Dev 2 localize mode | `~/.ros/ugv/rtabmap.db` by default |
 
 **Not published:** `/cmd_vel*`, anything from the perception mask.
+
+## 3D map outputs (Task 8; rtabmap_ros 0.23.7, measured on the real stack with synthetic sensors)
+
+`mapPath`, `mapGraph` and `mapData` come from the `rtabmap` node (namespace `/rtabmap`, `config/rtabmap_rgbd.yaml`:
+`Grid/3D true`, node params `cloud_output_voxelized`, `cloud_subtract_filtering`, `map_always_update`, `latch` pinned).
+**`cloud_map` comes from `rtabmap_util/map_assembler`** (`/rtabmap/assembler/map_assembler`, same YAML), which builds it
+in its own process from `mapData` (Task 8 review I1: rtabmap assembles its own copy inside the SLAM step, and a viewer
+opened mid-mission made that one step assemble the whole map). rtabmap's own copy is remapped to
+`/rtabmap/slam/cloud_map`: **never subscribe it** (nor rtabmap's other map clouds, `/rtabmap/cloud_obstacles`,
+`/rtabmap/octomap_*`, ...: any subscriber makes the SLAM step assemble them). `map_assembler` subscribes `mapData` all
+the time, so rtabmap now sends `mapData` every SLAM step; `cloud_map` and `mapPath` are still built only while someone
+subscribes them.
+
+| Topic | Reliability | History | Durability | Subscribe with |
+|---|---|---|---|---|
+| `/rtabmap/cloud_map` | RELIABLE | KEEP_LAST 1 | TRANSIENT_LOCAL | RELIABLE + TRANSIENT_LOCAL (a late subscriber gets the last cloud) |
+| `/rtabmap/mapPath` | RELIABLE | KEEP_LAST 1 | VOLATILE | RELIABLE + VOLATILE |
+| `/rtabmap/mapGraph` | RELIABLE | KEEP_LAST 1 | TRANSIENT_LOCAL | RELIABLE + TRANSIENT_LOCAL (`map_stats` reads it; cheap) |
+| `/rtabmap/mapData` | RELIABLE | KEEP_LAST 1 | VOLATILE | RELIABLE + VOLATILE, **deep queue** (the tests use 100): the publisher keeps 1, a busy reader loses messages |
+
+- **`cloud_map`**: frame `map`, fields `x y z rgb` (FLOAT32 each, `point_step` 16), `height` 1, voxelised at `Grid/CellSize`
+  (5 cm). It is the **whole map, republished every SLAM step** (about 2 Hz): 57k points (0.9 MB) after 190 s of motion,
+  growing with the map, so a consumer needs a point budget. **Clipped at about 1 m above `base_link`** by
+  `Grid/MaxObstacleHeight: "1.0"` (it filters the 3D local maps the cloud is made of): upper walls, trees and overhangs
+  are missing from it. Owner decision pending; the elevation mapper is not affected (it reads `mapData` depth).
+  **Late attach** (the gateway subscribes only while a viewer is open): `map_assembler` builds the whole cloud when the
+  first subscriber attaches (1.4-1.7 s at 270-285 nodes, about 5 ms per node, growing with the map; the cloud arrives
+  1.4-2.3 s after the attach) and adds only the new nodes after that. `map_cleanup: false` (assembler only) keeps its
+  cache when the viewer closes, so a re-attach costs about 0.2 s and the cloud arrives 0.3-0.9 s later. None of this
+  runs in the SLAM step any more: the largest `/rtabmap/info` gap in the 10 s after an attach was 0.73 s over 20 attaches,
+  the same as with no viewer (docs/mapping/baseline.md "Task 8 fix round 1"). Limits: the assembler's `mapData` subscription keeps 1 message
+  (hard-coded in rtabmap_util 0.23.7), so the messages that arrive while it assembles are dropped and those nodes (1-2
+  at the first attach, 1-2 at start-up) stay missing from the cloud for the run. The cloud is for display only; the
+  elevation mapper reads `mapData` itself. It also holds every node's data plus the grid cache in memory (RSS 0.9-1.1 GB
+  at 460-480 nodes in the synthetic runs, next to rtabmap's 1.2-1.3 GB).
+- **`mapPath`**: frame `map`, one pose per graph node (optimised; it changes on loop closure).
+
+### `/rtabmap/mapData` consumer contract (what the elevation node, Task 12, builds against)
+
+Checked by `test/test_ros_stack.py::test_x4_rtabmap_3d_map_outputs` (`_map_data_problems`, `_depth_png_problem`).
+
+1. **One node per message.** `graph` is the whole graph (`poses_id`, optimised `poses` in `map`; take node poses from the
+   latest message's graph, not from the message that delivered the node: loop closures move them). `nodes` holds one
+   entry: normally the node this step added (its id is the last of `graph.poses_id`). `node.stamp` is the image stamp
+   (float64 seconds); `node.pose` is `base_link` in `map` at that stamp, with z = 0 and roll = pitch = 0 (`Reg/Force3DoF`).
+2. **Images arrive once.** A node's images are only in the message that adds it. A processed frame that adds no node
+   (the robot has not moved `RGBD/LinearUpdate` 0.1 m / `RGBD/AngularUpdate` 0.1 rad) re-sends the newest node: same id
+   and stamp, `graph.poses_id` unchanged, **`left_compressed` and `right_compressed` empty**. Deduplicate by id and skip
+   entries with an empty `right_compressed`.
+3. **VOLATILE, so subscribe before mapping starts.** A subscriber that connects late, or loses a message, never gets
+   those nodes' images from this topic (no replay). Started before mapping, every id in the final `graph.poses_id` was
+   delivered once with its data (the x4 check).
+4. **`data.right_compressed` is the depth, a PNG of float32 metres** (not RVL, not 16-bit millimetres: `Mem/SaveDepth16Format`
+   is false, rtabmap warns once at start). Decode: `cv2.imdecode(buf, cv2.IMREAD_UNCHANGED)` gives an `(h, w, 4)` uint8
+   array; `np.ascontiguousarray(im).view('<f4')[..., 0]` is the `(h, w)` depth in metres at the camera size; NaN or 0 =
+   no depth (the sky band is NaN).
+5. **`data.left_compressed`** is the colour image as a JPEG (decodes to BGR with OpenCV). The raw `data.left` /
+   `data.right` images are empty.
+6. **`data.left_camera_info`**: one entry, `K` / `width` / `height` of the camera (e.g. K = [260, 0, 160, 0, 260, 120,
+   0, 0, 1] at 320x240), but **`header.frame_id` is empty**: do not look the camera up in TF by that name.
+7. **`data.local_transform`**: one entry, the **`base_link` -> camera optical frame** transform (translation + quaternion,
+   `geometry_msgs/Transform`). Camera pose in `map` = node pose (from the latest graph) * `local_transform`. Measured:
+   translation (0, 0, 0.5), rotation (x, y, z, w) (0.5, -0.5, 0.5, -0.5), which is the harness's static
+   `base_link -> camera_optical` with the quaternion's sign flipped (the same rotation).
 
 ## TF for Dev 3 (answers 2026-09-29; measured on the real stack with synthetic sensors unless marked)
 
