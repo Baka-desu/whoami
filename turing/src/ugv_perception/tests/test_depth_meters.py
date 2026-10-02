@@ -207,9 +207,7 @@ def test_gpu_preprocess_matches_numpy(device: str, hw: tuple[int, int]) -> None:
     assert float(np.mean(diff > 1e-4)) < 5e-3
 
 
-def test_depth_channel_uses_the_backends_gpu_path_and_keeps_the_stage_hook() -> None:
-    from contextlib import contextmanager
-
+def test_depth_channel_uses_the_backends_gpu_path() -> None:
     from ugv_perception.backend.depth_live import DepthChannel
 
     class _GpuBackend:
@@ -222,27 +220,16 @@ def test_depth_channel_uses_the_backends_gpu_path_and_keeps_the_stage_hook() -> 
         def run_all(self, blob):
             raise AssertionError("the GPU path must not use the numpy run_all")
 
-        def run_depth_metres(self, rgb, focal, model_hw_, out_hw, stage):
+        def run_depth_metres(self, rgb, focal, model_hw_, out_hw):
             self.args = (rgb.shape, round(focal, 3), model_hw_, out_hw)
-            with stage("depth_infer"):
-                pass
-            with stage("depth_post"):
-                return np.full(out_hw, 2.0, dtype=np.float32)
-
-    seen: list[str] = []
-
-    @contextmanager
-    def hook(name: str):
-        seen.append(name)
-        yield
+            return np.full(out_hw, 2.0, dtype=np.float32)
 
     rgb = np.zeros((28, 28, 3), dtype=np.uint8)
     k = (200.0, 0.0, 13.5, 0.0, 200.0, 13.5, 0.0, 0.0, 1.0)
     backend = _GpuBackend()
-    depth_m, points = DepthChannel(backend).maps(rgb, k, stage=hook)
+    depth_m, points = DepthChannel(backend).maps(rgb, k)
     km, mhw = k_model(np.asarray(k).reshape(3, 3), (28, 28))
     assert backend.args == ((28, 28, 3), round(focal_model(km), 3), mhw, (28, 28))
-    assert seen[:2] == ["depth_infer", "depth_post"]
     assert depth_m.shape == (28, 28) and depth_m.dtype == np.float32
     assert points.shape == (28 * 28, 3) and np.allclose(points[:, 2], 2.0)
 
@@ -318,112 +305,34 @@ class _NumpyPath:
 def test_gpu_path_matches_the_numpy_path_on_real_weights(da3_cuda) -> None:
     from ugv_perception.backend.depth_live import DepthChannel
 
-    assert da3_cuda.da3_half is False, "FP32 is the default for DA3 on every backend"
-    try:
-        for rgb in _synthetic_frames():
-            want, want_pts = DepthChannel(_NumpyPath(da3_cuda)).maps(rgb, _K_WEBCAM)
-            got, got_pts = DepthChannel(da3_cuda).maps(rgb, _K_WEBCAM)
-            assert got.dtype == np.float32 and got.shape == want.shape == (480, 640)
-            assert np.array_equal(np.isnan(got), np.isnan(want))
-            ok = np.isfinite(want)
-            assert ok.sum() > 0.9 * ok.size
-            # Measured on these frames: 0.2 to 0.7 mm. The difference is the 8-bit truncation flips in the
-            # resize, which the model turns into sub-millimetre depth noise. 2 mm and 1 % are the bounds.
-            assert float(np.max(np.abs(got[ok] - want[ok]))) < 2e-3
-            assert float(np.max(np.abs(got[ok] - want[ok]) / want[ok])) < 1e-2
-            assert got_pts.shape == want_pts.shape
-    finally:
-        da3_cuda.da3_half = False
+    for rgb in _synthetic_frames():
+        want, want_pts = DepthChannel(_NumpyPath(da3_cuda)).maps(rgb, _K_WEBCAM)
+        got, got_pts = DepthChannel(da3_cuda).maps(rgb, _K_WEBCAM)
+        assert got.dtype == np.float32 and got.shape == want.shape == (480, 640)
+        assert np.array_equal(np.isnan(got), np.isnan(want))
+        ok = np.isfinite(want)
+        assert ok.sum() > 0.9 * ok.size
+        # Measured on these frames: 0.2 to 0.7 mm. The difference is the 8-bit truncation flips in the
+        # resize, which the model turns into sub-millimetre depth noise. 2 mm and 1 % are the bounds.
+        assert float(np.max(np.abs(got[ok] - want[ok]))) < 2e-3
+        assert float(np.max(np.abs(got[ok] - want[ok]) / want[ok])) < 1e-2
+        assert got_pts.shape == want_pts.shape
 
 
-# --- fp16: a DA3-only opt-in (da3_fp16). The segmentation path never sees autocast. ------------------------
+# --- FP32 only: the CUDA backend has no half-precision path (PR #40 review). -------------------------------
 
 
-@pytest.mark.filterwarnings("ignore:.*torch.jit.script.*")  # raised by the DA3 package at import, not by us
-def test_fp16_depth_matches_fp32_within_one_percent_on_valid_pixels(da3_cuda) -> None:
-    from ugv_perception.backend.depth_live import DepthChannel
+def test_the_cuda_backend_has_no_half_precision_path() -> None:
+    from ugv_perception.backend import cuda_pytorch
 
-    channel = DepthChannel(da3_cuda)
-    try:
-        for rgb in _synthetic_frames():
-            da3_cuda.da3_half = False
-            full, _ = channel.maps(rgb, _K_WEBCAM)
-            da3_cuda.da3_half = True
-            half, _ = channel.maps(rgb, _K_WEBCAM)
-            assert half.dtype == np.float32
-            assert np.array_equal(np.isnan(half), np.isnan(full))
-            ok = np.isfinite(full)
-            assert ok.sum() > 0.9 * ok.size
-            rel = np.abs(half[ok] - full[ok]) / full[ok]
-            # Measured on these frames: at most 0.17 %. The gate is 1 %.
-            assert float(rel.max()) < 0.01
-    finally:
-        da3_cuda.da3_half = False
+    source = Path(cuda_pytorch.__file__).read_text(encoding="utf-8")
+    for word in ("autocast", "float16", "half(", "da3_half", "synchronize("):
+        assert word not in source, word
 
 
 class _StubOut:
     def __init__(self, logits) -> None:
         self.logits = logits
-
-
-class _AutocastProbe:
-    """A model stub that records whether autocast was on while it ran."""
-
-    def __init__(self, kind: str) -> None:
-        self.kind = kind
-        self.autocast_seen: list[bool] = []
-
-    def __call__(self, pixel_values):
-        import torch
-
-        self.autocast_seen.append(bool(torch.is_autocast_enabled("cuda")))
-        n, _, h, w = pixel_values.shape
-        if self.kind == "rugd":
-            return _StubOut(torch.zeros((n, 25, h // 4, w // 4), device=pixel_values.device))
-        return (
-            torch.ones((n, h, w), device=pixel_values.device),
-            torch.zeros((n, h, w), device=pixel_values.device),
-        )
-
-
-def _stub_backend(kind: str):
-    from ugv_perception.backend.device import cuda_available
-
-    if not cuda_available():
-        pytest.skip("CUDA missing")
-    from ugv_perception.backend.cuda_pytorch import CudaPytorchTensorBackend
-
-    backend = CudaPytorchTensorBackend()
-    backend._model = _AutocastProbe(kind)
-    backend._kind = kind
-    return backend
-
-
-def test_da3_runs_under_autocast_and_returns_float32_when_half_is_on() -> None:
-    backend = _stub_backend("da3")
-    blob = np.zeros((1, 3, 28, 28), dtype=np.float32)
-    backend.da3_half = True
-    depth, sky = backend.run_all(blob)
-    assert backend._model.autocast_seen == [True]
-    assert depth.dtype == np.float32 and sky.dtype == np.float32
-    on_camera = backend.run_depth_metres(
-        np.zeros((28, 28, 3), dtype=np.uint8), 100.0, (504, 504), (28, 28)
-    )
-    assert backend._model.autocast_seen == [True, True]
-    assert on_camera.dtype == np.float32
-    backend.da3_half = False
-    backend.run_all(blob)
-    assert backend._model.autocast_seen[-1] is False
-
-
-def test_segmentation_never_runs_under_autocast_whatever_da3_half_says() -> None:
-    backend = _stub_backend("rugd")
-    backend.da3_half = True
-    blob = np.zeros((1, 3, 64, 64), dtype=np.float32)
-    backend.run_seg(blob, (64, 64))
-    backend.run_decoded(blob, (64, 64))
-    backend.run_all(blob)
-    assert backend._model.autocast_seen == [False, False, False]
 
 
 # --- One definition of the DA3 preprocess constants and the half-pixel positions. --------------------------
@@ -478,7 +387,6 @@ def _cpu_backend(kind: str):
 
     backend = CudaPytorchTensorBackend()
     backend.device = "cpu"  # the backend's own setting; every placement must follow it
-    backend.da3_half = False  # CPU fp16 autocast is not what this test is about
     backend._model = _DeviceProbe(kind)
     backend._kind = kind
     return backend
@@ -488,9 +396,8 @@ def test_rugd_paths_put_the_input_on_the_backend_device() -> None:
     backend = _cpu_backend("rugd")
     blob = np.zeros((1, 3, 64, 64), dtype=np.float32)
     backend.run_seg(blob, (64, 64))
-    backend.run_decoded(blob, (64, 64))
     backend.run_all(blob)
-    assert backend._model.devices == ["cpu", "cpu", "cpu"]
+    assert backend._model.devices == ["cpu", "cpu"]
 
 
 def test_da3_paths_put_the_input_on_the_backend_device_and_need_no_cuda_to_run() -> None:

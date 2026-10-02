@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from contextlib import AbstractContextManager, nullcontext
 from pathlib import Path
 
 import numpy as np
@@ -11,10 +9,6 @@ from numpy.typing import NDArray
 
 from ugv_perception.adapter.output import AdapterError, Instance
 from ugv_perception.depth.geometry import METRIC_SCALE
-
-
-def _no_timing(name: str) -> AbstractContextManager[None]:
-    return nullcontext()
 
 
 class CudaPytorchBackend:
@@ -40,10 +34,6 @@ class CudaPytorchTensorBackend:
         self.seg_post_disabled = False
         # Every tensor this backend creates, and the model it loads, goes to this device.
         self.device = "cuda"
-        # DA3 only, off by default: FP32 is the policy on every backend. Set (via the node's `da3_fp16`
-        # parameter) only where FP32 was measured to miss the latency budget; the forward pass then runs under
-        # fp16 autocast and its outputs are cast back to float32. Never applied to the RUGD segmentation net.
-        self.da3_half = False
 
     def load(self, weights_path: str, kind: str = "rugd") -> None:
         path = Path(weights_path)
@@ -124,16 +114,6 @@ class CudaPytorchTensorBackend:
                 self._fallback_logits = logits.detach().cpu().numpy()
             raise AdapterError("CUDA seg decode failed") from exc
 
-    def _da3_forward(self, tensor: object) -> tuple[object, object]:
-        """DA3 depth_raw and sky as float32 tensors, under fp16 autocast when `da3_half` is on."""
-        import torch
-
-        if not self.da3_half:
-            return self._model(tensor)
-        with torch.autocast(torch.device(self.device).type, dtype=torch.float16):
-            depth, sky = self._model(tensor)
-        return depth.float(), sky.float()
-
     def run_all(self, blob: NDArray[np.float32]) -> list[np.ndarray]:
         if self._model is None or self._kind is None:
             raise AdapterError("CudaPytorchTensorBackend.load() was not called")
@@ -149,7 +129,7 @@ class CudaPytorchTensorBackend:
                 if self._kind == "rugd":
                     logits = self._model(pixel_values=tensor).logits
                     return [logits.detach().cpu().numpy()]
-                depth, sky = self._da3_forward(tensor)
+                depth, sky = self._model(tensor)
                 return [
                     depth.detach().cpu().numpy(),
                     sky.detach().cpu().numpy(),
@@ -165,14 +145,12 @@ class CudaPytorchTensorBackend:
         focal: float,
         model_size: tuple[int, int],
         out_hw: tuple[int, int],
-        stage: Callable[[str], AbstractContextManager[None]] | None = None,
     ) -> NDArray[np.float32]:
-        """DA3 on CUDA with the pre/post-processing on the GPU: camera-sized depth in metres, NaN holes.
+        """DA3 on CUDA with the pre/post-processing on the GPU, in FP32: camera-sized depth in metres, NaN holes.
 
-        Same maths as geometry.preprocess_nchw, meters_from_raw and hole_safe_resize, in float32 on the
-        device, so only the camera frame goes up and only the camera-sized depth comes back.
-        `stage` is DepthChannel's timing hook: "depth_infer" covers sizing, preprocess and the model (the
-        device is synchronised before it closes), "depth_post" the meters, the resize and the copy back.
+        Same maths as geometry.preprocess_nchw, meters_from_raw and hole_safe_resize (geometry_gpu), so only
+        the camera frame goes up and only the camera-sized depth comes back. No forced synchronize: the copy
+        back to the host is the only wait.
         """
         if self._model is None or self._kind != "da3":
             raise AdapterError("run_depth_metres needs a loaded DA3 model")
@@ -182,67 +160,21 @@ class CudaPytorchTensorBackend:
             from ugv_perception.depth import geometry_gpu
         except ImportError as exc:
             raise AdapterError("torch is not installed") from exc
-        span = stage if stage is not None else _no_timing
         try:
-            with span("depth_infer"):
-                self.ensure_hw(*model_size)
-                with torch.inference_mode():
-                    blob, sized = geometry_gpu.preprocess_nchw_gpu(rgb, self.device)
-                    if sized != tuple(model_size):
-                        raise AdapterError("preprocess size disagrees with K_model")
-                    depth, sky = self._da3_forward(blob)
-                if torch.device(self.device).type == "cuda":
-                    torch.cuda.synchronize(self.device)
-            with span("depth_post"):
-                with torch.inference_mode():
-                    metres = depth[0].float() * (float(focal) / METRIC_SCALE)
-                    on_camera = geometry_gpu.hole_safe_resize_gpu(metres, sky[0], tuple(out_hw))
-                    return on_camera.cpu().numpy()
-        except AdapterError:
-            raise
-        except Exception as exc:
-            raise AdapterError("CUDA run failed") from exc
-
-
-    def run_decoded(
-        self, blob: NDArray[np.float32], out_hw: tuple[int, int]
-    ) -> tuple[np.ndarray, np.ndarray]:
-        """RUGD on CUDA, decoded on the GPU: (labels int32, top-class probability float32) at out_hw.
-
-        Same maths as adapter.rugd.decode_rugd_logits, in float64: bilinear resize of the logits with
-        half-pixel centres and edge clamp (torch align_corners=False), argmax, and the top class's
-        softmax probability 1 / sum(exp(l - l_max)). Saves ~0.7 s of CPU per 640x480 frame.
-        """
-        if self._model is None or self._kind != "rugd":
-            raise AdapterError("run_decoded needs a loaded RUGD model")
-        if not isinstance(blob, np.ndarray) or blob.dtype != np.float32 or blob.ndim != 4:
-            raise TypeError("blob must be float32 NCHW")
-        try:
-            import torch
-            import torch.nn.functional as F
-        except ImportError as exc:
-            raise AdapterError("torch is not installed") from exc
-        try:
-            tensor = torch.from_numpy(blob).to(self.device)
+            self.ensure_hw(*model_size)
             with torch.inference_mode():
-                logits = self._model(pixel_values=tensor).logits
-                if not bool(torch.isfinite(logits).all()):
-                    raise AdapterError("RUGD logits are not finite")
-                a = logits.double()
-                if tuple(a.shape[-2:]) != tuple(out_hw):
-                    a = F.interpolate(a, size=tuple(out_hw), mode="bilinear", align_corners=False)
-                a = a[0]
-                top, labels = a.max(dim=0)
-                total = torch.exp(torch.clamp(a - top, -80.0, 80.0)).sum(dim=0)
-                scores = (1.0 / total).float()
-                return (
-                    labels.to(torch.int32).cpu().numpy(),
-                    scores.cpu().numpy(),
-                )
+                blob, sized = geometry_gpu.preprocess_nchw_gpu(rgb, self.device)
+                if sized != tuple(model_size):
+                    raise AdapterError("preprocess size disagrees with K_model")
+                depth, sky = self._model(blob)
+                metres = depth[0].float() * (float(focal) / METRIC_SCALE)
+                on_camera = geometry_gpu.hole_safe_resize_gpu(metres, sky[0], tuple(out_hw))
+                return on_camera.cpu().numpy()
         except AdapterError:
             raise
         except Exception as exc:
             raise AdapterError("CUDA run failed") from exc
+
 
 
 def _load_rugd(path: Path, device: str) -> object:

@@ -378,9 +378,6 @@ class OpenVinoGpuTensorBackend:
         self._fallback_logits: np.ndarray | None = None
         self.seg_post_disabled = False
         self.device = _DEVICE
-        # FP32 by default. The GPU plugin would otherwise pick f16 on an f16-capable GPU (Arc) even for an
-        # FP32 IR. `fp16` is the DA3-only opt-in (device.pick_tensor_backend refuses it for RUGD).
-        self.fp16 = False
 
     def load(self, weights_path: str, input_hw: tuple[int, int] | None = None) -> None:
         path = Path(weights_path)
@@ -425,9 +422,10 @@ class OpenVinoGpuTensorBackend:
         try:
             from openvino import Type, properties
 
-            precision = Type.f16 if self.fp16 else Type.f32
+            # FP32 on every backend: the GPU plugin would otherwise pick f16 on an f16-capable GPU (Arc) even
+            # for an FP32 IR.
             self._compiled, self.device = _compile_gpu_then_cpu(
-                self._core, self._model, {properties.hint.inference_precision: precision}
+                self._core, self._model, {properties.hint.inference_precision: Type.f32}
             )
         except AdapterError:
             raise

@@ -166,10 +166,6 @@ class RugdSegformerAdapter:
                 except AdapterError as exc:
                     if "not finite" in str(exc):
                         raise
-            elif callable(getattr(self._backend, "run_decoded", None)):
-                # Backend decodes on its own device: same maths as decode_rugd_logits.
-                labels, scores = self._backend.run_decoded(blob, (rh, rw))
-                return _raw_from_maps(labels, scores, frame)
             logits = self._backend.run(blob)
         except AdapterError:
             raise

@@ -154,24 +154,6 @@ def test_nan_gpu_decode_does_not_retry_infer() -> None:
     raise AssertionError("NaN logits must raise")
 
 
-def test_infer_uses_run_decoded_when_no_run_seg() -> None:
-    class _Backend:
-        def run_decoded(self, blob, out_hw):
-            labels = np.full(out_hw, 4, dtype=np.int32)
-            scores = np.full(out_hw, 0.9, dtype=np.float32)
-            return labels, scores
-
-        def run(self, blob):
-            raise AssertionError("must not fall back to run when run_decoded works")
-
-    adapter = RugdSegformerAdapter(
-        _Backend(), input_hw=(2, 2), mean=(0.0, 0.0, 0.0), std=(1.0, 1.0, 1.0)
-    )
-    raw = adapter.infer(_frame(4, 6))
-    assert raw.hw == (4, 6)
-    assert set(int(x) for x in np.unique(raw.label_ids).tolist()) == {4}
-
-
 def test_compose_tick_uses_rugd_table() -> None:
     class _Scripted:
         def infer(self, frame: ImageFrame):

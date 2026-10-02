@@ -56,8 +56,8 @@ def test_pick_prefers_intel_gpu_ir(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     xml, folder = _weights(tmp_path, xml=True, safetensors=True)
     monkeypatch.setattr(device, "intel_openvino_gpu_available", lambda: True)
     monkeypatch.setattr(device, "cuda_available", lambda: True)
-    monkeypatch.setattr(device, "_load_openvino_ir", lambda path, fp16: ("ov", path))
-    monkeypatch.setattr(device, "_load_cuda_safetensors", lambda path, kind, fp16: ("cuda", path, kind))
+    monkeypatch.setattr(device, "_load_openvino_ir", lambda path: ("ov", path))
+    monkeypatch.setattr(device, "_load_cuda_safetensors", lambda path, kind: ("cuda", path, kind))
     assert pick_tensor_backend(ir_xml=xml, safetensors_dir=folder, kind="rugd") == ("ov", xml)
 
 
@@ -65,8 +65,8 @@ def test_pick_cuda_when_intel_gpu_missing(tmp_path: Path, monkeypatch: pytest.Mo
     xml, folder = _weights(tmp_path, xml=True, safetensors=True)
     monkeypatch.setattr(device, "intel_openvino_gpu_available", lambda: False)
     monkeypatch.setattr(device, "cuda_available", lambda: True)
-    monkeypatch.setattr(device, "_load_openvino_ir", lambda path, fp16: ("ov", path))
-    monkeypatch.setattr(device, "_load_cuda_safetensors", lambda path, kind, fp16: ("cuda", path, kind))
+    monkeypatch.setattr(device, "_load_openvino_ir", lambda path: ("ov", path))
+    monkeypatch.setattr(device, "_load_cuda_safetensors", lambda path, kind: ("cuda", path, kind))
     assert pick_tensor_backend(ir_xml=xml, safetensors_dir=folder, kind="da3") == (
         "cuda",
         folder,
@@ -78,7 +78,7 @@ def test_pick_cuda_without_ir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
     xml, folder = _weights(tmp_path, xml=False, safetensors=True)
     monkeypatch.setattr(device, "intel_openvino_gpu_available", lambda: False)
     monkeypatch.setattr(device, "cuda_available", lambda: True)
-    monkeypatch.setattr(device, "_load_cuda_safetensors", lambda path, kind, fp16: ("cuda", path, kind))
+    monkeypatch.setattr(device, "_load_cuda_safetensors", lambda path, kind: ("cuda", path, kind))
     assert pick_tensor_backend(ir_xml=xml, safetensors_dir=folder, kind="rugd") == (
         "cuda",
         folder,
@@ -92,7 +92,7 @@ def test_pick_openvino_cpu_when_no_intel_gpu_no_cuda(
     xml, folder = _weights(tmp_path, xml=True, safetensors=False)
     monkeypatch.setattr(device, "intel_openvino_gpu_available", lambda: False)
     monkeypatch.setattr(device, "cuda_available", lambda: False)
-    monkeypatch.setattr(device, "_load_openvino_ir", lambda path, fp16: ("ov-cpu", path))
+    monkeypatch.setattr(device, "_load_openvino_ir", lambda path: ("ov-cpu", path))
     assert pick_tensor_backend(ir_xml=xml, safetensors_dir=folder, kind="rugd") == (
         "ov-cpu",
         xml,
@@ -106,26 +106,8 @@ def test_pick_none_when_no_weights(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     assert pick_tensor_backend(ir_xml=xml, safetensors_dir=folder, kind="rugd") is None
 
 
-def test_precision_is_fp32_unless_da3_opts_in(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    xml, folder = _weights(tmp_path, xml=True, safetensors=True)
-    monkeypatch.setattr(device, "intel_openvino_gpu_available", lambda: False)
-    monkeypatch.setattr(device, "cuda_available", lambda: True)
-    monkeypatch.setattr(device, "_load_cuda_safetensors", lambda path, kind, fp16: fp16)
-    assert pick_tensor_backend(ir_xml=xml, safetensors_dir=folder, kind="da3") is False
-    assert pick_tensor_backend(ir_xml=xml, safetensors_dir=folder, kind="rugd") is False
-    assert pick_tensor_backend(ir_xml=xml, safetensors_dir=folder, kind="da3", fp16=True) is True
-    with pytest.raises(ValueError, match="RUGD always runs FP32"):
-        pick_tensor_backend(ir_xml=xml, safetensors_dir=folder, kind="rugd", fp16=True)
-
-
-def test_backends_default_to_fp32() -> None:
-    from ugv_perception.backend.openvino_gpu import OpenVinoGpuTensorBackend
-
-    assert CudaPytorchTensorBackend().da3_half is False
-    assert OpenVinoGpuTensorBackend().fp16 is False
-
-
-def test_openvino_networks_compile_with_an_explicit_precision_hint(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_openvino_networks_compile_pinned_to_fp32(monkeypatch: pytest.MonkeyPatch) -> None:
+    """FP32 on every backend: the GPU plugin would otherwise pick f16 on Arc even for an FP32 IR."""
     ov = pytest.importorskip("openvino")
     from ugv_perception.backend import openvino_gpu
 
@@ -138,13 +120,11 @@ def test_openvino_networks_compile_with_an_explicit_precision_hint(monkeypatch: 
         def input(self, i):
             raise AssertionError("not reached")
 
-    for fp16, want in ((False, ov.Type.f32), (True, ov.Type.f16)):
-        backend = openvino_gpu.OpenVinoGpuTensorBackend()
-        backend.fp16 = fp16
-        backend._core, backend._model = object(), _Model()
-        with pytest.raises(AssertionError, match="not reached"):
-            backend._compile()
-        assert seen[-1] == {ov.properties.hint.inference_precision: want}
+    backend = openvino_gpu.OpenVinoGpuTensorBackend()
+    backend._core, backend._model = object(), _Model()
+    with pytest.raises(AssertionError, match="not reached"):
+        backend._compile()
+    assert seen == [{ov.properties.hint.inference_precision: ov.Type.f32}]
 
 
 def test_cuda_tensor_load_raises_without_cuda(

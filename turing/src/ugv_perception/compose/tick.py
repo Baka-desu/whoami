@@ -21,16 +21,6 @@ class ComposeOut:
     mask: CanonicalMask | None
 
 
-def frame_is_stale(frame: ImageFrame, now_ns: int, freshness_profile: FreshnessProfile) -> bool:
-    """True when compose_tick will not run inference on this frame: it is too old, or stamped in the future.
-
-    compose_tick makes this test first (below, through the same `evaluate`) and returns degraded without
-    calling the adapter. The node's scheduler calls this function to know which frames take that early exit,
-    so it can never skip a frame that must publish degraded. test_compose pins that the two agree.
-    """
-    return evaluate(freshness_profile, frame.stamp_ns, now_ns).time_degraded
-
-
 def compose_tick(
     *,
     frame: ImageFrame | None,
@@ -47,7 +37,6 @@ def compose_tick(
             mask=None,
         )
 
-    # The same test as frame_is_stale() above; `result` is kept for decide_publish.
     result = evaluate(freshness_profile, frame.stamp_ns, now_ns)
     if result.time_degraded:
         decision = decide_publish(result, False, False)

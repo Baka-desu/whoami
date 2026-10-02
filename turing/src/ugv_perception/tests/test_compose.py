@@ -288,21 +288,3 @@ def test_live_ros_node_is_perception_cycle() -> None:
     assert spy.calls == 1
     assert out.mask is not None
     assert out.mask.header.stamp_ns == _STAMP
-
-
-@pytest.mark.parametrize(
-    "age_ms", [-10, 0, 100, 499, 500, 501, 5_000], ids=lambda v: f"{v}ms"
-)
-def test_frame_is_stale_agrees_with_what_compose_tick_does_before_inference(kernels, age_ms: int) -> None:
-    """The node's scheduler asks frame_is_stale to predict compose_tick's early exit. They must never disagree:
-    stale means no inference and degraded; not stale means the adapter runs."""
-    from ugv_perception.compose.tick import frame_is_stale
-
-    frame = _frame()
-    now = _STAMP + age_ms * 1_000_000
-    spy = SpyAdapter()
-    out = _tick(kernels, frame=frame, adapter=spy, now_ns=now)
-    stale = frame_is_stale(frame, now, kernels[2])
-    assert stale is (spy.calls == 0)
-    if stale:
-        assert out.decision.degraded is True and out.mask is None
