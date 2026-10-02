@@ -27,7 +27,7 @@ import yaml  # noqa: E402
 from geometry_msgs.msg import Pose, TransformStamped  # noqa: E402
 from nav_msgs.msg import Odometry  # noqa: E402
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy  # noqa: E402
-from rtabmap_msgs.msg import Info, MapGraph  # noqa: E402
+from rtabmap_msgs.msg import Info, Link, MapGraph  # noqa: E402
 from sensor_msgs.msg import CameraInfo, Image  # noqa: E402
 from std_msgs.msg import Bool, Float64, String  # noqa: E402
 from std_srvs.srv import Empty  # noqa: E402
@@ -439,7 +439,9 @@ def _subscribers(h: Harness, topic: str) -> set[str]:
     return {i.node_name for i in h.node.get_subscriptions_info_by_topic(topic)}
 
 
-def _graph_msg(h: Harness, poses: list[tuple[int, float, float]]) -> MapGraph:
+def _graph_msg(
+    h: Harness, poses: list[tuple[int, float, float]], links: list[tuple[int, int, int]] = ()
+) -> MapGraph:
     m = MapGraph()
     m.header.stamp = h.now()
     m.header.frame_id = "map"
@@ -449,6 +451,8 @@ def _graph_msg(h: Harness, poses: list[tuple[int, float, float]]) -> MapGraph:
         p.position.x, p.position.y = x, y
         p.orientation.w = 1.0
         m.poses.append(p)
+    for a, b, kind in links:
+        m.links.append(Link(from_id=a, to_id=b, type=kind))
     return m
 
 
@@ -463,23 +467,19 @@ def test_n14_map_stats_publishes_scalar_json_and_replays_it_to_a_late_subscriber
     db.write_bytes(bytes(1234))
     cal = _calibration_file(h, tmp_path / "cal.yaml", placeholder=True)
     proc = _stats_node(
-        h, mode="localize", database_path=str(db), calibration_file=str(cal), publish_rate_hz=str(1.0 / _PERIOD_S)
+        h, mode="mapping", database_path=str(db), calibration_file=str(cal), publish_rate_hz=str(1.0 / _PERIOD_S)
     )
     got: list[dict] = []
     h.node.create_subscription(String, "/ugv/map/stats", lambda m: got.append(json.loads(m.data)), _LATCHED)
     graph_pub = h.node.create_publisher(MapGraph, "/rtabmap/mapGraph", _LATCHED)  # rtabmap: reliable, transient local
-    info_pub = h.node.create_publisher(Info, "/rtabmap/info", 10)  # rtabmap: reliable, volatile
     # Ids out of order on purpose: in id order this is the (0,0) -> (3,4) -> (3,10) line, 5 + 6 m.
     poses = [(3, 3.0, 10.0), (1, 0.0, 0.0), (2, 3.0, 4.0)]
-    ref_ids = itertools.count(10)
+    # rtabmap::Link::Type: 0 neighbour, 1 global closure, 3 local-time closure, 4 user closure, 9 gravity. Closures are the
+    # distinct pairs of types 1/2/4: (1,3) given three times (one reversed, one as another closure type) and (1,2) = 2.
+    links = [(1, 2, 1), (1, 2, 0), (2, 3, 0), (3, 1, 1), (1, 3, 4), (1, 3, 1), (2, 3, 3), (3, 3, 9)]
 
     def each() -> None:
-        graph_pub.publish(_graph_msg(h, poses))  # the same graph again and again: a republish is not a change
-        for loop, proximity in ((5, 0), (5, 0), (0, 3)):  # one loop closure reported twice + one proximity detection
-            info = Info()  # a parked robot: a new reference node every step, the same matched node
-            info.header.stamp = h.now()
-            info.ref_id, info.loop_closure_id, info.proximity_detection_id = next(ref_ids), loop, proximity
-            info_pub.publish(info)
+        graph_pub.publish(_graph_msg(h, poses, links))  # the same graph again and again: a republish is not a change
 
     def complete() -> bool:
         return bool(got) and got[-1]["keyframes"] == 3 and got[-1]["loop_closures"] == 2
@@ -494,7 +494,7 @@ def test_n14_map_stats_publishes_scalar_json_and_replays_it_to_a_late_subscriber
     assert all(v is None or type(v) in (bool, int, float, str) for v in latest.values())  # scalars only
     assert latest["path_length_m"] == pytest.approx(11.0)
     assert latest["db_bytes"] == 1234
-    assert latest["mode"] == "localize"
+    assert latest["mode"] == "mapping"
     assert latest["calibration_placeholder"] is True
     # The graph never changed after it arrived, so republishing it must not have reset its age (it was last
     # changed when it first arrived, well before this tick; a reset on every message would read ~0.1 s).
@@ -510,7 +510,8 @@ def test_n14_map_stats_publishes_scalar_json_and_replays_it_to_a_late_subscriber
     assert qos == [("map_stats", ReliabilityPolicy.RELIABLE, DurabilityPolicy.TRANSIENT_LOCAL, 1)]
 
     # Only the light topics: subscribing to cloud_map or mapData makes rtabmap assemble and send the whole map.
-    assert _subscribers(h, "/rtabmap/mapGraph") == {"map_stats"} and _subscribers(h, "/rtabmap/info") == {"map_stats"}
+    assert _subscribers(h, "/rtabmap/mapGraph") == {"map_stats"}
+    assert _subscribers(h, "/rtabmap/info") == set()  # closures come from the graph's links, not from Info
     assert _subscribers(h, "/rtabmap/cloud_map") == set() and _subscribers(h, "/rtabmap/mapData") == set()
     assert proc.poll() is None, _output(proc)
 
