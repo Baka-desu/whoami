@@ -78,11 +78,14 @@ def _setup(context, *args, **kwargs):
     plan = plan_mode(mode, db, fresh=_to_bool(arg("fresh_db"), "fresh_db"))  # fails fast
 
     cfg = os.path.join(get_package_share_directory("ugv_localization"), "config")
-    # timing:=laptop selects *_laptop.yaml timing profiles (slow GPU laptop: DA3 depth ~1 Hz, ~0.7 s old).
+    # timing:=laptop layers the *_laptop.yaml overlays on the product profiles (slow GPU laptop: DA3 depth ~1 Hz,
+    # ~0.7 s old). An overlay holds only the keys it changes.
     timing = arg("timing")
     if timing not in ("default", "laptop"):
         raise RuntimeError(f"timing must be default or laptop, got {timing!r}")
-    suffix = "" if timing == "default" else "_laptop"
+
+    def overlay(name: str) -> str:
+        return os.path.join(cfg, f"{name}_laptop.yaml") if timing == "laptop" else ""
     image_topic = arg("image_topic")
     info_topic = arg("camera_info_topic")
     depth_input = arg("depth_input")
@@ -124,7 +127,7 @@ def _setup(context, *args, **kwargs):
             name="rgbd_sync",
             namespace="rtabmap",
             output="screen",
-            parameters=[os.path.join(cfg, f"rgbd_sync{suffix}.yaml"), common],
+            parameters=[os.path.join(cfg, "rgbd_sync.yaml"), *filter(None, [overlay("rgbd_sync")]), common],
             remappings=[
                 ("rgb/image", image_topic),
                 ("depth/image", depth_topic),
@@ -154,7 +157,8 @@ def _setup(context, *args, **kwargs):
             parameters=[
                 {
                     **common,
-                    "profile_path": os.path.join(cfg, f"odom_select{suffix}.yaml"),
+                    "profile_path": os.path.join(cfg, "odom_select.yaml"),
+                    "profile_overlay_path": overlay("odom_select"),
                     "odom_source": policy.value,
                 }
             ],
@@ -219,7 +223,8 @@ def _setup(context, *args, **kwargs):
             parameters=[
                 {
                     **common,
-                    "profile_path": os.path.join(cfg, f"pose_validity{suffix}.yaml"),
+                    "profile_path": os.path.join(cfg, "pose_validity.yaml"),
+                    "profile_overlay_path": overlay("pose_validity"),
                     "mode": plan.mode.value,
                 }
             ],

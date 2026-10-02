@@ -27,7 +27,7 @@ from enum import Enum
 from pathlib import Path
 
 from ugv_localization.common.checks import NS_PER_S, require_positive_float, require_stamp
-from ugv_localization.common.yamlio import load_yaml_mapping, require_exact_keys
+from ugv_localization.common.yamlio import load_yaml_profile, require_exact_keys
 from ugv_localization.odom.gate import OdomGateProfile, TfEdge, odom_gate_profile_from_mapping
 
 _COV_DIAG = (0, 7, 14, 21, 28, 35)
@@ -104,8 +104,8 @@ class SelectResult:
     dropped: str | None  # inactive_source | visual_lost | stale_stamp
 
 
-def load_odom_select_config(path: str | Path) -> OdomSelectConfig:
-    data = load_yaml_mapping(path)
+def load_odom_select_config(path: str | Path, overlay_path: str | Path | None = None) -> OdomSelectConfig:
+    data = load_yaml_profile(path, overlay_path)
     where = str(path)
     require_exact_keys(data, {"wheel_gate", "visual_gate", "selector"}, where=where)
     sel = data["selector"]

@@ -10,12 +10,14 @@ from ugv_localization.common.checks import (
     wrap_angle,
     yaw_from_quaternion,
 )
-from ugv_localization.common.yamlio import load_yaml_mapping, require_exact_keys
+from ugv_localization.common.yamlio import load_yaml_mapping, load_yaml_profile, merge_overlay, require_exact_keys
 
 __all__ = [
     "NS_PER_S",
     "age_s",
     "load_yaml_mapping",
+    "load_yaml_profile",
+    "merge_overlay",
     "require_bool",
     "require_exact_keys",
     "require_finite",
