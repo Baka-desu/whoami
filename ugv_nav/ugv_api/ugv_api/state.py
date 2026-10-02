@@ -21,7 +21,7 @@ TF_MAP_BASE = "tf_map_base"  # TF map->base_link, stamp = transform stamp; value
 NAV2_HEARTBEAT = "nav2_heartbeat"  # /ugv/nav2_heartbeat
 NAV2_STATUS = "nav2_status"  # /ugv/nav2_status
 E_STOP = "e_stop"  # /ugv/e_stop as observed on the graph (any publisher)
-SAFETY_STATUS = "safety_status"  # /ugv/safety_status (Dev 5 arbiter, not implemented yet)
+SAFETY_STATUS = "safety_status"  # /ugv/safety_status (Dev 5 arbiter, ugv_safety safety_arbiter; latched, on change)
 CMD_VEL = "cmd_vel"  # /cmd_vel, the final command (read only)
 
 

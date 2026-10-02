@@ -1,7 +1,7 @@
 """architecture.md §12 timeout table, evaluated for display and for the goal gate. Pure Python.
 
-This is the operator's view, not the safety authority: the Dev 5 arbiter (ugv_safety, not implemented)
-is what zeros /cmd_vel. Every watch fails closed: an input never received, or older than its limit,
+This is the operator's view, not the safety authority: the Dev 5 arbiter (ugv_safety safety_arbiter) is
+what zeros /cmd_vel. Every watch fails closed: an input never received, or older than its limit,
 is a fail, exactly like an explicit bad value.
 """
 
