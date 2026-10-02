@@ -14,6 +14,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+import mapread
 from ugv_api import mapcodec as codec
 from ugv_api import mapsources as ms
 from ugv_api.app import create_app
@@ -117,7 +118,7 @@ def test_trajectory_source_is_an_n_by_7_float32_array_in_pose_order():
     out = ms.trajectory_source(rows)
     assert out.dtype == np.float32 and out.shape == (3, 7) and out.flags.c_contiguous
     assert out.tolist() == [[float(v) for v in r] for r in rows]
-    decoded = codec.decode_trajectory(codec.encode_trajectory(out, epoch=EPOCH, seq=SEQ, stamp_s=STAMP))
+    decoded = mapread.trajectory(codec.encode_trajectory(out, epoch=EPOCH, seq=SEQ, stamp_s=STAMP))
     assert decoded["count"] == 3 and decoded["length_m"] == pytest.approx(17.0)
 
 
@@ -167,7 +168,7 @@ def test_grid_source_is_the_shape_encode_grid_takes_with_the_yaw_from_the_origin
     assert src["cells"].flags.writeable is False
     assert src["resolution"] == 0.25 and src["origin_xy"] == (-0.5, 1.0)
     assert src["origin_yaw"] == pytest.approx(0.5)
-    out = codec.decode_grid(codec.encode_grid(epoch=EPOCH, seq=SEQ, stamp_s=STAMP, **src))
+    out = mapread.grid(codec.encode_grid(epoch=EPOCH, seq=SEQ, stamp_s=STAMP, **src))
     assert out["origin_yaw"] == pytest.approx(0.5, abs=1e-6) and out["cells"].tolist() == src["cells"].tolist()
 
 

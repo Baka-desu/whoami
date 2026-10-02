@@ -1,7 +1,8 @@
-"""Binary encoders (and test-only decoders) for the 3D map layers the gateway sends to the web viewer.
+"""Binary encoders for the 3D map layers the gateway sends to the web viewer.
 
-Pure numpy + struct, no ROS imports. The byte layouts are the "Binary format v1" contract shared with the
-viewer's TypeScript decoder (same spec, same golden files in test/fixtures/map/). Everything is
+Pure numpy + struct, no ROS imports. The byte layouts are the "Binary format v1" contract with the viewer's
+TypeScript decoder, the only decoder (ui/src/map/codec.ts): the golden files in test/fixtures/map/ pin this
+encoder's bytes here and that decoder's reading of them there. Everything is
 little-endian:
 
     prelude, 24 bytes, every layer:  char[4] magic | u16 format = 1 | u16 header_bytes | u32 epoch |
@@ -58,9 +59,6 @@ __all__ = [
     "encode_cloud",
     "encode_trajectory",
     "encode_grid",
-    "decode_cloud",
-    "decode_trajectory",
-    "decode_grid",
 ]
 
 
@@ -83,25 +81,6 @@ def _origin(origin_xy: Sequence[float]) -> tuple[float, float]:
     if not (math.isfinite(ox) and math.isfinite(oy)):
         raise ValueError("origin_xy must be finite")
     return ox, oy
-
-
-def _decode_prelude(b: bytes, magic: bytes, header_bytes: int, layer: str) -> dict:
-    """Validate magic / format / header_bytes and return the prelude fields. Length is checked by the caller."""
-    if len(b) < header_bytes:
-        raise ValueError(f"{layer}: {len(b)} bytes is shorter than the {header_bytes}-byte header")
-    got_magic, fmt, got_header, epoch, seq, stamp_s = _PRELUDE.unpack_from(b, 0)
-    if got_magic != magic:
-        raise ValueError(f"{layer}: bad magic {got_magic!r}, expected {magic!r}")
-    if fmt != FORMAT:
-        raise ValueError(f"{layer}: unsupported format {fmt}, expected {FORMAT}")
-    if got_header != header_bytes:
-        raise ValueError(f"{layer}: header_bytes {got_header}, expected {header_bytes}")
-    return {"epoch": epoch, "seq": seq, "stamp_s": stamp_s}
-
-
-def _require_length(b: bytes, expected: int, layer: str) -> None:
-    if len(b) != expected:
-        raise ValueError(f"{layer}: {len(b)} bytes, expected exactly {expected}")
 
 
 # ------------------------------------------------------------------------------------------- cloud
@@ -256,26 +235,6 @@ def encode_cloud(
     return b"".join(out)
 
 
-def decode_cloud(b: bytes) -> dict:
-    d = _decode_prelude(b, MAGIC_CLOUD, CLOUD_HEADER_BYTES, "cloud")
-    count, source_count, spacing_m, flags, *bbox = _CLOUD.unpack_from(b, PRELUDE_BYTES)
-    has_rgb = bool(flags & FLAG_RGB)
-    _require_length(b, CLOUD_HEADER_BYTES + (15 if has_rgb else 12) * count, "cloud")
-    xyz_end = CLOUD_HEADER_BYTES + 12 * count
-    d.update(
-        count=count,
-        source_count=source_count,
-        spacing_m=spacing_m,
-        flags=flags,
-        has_rgb=has_rgb,
-        bbox_min=np.array(bbox[:3], dtype=np.float32),
-        bbox_max=np.array(bbox[3:], dtype=np.float32),
-        xyz=np.frombuffer(b, dtype="<f4", count=3 * count, offset=CLOUD_HEADER_BYTES).reshape(count, 3),
-        rgb=np.frombuffer(b, dtype=np.uint8, count=3 * count, offset=xyz_end).reshape(count, 3) if has_rgb else None,
-    )
-    return d
-
-
 # --------------------------------------------------------------------------------------- trajectory
 
 
@@ -297,18 +256,6 @@ def encode_trajectory(poses: np.ndarray, *, epoch: int, seq: int, stamp_s: float
             np.ascontiguousarray(p, dtype="<f4").tobytes(),
         )
     )
-
-
-def decode_trajectory(b: bytes) -> dict:
-    d = _decode_prelude(b, MAGIC_TRAJECTORY, TRAJECTORY_HEADER_BYTES, "trajectory")
-    count, length_m = _TRAJECTORY.unpack_from(b, PRELUDE_BYTES)
-    _require_length(b, TRAJECTORY_HEADER_BYTES + 28 * count, "trajectory")
-    d.update(
-        count=count,
-        length_m=length_m,
-        poses=np.frombuffer(b, dtype="<f4", count=7 * count, offset=TRAJECTORY_HEADER_BYTES).reshape(count, 7),
-    )
-    return d
 
 
 # --------------------------------------------------------------------------------------- cost grid
@@ -341,19 +288,3 @@ def encode_grid(
             np.ascontiguousarray(a).tobytes(),
         )
     )
-
-
-def decode_grid(b: bytes) -> dict:
-    d = _decode_prelude(b, MAGIC_GRID, GRID_HEADER_BYTES, "grid")
-    width, height, resolution_m, origin_x, origin_y, origin_yaw = _GRID.unpack_from(b, PRELUDE_BYTES)
-    _require_length(b, GRID_HEADER_BYTES + width * height, "grid")
-    d.update(
-        width=width,
-        height=height,
-        resolution_m=resolution_m,
-        origin_x=origin_x,
-        origin_y=origin_y,
-        origin_yaw=origin_yaw,
-        cells=np.frombuffer(b, dtype=np.int8, count=width * height, offset=GRID_HEADER_BYTES).reshape(height, width),
-    )
-    return d

@@ -29,6 +29,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+import mapread
 from ugv_api import mapcodec as mc
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "map"
@@ -132,7 +133,7 @@ def test_epoch_alone_changes_bytes_8_to_11():
 
 def test_epoch_and_seq_wrap_to_u32():
     b = mc.encode_trajectory(TRAJ_POSES, epoch=2**32 + 9, seq=-1 & 0xFFFFFFFF, stamp_s=0.0)
-    d = mc.decode_trajectory(b)
+    d = mapread.trajectory(b)
     assert (d["epoch"], d["seq"]) == (9, 0xFFFFFFFF)
 
 
@@ -142,7 +143,7 @@ def test_epoch_and_seq_wrap_to_u32():
 def test_cloud_roundtrip_with_rgb_has_spec_length():
     b = mc.encode_cloud(CLOUD_XYZ, CLOUD_RGB, budget=100, spacing_m=0.25, **KW)
     assert len(b) == 64 + 15 * 8
-    d = mc.decode_cloud(b)
+    d = mapread.cloud(b)
     assert (d["epoch"], d["seq"], d["stamp_s"]) == (7, 3, 1234.5)
     assert (d["count"], d["source_count"], d["spacing_m"], d["flags"]) == (8, 8, 0.25, 1)
     assert d["has_rgb"] is True
@@ -155,7 +156,7 @@ def test_cloud_roundtrip_with_rgb_has_spec_length():
 def test_cloud_without_rgb_clears_flag_bit0_and_is_shorter():
     b = mc.encode_cloud(CLOUD_XYZ, None, budget=100, spacing_m=0.25, **KW)
     assert len(b) == 64 + 12 * 8
-    d = mc.decode_cloud(b)
+    d = mapread.cloud(b)
     assert d["flags"] & 1 == 0 and d["has_rgb"] is False and d["rgb"] is None
     np.testing.assert_array_equal(d["xyz"], CLOUD_XYZ)
 
@@ -173,7 +174,7 @@ def test_cloud_header_offsets():
 def test_cloud_drops_non_finite_points_and_reports_finite_source_count():
     xyz = np.array([[1, 2, 3], [NAN, 0, 0], [0, np.inf, 0], [0, 0, -np.inf], [4, 5, 6]], dtype=np.float32)
     rgb = np.array([[1, 1, 1], [2, 2, 2], [3, 3, 3], [4, 4, 4], [5, 5, 5]], dtype=np.uint8)
-    d = mc.decode_cloud(mc.encode_cloud(xyz, rgb, budget=100, spacing_m=0.1, **KW))
+    d = mapread.cloud(mc.encode_cloud(xyz, rgb, budget=100, spacing_m=0.1, **KW))
     assert (d["count"], d["source_count"]) == (2, 2)
     np.testing.assert_array_equal(d["xyz"], np.array([[1, 2, 3], [4, 5, 6]], np.float32))
     np.testing.assert_array_equal(d["rgb"], np.array([[1, 1, 1], [5, 5, 5]], np.uint8))
@@ -182,7 +183,7 @@ def test_cloud_drops_non_finite_points_and_reports_finite_source_count():
 def test_cloud_budget_caps_count_and_source_count_is_pre_selection():
     xyz, rgb = random_cloud(2000)
     b = mc.encode_cloud(xyz, rgb, budget=300, spacing_m=1.0, **KW)
-    d = mc.decode_cloud(b)
+    d = mapread.cloud(b)
     assert d["count"] <= 300 and len(b) == 64 + 15 * d["count"]
     assert d["source_count"] == 2000
     assert d["spacing_m"] == 1.0
@@ -190,7 +191,7 @@ def test_cloud_budget_caps_count_and_source_count_is_pre_selection():
 
 def test_cloud_selection_is_a_subset_that_keeps_each_points_colour():
     xyz, rgb = random_cloud(2000)
-    d = mc.decode_cloud(mc.encode_cloud(xyz, rgb, budget=300, spacing_m=1.0, **KW))
+    d = mapread.cloud(mc.encode_cloud(xyz, rgb, budget=300, spacing_m=1.0, **KW))
     assert 0 < d["count"] <= 300
     colour_of = {tuple(p): tuple(c) for p, c in zip(xyz.tolist(), rgb.tolist())}
     for p, c in zip(d["xyz"].tolist(), d["rgb"].tolist()):
@@ -204,8 +205,8 @@ def test_cloud_selection_is_deterministic_and_independent_of_point_order():
     assert mc.encode_cloud(xyz, rgb, **kw) == first
     for seed in (5, 6):
         perm = np.random.default_rng(seed).permutation(len(xyz))
-        shuffled = mc.decode_cloud(mc.encode_cloud(xyz[perm], rgb[perm], **kw))
-        original = mc.decode_cloud(first)
+        shuffled = mapread.cloud(mc.encode_cloud(xyz[perm], rgb[perm], **kw))
+        original = mapread.cloud(first)
         assert rows(shuffled["xyz"]) == rows(original["xyz"])
         assert shuffled["count"] == original["count"]
 
@@ -216,12 +217,12 @@ def test_cloud_selection_keeps_whole_voxels_by_hash_not_by_input_position():
     g = np.arange(400, dtype=np.float32)
     voxel_xyz = np.stack([g, np.zeros_like(g), np.zeros_like(g)], axis=1) + 0.25
     xyz = np.concatenate([voxel_xyz, voxel_xyz + np.float32(0.5)])
-    d = mc.decode_cloud(mc.encode_cloud(xyz, None, budget=100, spacing_m=1.0, **KW))
+    d = mapread.cloud(mc.encode_cloud(xyz, None, budget=100, spacing_m=1.0, **KW))
     assert d["count"] == 100
     cells = np.floor(d["xyz"][:, 0]).astype(int)
     assert np.unique(cells).size == 50
     # reversing the input must not change which voxels were kept
-    d2 = mc.decode_cloud(mc.encode_cloud(xyz[::-1], None, budget=100, spacing_m=1.0, **KW))
+    d2 = mapread.cloud(mc.encode_cloud(xyz[::-1], None, budget=100, spacing_m=1.0, **KW))
     assert set(cells.tolist()) == set(np.floor(d2["xyz"][:, 0]).astype(int).tolist())
 
 
@@ -230,24 +231,24 @@ def test_cloud_selection_cutting_through_one_voxel_ignores_input_order():
     xyz = rng.uniform(1.0, 9.0, size=(500, 3)).astype(np.float32)  # one 100 m voxel holds every point
     rgb = rng.integers(0, 256, size=(500, 3), dtype=np.uint8)
     kw = {"budget": 120, "spacing_m": 100.0, **KW}
-    want = mc.decode_cloud(mc.encode_cloud(xyz, rgb, **kw))
+    want = mapread.cloud(mc.encode_cloud(xyz, rgb, **kw))
     assert want["count"] == 120
     for seed in (1, 2, 3):
         perm = np.random.default_rng(seed).permutation(500)
-        got = mc.decode_cloud(mc.encode_cloud(xyz[perm], rgb[perm], **kw))
+        got = mapread.cloud(mc.encode_cloud(xyz[perm], rgb[perm], **kw))
         assert rows(got["xyz"]) == rows(want["xyz"])
 
 
 def test_cloud_budget_larger_than_cloud_keeps_everything_in_input_order():
     xyz, rgb = random_cloud(50)
-    d = mc.decode_cloud(mc.encode_cloud(xyz, rgb, budget=50, spacing_m=1.0, **KW))
+    d = mapread.cloud(mc.encode_cloud(xyz, rgb, budget=50, spacing_m=1.0, **KW))
     np.testing.assert_array_equal(d["xyz"], xyz)
     np.testing.assert_array_equal(d["rgb"], rgb)
 
 
 def test_cloud_bbox_is_over_selected_points():
     xyz, _ = random_cloud(2000)
-    d = mc.decode_cloud(mc.encode_cloud(xyz, None, budget=100, spacing_m=2.0, **KW))
+    d = mapread.cloud(mc.encode_cloud(xyz, None, budget=100, spacing_m=2.0, **KW))
     np.testing.assert_array_equal(d["bbox_min"], d["xyz"].min(axis=0))
     np.testing.assert_array_equal(d["bbox_max"], d["xyz"].max(axis=0))
 
@@ -258,7 +259,7 @@ def test_cloud_empty_has_zero_bbox_and_header_only_length(rgb_given):
     rgb = np.zeros((0, 3), np.uint8) if rgb_given else None
     b = mc.encode_cloud(xyz, rgb, budget=10, spacing_m=0.1, **KW)
     assert len(b) == 64
-    d = mc.decode_cloud(b)
+    d = mapread.cloud(b)
     assert d["count"] == d["source_count"] == 0
     assert not d["bbox_min"].any() and not d["bbox_max"].any()
     assert d["has_rgb"] is rgb_given
@@ -266,12 +267,12 @@ def test_cloud_empty_has_zero_bbox_and_header_only_length(rgb_given):
 
 def test_cloud_all_non_finite_is_empty():
     xyz = np.full((4, 3), NAN, np.float32)
-    d = mc.decode_cloud(mc.encode_cloud(xyz, None, budget=10, spacing_m=0.1, **KW))
+    d = mapread.cloud(mc.encode_cloud(xyz, None, budget=10, spacing_m=0.1, **KW))
     assert d["count"] == d["source_count"] == 0
 
 
 def test_cloud_budget_zero_selects_nothing():
-    d = mc.decode_cloud(mc.encode_cloud(CLOUD_XYZ, CLOUD_RGB, budget=0, spacing_m=0.25, **KW))
+    d = mapread.cloud(mc.encode_cloud(CLOUD_XYZ, CLOUD_RGB, budget=0, spacing_m=0.25, **KW))
     assert d["count"] == 0 and d["source_count"] == 8
 
 
@@ -389,7 +390,7 @@ def test_trajectory_roundtrip_has_spec_length_and_3d_length():
     b = mc.encode_trajectory(TRAJ_POSES, **KW)
     assert len(b) == 32 + 28 * 3
     assert struct.unpack_from("<If", b, 24) == (3, 17.0)
-    d = mc.decode_trajectory(b)
+    d = mapread.trajectory(b)
     assert (d["epoch"], d["seq"], d["stamp_s"], d["count"], d["length_m"]) == (7, 3, 1234.5, 3, 17.0)
     np.testing.assert_array_equal(d["poses"], TRAJ_POSES)
 
@@ -398,19 +399,19 @@ def test_trajectory_roundtrip_has_spec_length_and_3d_length():
 def test_trajectory_empty(poses):
     b = mc.encode_trajectory(poses, **KW)
     assert len(b) == 32
-    d = mc.decode_trajectory(b)
+    d = mapread.trajectory(b)
     assert d["count"] == 0 and d["length_m"] == 0.0 and d["poses"].shape == (0, 7)
 
 
 def test_trajectory_single_pose_has_zero_length():
-    d = mc.decode_trajectory(mc.encode_trajectory(TRAJ_POSES[:1], **KW))
+    d = mapread.trajectory(mc.encode_trajectory(TRAJ_POSES[:1], **KW))
     assert d["count"] == 1 and d["length_m"] == 0.0
 
 
 def test_trajectory_drops_poses_with_non_finite_values():
     poses = TRAJ_POSES.copy()
     poses[1, 3] = NAN
-    d = mc.decode_trajectory(mc.encode_trajectory(poses, **KW))
+    d = mapread.trajectory(mc.encode_trajectory(poses, **KW))
     assert d["count"] == 2
     np.testing.assert_array_equal(d["poses"], TRAJ_POSES[[0, 2]])
     assert d["length_m"] == pytest.approx(float(np.linalg.norm(TRAJ_POSES[2, :3])), rel=1e-6)
@@ -429,7 +430,7 @@ def test_grid_roundtrip_has_spec_length():
     assert len(b) == 48 + 12
     assert struct.unpack_from("<IIffff", b, 24) == (4, 3, 0.25, -0.5, 1.0, 0.5)
     assert struct.unpack_from("<4b", b, 48) == (-1, 0, 10, 20)  # row 0 first
-    d = mc.decode_grid(b)
+    d = mapread.grid(b)
     assert (d["epoch"], d["seq"], d["stamp_s"]) == (7, 3, 1234.5)
     assert (d["width"], d["height"], d["resolution_m"]) == (4, 3, 0.25)
     assert (d["origin_x"], d["origin_y"], d["origin_yaw"]) == (-0.5, 1.0, 0.5)
@@ -439,62 +440,19 @@ def test_grid_roundtrip_has_spec_length():
 
 def test_grid_clamps_out_of_range_values_and_accepts_wider_dtypes():
     cells = np.array([[-5, -1, 0, 100, 101, 127]], dtype=np.int16)
-    d = mc.decode_grid(mc.encode_grid(cells, resolution=0.1, origin_xy=(0, 0), origin_yaw=0.0, **KW))
+    d = mapread.grid(mc.encode_grid(cells, resolution=0.1, origin_xy=(0, 0), origin_yaw=0.0, **KW))
     assert d["cells"][0].tolist() == [-1, -1, 0, 100, 100, 100]
-    d = mc.decode_grid(mc.encode_grid(np.array([[0, 100, 200]], np.uint8), resolution=0.1, origin_xy=(0, 0), origin_yaw=0.0, **KW))
+    d = mapread.grid(mc.encode_grid(np.array([[0, 100, 200]], np.uint8), resolution=0.1, origin_xy=(0, 0), origin_yaw=0.0, **KW))
     assert d["cells"][0].tolist() == [0, 100, 100]
 
 
 def test_grid_empty_and_bad_input():
     b = mc.encode_grid(np.zeros((0, 0), np.int8), resolution=0.1, origin_xy=(0, 0), origin_yaw=0.0, **KW)
-    assert len(b) == 48 and mc.decode_grid(b)["cells"].size == 0
+    assert len(b) == 48 and mapread.grid(b)["cells"].size == 0
     with pytest.raises(ValueError):
         mc.encode_grid(np.zeros(5, np.int8), resolution=0.1, origin_xy=(0, 0), origin_yaw=0.0, **KW)
     with pytest.raises(ValueError):
         mc.encode_grid(np.zeros((2, 2), np.float32), resolution=0.1, origin_xy=(0, 0), origin_yaw=0.0, **KW)
-
-
-# ------------------------------------------------------------------------------ decoder strictness
-
-LAYERS = {
-    "cloud.bin": mc.decode_cloud,
-    "trajectory.bin": mc.decode_trajectory,
-    "grid.bin": mc.decode_grid,
-}
-MAGICS = {"cloud.bin": b"UGVC", "trajectory.bin": b"UGVT", "grid.bin": b"UGVG"}
-
-
-@pytest.mark.parametrize("name", GOLDEN_NAMES)
-def test_decoders_reject_wrong_magic_format_and_length(name):
-    good = build_golden()[name]
-    decode = LAYERS[name]
-    decode(good)  # sanity: the unmodified bytes decode
-    assert good[:4] == MAGICS[name]
-    with pytest.raises(ValueError):
-        decode(b"XXXX" + good[4:])
-    with pytest.raises(ValueError):
-        decode(good[:4] + struct.pack("<H", 2) + good[6:])  # unknown format
-    with pytest.raises(ValueError):
-        decode(good[:4] + struct.pack("<H", 0) + good[6:])
-    with pytest.raises(ValueError):
-        decode(good[:6] + struct.pack("<H", 99) + good[8:])  # header_bytes does not match the layer
-    with pytest.raises(ValueError):
-        decode(good[:-1])
-    with pytest.raises(ValueError):
-        decode(good + b"\x00")
-    with pytest.raises(ValueError):
-        decode(good[:10])
-    with pytest.raises(ValueError):
-        decode(b"")
-
-
-def test_decoders_reject_another_layers_bytes():
-    golden = build_golden()
-    for name, decode in LAYERS.items():
-        for other, data in golden.items():
-            if other != name:
-                with pytest.raises(ValueError):
-                    decode(data)
 
 
 # -------------------------------------------------------------------------------- golden fixtures
@@ -505,40 +463,6 @@ def test_golden_fixture_is_byte_identical_to_a_fresh_encode(name):
     path = FIXTURES / name
     assert path.is_file(), f"{path} is missing; run: python3 test/test_mapcodec.py --write"
     assert path.read_bytes() == build_golden()[name]
-
-
-def test_golden_fixtures_decode_to_the_documented_values():
-    def read(name):
-        return (FIXTURES / name).read_bytes()
-
-    d = mc.decode_cloud(read("cloud.bin"))
-    assert len(read("cloud.bin")) == 184
-    assert (d["epoch"], d["seq"], d["stamp_s"], d["count"], d["source_count"], d["spacing_m"], d["flags"]) == (
-        7, 3, 1234.5, 8, 8, 0.25, 1,
-    )
-    assert d["bbox_min"].tolist() == [-1.5, -0.75, 0.0] and d["bbox_max"].tolist() == [1.0, 2.25, 3.0]
-    assert d["xyz"].tolist() == [
-        [0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [1.0, 1.0, 0.0],
-        [0.0, 0.0, 0.5], [1.0, 0.0, 0.5], [-1.5, 2.25, 3.0], [0.25, -0.75, 1.5],
-    ]  # fmt: skip
-    assert d["rgb"].tolist() == [
-        [255, 0, 0], [0, 255, 0], [0, 0, 255], [255, 255, 0],
-        [0, 255, 255], [255, 0, 255], [16, 32, 48], [250, 128, 7],
-    ]  # fmt: skip
-
-    d = mc.decode_trajectory(read("trajectory.bin"))
-    assert len(read("trajectory.bin")) == 116
-    assert (d["count"], d["length_m"]) == (3, 17.0)
-    assert d["poses"].tolist() == [
-        [0, 0, 0, 0, 0, 0, 1], [3, 4, 0, 0, 0, 1, 0], [3, 4, 12, 0.5, 0.5, 0.5, 0.5],
-    ]  # fmt: skip
-
-    d = mc.decode_grid(read("grid.bin"))
-    assert len(read("grid.bin")) == 60
-    assert (d["width"], d["height"], d["resolution_m"], d["origin_x"], d["origin_y"], d["origin_yaw"]) == (
-        4, 3, 0.25, -0.5, 1.0, 0.5,
-    )
-    assert d["cells"].tolist() == [[-1, 0, 10, 20], [30, 40, 50, 60], [70, 80, 90, 100]]
 
 
 def test_fixtures_are_marked_binary_for_git():

@@ -21,6 +21,7 @@ uvicorn = pytest.importorskip("uvicorn")
 
 from fastapi.testclient import TestClient  # noqa: E402
 
+import mapread  # noqa: E402
 from ugv_api import mapcodec as codec  # noqa: E402
 from ugv_api import state as k  # noqa: E402
 from ugv_api.app import create_app  # noqa: E402
@@ -166,7 +167,7 @@ def get_binary(rig: Rig, layer: str):
 def test_cloud_decodes_with_colour_and_the_store_epoch_seq_and_stamp(rig):
     src = cloud_source(6)
     rig.maps.put("cloud", src, 42.5)
-    d = codec.decode_cloud(get_binary(rig, "cloud").content)
+    d = mapread.cloud(get_binary(rig, "cloud").content)
     assert (d["epoch"], d["seq"], d["stamp_s"]) == (1234, 1, 42.5)
     assert d["count"] == 6 and d["source_count"] == 6 and d["has_rgb"]
     np.testing.assert_array_equal(d["xyz"][:, 0], np.arange(6) * 0.5)
@@ -177,14 +178,14 @@ def test_cloud_decodes_with_colour_and_the_store_epoch_seq_and_stamp(rig):
 
 def test_cloud_without_a_colour_field_has_no_rgb_block(rig):
     rig.maps.put("cloud", cloud_source(4, rgb=False), 1.0)
-    d = codec.decode_cloud(get_binary(rig, "cloud").content)
+    d = mapread.cloud(get_binary(rig, "cloud").content)
     assert d["count"] == 4 and not d["has_rgb"]
 
 
 def test_cloud_is_cut_to_the_configured_budget_and_spacing():
     rig = Rig(MapStore(), cloud_point_budget=4, cloud_spacing_m=0.2)
     rig.maps.put("cloud", cloud_source(6), 1.0)
-    d = codec.decode_cloud(get_binary(rig, "cloud").content)
+    d = mapread.cloud(get_binary(rig, "cloud").content)
     assert d["count"] == 4 and d["source_count"] == 6
     assert d["spacing_m"] == pytest.approx(0.2)
 
@@ -192,26 +193,26 @@ def test_cloud_is_cut_to_the_configured_budget_and_spacing():
 def test_live_cloud_has_no_colour_and_its_own_budget():
     rig = Rig(MapStore(epoch=9), cloud_point_budget=2)  # the map cloud's budget does not cut the live scan
     rig.maps.put("live", live_source(6), 7.0)
-    d = codec.decode_cloud(get_binary(rig, "live").content)
+    d = mapread.cloud(get_binary(rig, "live").content)
     assert (d["epoch"], d["seq"], d["stamp_s"]) == (9, 1, 7.0)
     assert d["count"] == 6 and d["source_count"] == 6 and not d["has_rgb"]
     np.testing.assert_array_equal(d["xyz"], live_source(6)["xyz"])
     cut = Rig(MapStore(), live_point_budget=4)  # Dev 1's cloud is full resolution: the live budget cuts it
     cut.maps.put("live", live_source(6), 7.0)
-    d = codec.decode_cloud(get_binary(cut, "live").content)
+    d = mapread.cloud(get_binary(cut, "live").content)
     assert d["count"] == 4 and d["source_count"] == 6
 
 
 def test_trajectory_decodes(rig):
     rig.maps.put("trajectory", trajectory_source(), 3.0)
-    d = codec.decode_trajectory(get_binary(rig, "trajectory").content)
+    d = mapread.trajectory(get_binary(rig, "trajectory").content)
     assert d["count"] == 3 and d["length_m"] == pytest.approx(17.0)
     np.testing.assert_array_equal(d["poses"], trajectory_source())
 
 
 def test_grid_decodes(rig):
     rig.maps.put("grid", grid_source(), 6.0)
-    d = codec.decode_grid(get_binary(rig, "grid").content)
+    d = mapread.grid(get_binary(rig, "grid").content)
     np.testing.assert_array_equal(d["cells"], grid_source()["cells"])
     assert (d["resolution_m"], d["origin_x"], d["origin_y"], d["origin_yaw"]) == (0.25, -0.5, 1.0, 0.5)
 
@@ -228,7 +229,7 @@ def test_a_source_the_codec_rejects_is_a_500_problem_and_does_not_poison_the_lay
     assert r.status_code == 500 and r.headers["content-type"].startswith(PROBLEM)
     assert "(N, 7)" in r.json()["detail"]
     rig.maps.put("trajectory", trajectory_source(), 2.0)
-    assert codec.decode_trajectory(rig.get("/map/trajectory").content)["count"] == 3
+    assert mapread.trajectory(rig.get("/map/trajectory").content)["count"] == 3
 
 
 # ------------------------------------------------------------------------- seq, memoisation, status
@@ -245,7 +246,7 @@ def test_the_body_header_agrees_with_the_status(rig):
     for i in range(3):
         rig.maps.put("grid", grid_source(), float(i))
     status = rig.get("/map").json()
-    d = codec.decode_grid(rig.get("/map/grid").content)
+    d = mapread.grid(rig.get("/map/grid").content)
     assert (d["epoch"], d["seq"]) == (status["epoch"], status["seq"]["grid"]) == (1234, 3)
 
 
@@ -264,7 +265,7 @@ def test_repeated_gets_encode_once_and_a_new_put_encodes_again(rig, monkeypatch)
     rig.maps.put("trajectory", trajectory_source(), 2.0)
     again = [rig.get("/map/trajectory").content for _ in range(2)]
     assert calls == [1, 2] and again[0] == again[1]
-    assert codec.decode_trajectory(again[0])["seq"] == 2
+    assert mapread.trajectory(again[0])["seq"] == 2
 
 
 def test_the_status_is_cheap_and_does_not_encode(rig, monkeypatch):

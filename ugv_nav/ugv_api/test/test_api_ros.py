@@ -34,6 +34,7 @@ from sensor_msgs.msg import CameraInfo, Image, PointCloud2, PointField  # noqa: 
 from std_msgs.msg import Bool, String  # noqa: E402
 from tf2_ros import TransformBroadcaster  # noqa: E402
 
+import mapread  # noqa: E402
 from ugv_api import mapcodec as codec  # noqa: E402
 from ugv_api import ros_node  # noqa: E402
 from ugv_api.app import create_app  # noqa: E402
@@ -513,8 +514,8 @@ def test_cloud_and_trajectory_published_on_ros_come_out_of_http_decoded(graph):
     rows = [(0, 0, 0, 0, 0, 0, 1), (3, 4, 0, 0, 0, 1, 0), (3, 4, 12, 0.5, 0.5, 0.5, 0.5)]
 
     with watching(c):
-        cloud = codec.decode_cloud(_fetch(c, "/map/cloud").content)  # only a transient-local subscription gets it
-        traj = codec.decode_trajectory(
+        cloud = mapread.cloud(_fetch(c, "/map/cloud").content)  # only a transient-local subscription gets it
+        traj = mapread.trajectory(
             _fetch(c, "/map/trajectory", publish=lambda: pubs.path.publish(make_path(rows, pubs.now()))).content)
         status = _map_status(c)
 
@@ -533,7 +534,7 @@ def test_a_newer_cloud_replaces_the_older_one_and_never_changes_what_was_served(
     grey = np.full((3, 3), 128, dtype=np.uint8)
     def with_points(n):
         r = c.get("/map/cloud")
-        return r if r.status_code == 200 and codec.decode_cloud(r.content)["count"] == n else None
+        return r if r.status_code == 200 and mapread.cloud(r.content)["count"] == n else None
 
     with watching(c):
         assert _wait(lambda: _subscribed(node, [CLOUD]), timeout=8.0)  # a latched sample only reaches a live sub
@@ -543,8 +544,8 @@ def test_a_newer_cloud_replaces_the_older_one_and_never_changes_what_was_served(
         kept = a.content
         pubs.cloud.publish(make_rgb_cloud(second, grey, pubs.now()))
         b = _wait(lambda: with_points(3))
-    assert b is not None and np.array_equal(codec.decode_cloud(b.content)["xyz"], second)
-    assert np.array_equal(codec.decode_cloud(kept)["xyz"], first)  # the earlier body is untouched
+    assert b is not None and np.array_equal(mapread.cloud(b.content)["xyz"], second)
+    assert np.array_equal(mapread.cloud(kept)["xyz"], first)  # the earlier body is untouched
 
 
 def test_heavy_subscriptions_exist_only_while_a_client_is_watching(graph):
@@ -609,7 +610,7 @@ def test_a_latched_costmap_is_received_when_its_publisher_appears_after_the_subs
             pub = other.create_publisher(OccupancyGrid, GRID,
                                          QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
             pub.publish(make_grid(cells, 0.25, (-0.5, 1.0), other.get_clock().now().to_msg(), yaw=0.5))  # once
-            out = codec.decode_grid(_fetch(c, "/map/grid", timeout=12.0).content)
+            out = mapread.grid(_fetch(c, "/map/grid", timeout=12.0).content)
     assert out["cells"].tolist() == cells.tolist()
     assert out["resolution_m"] == pytest.approx(0.25) and (out["origin_x"], out["origin_y"]) == pytest.approx((-0.5, 1.0))
     assert out["origin_yaw"] == pytest.approx(0.5, abs=1e-6)
@@ -637,7 +638,7 @@ def test_live_layer_is_the_depth_cloud_in_the_map_frame(graph):
         pubs.depth_cloud.publish(make_xyz_cloud(cloud, pubs.now()))
 
     with watching(c):
-        live = codec.decode_cloud(_fetch(c, "/map/live", publish=publish).content)
+        live = mapread.cloud(_fetch(c, "/map/live", publish=publish).content)
     assert live["count"] == 4 and not live["has_rgb"]  # too near, too far and NaN are dropped
     assert np.allclose(live["xyz"], _expected_live_points(LIVE_IN_RANGE), atol=1e-4)
 
@@ -882,17 +883,17 @@ def test_layers_in_another_frame_are_refused_and_an_empty_frame_is_accepted(grap
         refused = _wait(lambda: (publish_odom_layers(), all(counts()[k] > before[k] for k in kinds))[1], timeout=12.0)
         assert refused, f"not every layer was refused: {before} -> {counts()}"
         # nothing of it was served as a map-frame layer
-        cloud = served("/map/cloud", codec.decode_cloud)
+        cloud = served("/map/cloud", mapread.cloud)
         assert cloud is None or 901.0 not in cloud["xyz"]
-        trajectory = served("/map/trajectory", codec.decode_trajectory)
+        trajectory = served("/map/trajectory", mapread.trajectory)
         assert trajectory is None or 901.0 not in trajectory["poses"][:, 0]
-        grid = served("/map/grid", codec.decode_grid)
+        grid = served("/map/grid", mapread.grid)
         assert grid is None or grid["resolution_m"] != pytest.approx(0.2)
 
         # a message with no frame at all is taken as the map frame (some publishers leave it empty)
         def publish_unframed():
             costmap.publish(make_grid(cells, 0.125, (0.0, 0.0), other.get_clock().now().to_msg(), frame=""))
-            grid = served("/map/grid", codec.decode_grid)
+            grid = served("/map/grid", mapread.grid)
             return grid is not None and grid["resolution_m"] == pytest.approx(0.125)
 
         assert _wait(publish_unframed, timeout=8.0), "a grid with an empty frame_id was refused"
@@ -911,7 +912,7 @@ def test_an_organised_cloud_with_padded_rows_is_refused(graph):
         pubs.cloud.publish(msg)
         assert _wait(lambda: gw.map_rejects.get("cloud", 0) > before)
         r = c.get("/map/cloud")
-    assert r.status_code != 200 or codec.decode_cloud(r.content)["source_count"] != 6
+    assert r.status_code != 200 or mapread.cloud(r.content)["source_count"] != 6
 
 
 def test_a_latched_arbiter_status_published_before_discovery_is_received(graph):
