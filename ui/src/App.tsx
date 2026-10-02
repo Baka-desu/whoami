@@ -10,7 +10,7 @@ import {
   parseView, slotOnError, slotOnProps, slotState, type MainView, type SlotFailure, type SlotState,
 } from './map/mapToggles'
 import { ApiError, api, isLive, subscribeTelemetry, type Mode, type Telemetry } from './source/api'
-import { useCameraSource } from './source/useCameraSource'
+import { noteRobotPose, useCameraSource } from './source/useCameraSource'
 
 const CLOCK_MS = 250 // re-check telemetry freshness at 4 Hz so a dead stream reads NO SIGNAL promptly
 
@@ -111,6 +111,14 @@ export default function App() {
 
   const live = isLive(telemetry, now)
   const safety = live ? telemetry.safety : undefined
+  const pose = live ? telemetry.pose : undefined
+  useEffect(() => {
+    if (pose?.available && pose.x !== null && pose.y !== null && pose.qx !== null && pose.qy !== null && pose.qz !== null && pose.qw !== null) {
+      noteRobotPose({ x: pose.x, y: pose.y, qx: pose.qx, qy: pose.qy, qz: pose.qz, qw: pose.qw })
+    } else {
+      noteRobotPose(null)
+    }
+  }, [pose])
   const gateReasons = safety ? safety.watches.filter((w) => !w.ok).map((w) => `${w.name}: ${w.reason}`) : []
 
   const run = async (fn: () => Promise<string>) => {

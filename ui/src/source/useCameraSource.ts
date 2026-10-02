@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { unavailableAnalyzer, type Analyzer } from '../analysis/analyzer'
 import { useFreshness } from '../analysis/freshness'
 import { RosPerception } from '../analysis/ros-analyzer'
+import type { RobotPose } from '../analysis/pathhold'
 import { openCamera } from './camera'
 import { connectRos, type CameraCalibration, type RosOptions } from './rosbridge'
 import {
@@ -14,6 +15,11 @@ const FRAME_INTERVAL_MS = 250
 // camera have no perception backend, so they stay unavailable rather than faked.
 const rosPerception = new RosPerception()
 export const analyzerFor = (src: SourceKind): Analyzer => (src === 'ros2' ? rosPerception : unavailableAnalyzer)
+
+// The camera path holds still until this pose moves. Pass null when the gateway pose is not live.
+export function noteRobotPose(pose: RobotPose | null): void {
+  rosPerception.setPose(pose)
+}
 
 // CameraInfo K scaled to the received image. null when the frame isn't the calibrated camera's.
 function scaledK(calib: CameraCalibration | null, frameId: string, w: number, h: number): Intrinsics | null {

@@ -106,6 +106,18 @@ describe('RosPerception', () => {
     expect((await p.analyze(fakeFrame, meta()))!.meta.stamp).toBe(2000)
   })
 
+  it('keeps the drawn path while the robot pose has not moved', async () => {
+    const p = new RosPerception()
+    p.setPose({ x: 0, y: 0, qx: 0, qy: 0, qz: 0, qw: 1 })
+    p.pushMask(mask({ stampMs: 1000 }))
+    const first = (await p.analyze(fakeFrame, meta()))!
+    const blocked = mask({ stampMs: 2000 })
+    blocked.data.fill(2)
+    p.pushMask(blocked)
+    const held = (await p.analyze(fakeFrame, meta()))!
+    expect(held.path).toEqual(first.path)
+  })
+
   it('forgets everything on reset (a reconnect must not reuse an old mask)', async () => {
     const p = new RosPerception()
     p.pushMask(mask())
